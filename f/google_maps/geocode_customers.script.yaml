@@ -1,0 +1,10 @@
+summary: Batch geocode maintenance customer addresses using Google Maps Geocoding API
+description: Geocodes active maintenance customer addresses from the Customers
+  table that don't yet have lat/lng coordinates. Uses Google Maps Geocoding API
+  with rate limiting (10 req/sec). Updates Customers table with
+  latitude/longitude. Run after initial setup and periodically for new
+  customers.
+lock: '!inline f/google_maps/geocode_customers.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

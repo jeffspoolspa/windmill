@@ -1,0 +1,17 @@
+summary: servicebilling_check_status
+description: ''
+lock: '!inline f/service_billing/distinguished_script.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - batch_size
+    - dry_run
+  properties:
+    dry_run:
+      type: boolean
+      description: ''
+      default: false
+  required: []

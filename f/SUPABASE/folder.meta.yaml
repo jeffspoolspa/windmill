@@ -1,0 +1,6 @@
+summary: ''
+display_name: SUPABASE
+extra_perms:
+  u/carter: true
+owners:
+  - u/carter

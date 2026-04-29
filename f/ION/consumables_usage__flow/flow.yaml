@@ -1,0 +1,96 @@
+summary: extract_consumables_usage
+description: ''
+value:
+  modules:
+    - id: d
+      summary: extract_report
+      value:
+        type: script
+        input_transforms:
+          end_date:
+            type: javascript
+            expr: "new Date(Date.now() + 86400000).toLocaleDateString('en-CA', {timeZone:
+              'America/New_York'})"
+          ion:
+            type: static
+            value:
+              loginUrl: $var:f/ION/LOGIN_URL
+              password: $var:f/ION/PASSWORD
+              username: $var:f/ION/USERNAME
+          report_name:
+            type: javascript
+            expr: flow_input.report_name
+          start_date:
+            type: javascript
+            expr: "new Date().toLocaleDateString('en-CA', {timeZone: 'America/New_York'})"
+        hash: 7550efcd1c5fe08d
+        is_trigger: false
+        path: f/ION/consumables_usage/d
+      continue_on_error: false
+      retry:
+        constant:
+          attempts: 3
+          seconds: 2
+        exponential:
+          attempts: 0
+          multiplier: 1
+          random_factor: null
+          seconds: 0
+    - id: b
+      summary: extract_data_rows
+      value:
+        type: rawscript
+        content: '!inline extract_data_rows.py'
+        input_transforms:
+          raw_data:
+            type: javascript
+            expr: results.d.raw_table
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        lock: '!inline extract_data_rows.lock'
+        language: python3
+    - id: c
+      summary: upload_to_supabase_table
+      value:
+        type: rawscript
+        content: '!inline upload_to_supabase_table.py'
+        input_transforms:
+          result:
+            type: javascript
+            expr: results.b
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        lock: '!inline upload_to_supabase_table.lock'
+        language: python3
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - report_name
+  properties:
+    report_name:
+      type: string
+      description: ''
+      default: ''
+  required: []
+  x-windmill-dyn-select-code: |-
+    def main():
+        """Return report options for dropdown"""
+        return [
+            { "label": "Service Reports", "value": "Service Reports" },
+            { "label": "Consumables Report", "value": "Consumables Report" },
+            { "label": "Inventory Report", "value": "Inventory Report" },
+            { "label": "Customer Report", "value": "Customer Report" }
+        ]
+
+
+    def Report Name():
+        return [
+            { "label": "Foo", "value": "foo" },
+            { "label": "Bar", "value": "bar" }
+        ]
+  x-windmill-dyn-select-lang: python3
+tag: chromium

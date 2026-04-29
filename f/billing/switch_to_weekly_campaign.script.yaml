@@ -1,0 +1,7 @@
+summary: Switch to Weekly Campaign - Batch send
+description: Sends remaining pending customers. Safe to re-run — only picks up
+  status=pending.
+lock: '!inline f/billing/switch_to_weekly_campaign.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

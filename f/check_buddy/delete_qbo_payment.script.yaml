@@ -1,0 +1,6 @@
+summary: Delete (void) a QBO Payment by ID
+description: ''
+lock: '!inline f/check_buddy/delete_qbo_payment.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

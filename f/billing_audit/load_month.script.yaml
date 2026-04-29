@@ -1,0 +1,29 @@
+summary: Load maintenance invoices for a billing month from QBO into Supabase
+description: >-
+  Pulls all invoices on the last day of the given billing month from QBO,
+  classifies them as maintenance or service based on labor SKU, and inserts
+  maintenance invoices + line items into billing_audit schema.
+
+
+  Visit count is calculated as the SUM of all labor line item quantities
+  (excluding discounts like Chem Check Discount). Service frequency is derived
+  from visit count using these tiers: monthly (<=1.5), biweekly (1.5-3.5),
+  weekly (3.5-7), 2x_weekly (7-10.5), high_freq (>10.5). Special service types
+  (FR, OTC, GP) get their own frequency labels.
+
+
+  Rescue logic: chemical-only invoices from known maint customers are rescued
+  ONLY if every line item exists in billing_audit.consumable_items (a whitelist
+  built from confirmed maintenance invoices). After loading, new consumable
+  items from confirmed invoices are added to the whitelist.
+
+
+  Auto-flags customers as is_maintenance=true when they have labor SKU invoices.
+  Skips already-loaded months (idempotent).
+
+
+  Usage: pass billing_month as "YYYY-MM" (e.g. "2025-11")
+lock: '!inline f/billing_audit/load_month.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

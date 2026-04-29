@@ -1,0 +1,6 @@
+summary: Generic SMS sender via RingCentral (office-routed, lead-logged)
+description: Reusable SMS sender. Logs lead_activities via public.log_lead_activity RPC.
+lock: '!inline f/comms/send_sms.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

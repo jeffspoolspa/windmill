@@ -1,0 +1,10 @@
+summary: get_employees
+description: ''
+lock: '!inline f/webhooks/get_employees.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []

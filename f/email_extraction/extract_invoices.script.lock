@@ -1,0 +1,19 @@
+# workspace-dependencies-mode: manual
+# py: 3.12
+anyio==4.12.1
+certifi==2026.1.4
+cffi==2.0.0
+charset-normalizer==3.4.4
+cryptography==46.0.5
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.11
+pdfminer-six==20251230
+pdfplumber==0.11.9
+pillow==12.1.1
+psycopg2-binary==2.9.11
+pycparser==3.0
+pypdfium2==5.5.0
+typing-extensions==4.15.0
+wmill==1.639.0

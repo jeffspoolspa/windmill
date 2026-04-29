@@ -1,0 +1,8 @@
+summary: Validate and normalize service addresses (skips already done)
+description: Only processes active customers with valid addresses in service
+  area ZIPs that haven't been normalized yet (latitude IS NULL). Geocodes via
+  Google, writes canonical service address + lat/lng. 2000 per run.
+lock: '!inline f/google_maps/normalize_customer_addresses.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

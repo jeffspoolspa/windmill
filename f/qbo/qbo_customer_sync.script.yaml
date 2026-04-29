@@ -1,0 +1,7 @@
+summary: 'Fix silent sync failure: ON CONFLICT uses partial-index inference;
+  raise on error so Windmill surfaces failures'
+description: ''
+lock: '!inline f/qbo/qbo_customer_sync.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

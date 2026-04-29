@@ -1,0 +1,26 @@
+summary: check_reconciliation_status
+description: Check if QBO payments have been reconciled by searching for Deposit
+  entities that reference them via LinkedTxn.
+lock: '!inline f/check_buddy/check_reconciliation_status.script.lock'
+concurrency_key: qbo_api
+concurrency_time_window_s: 10
+concurrent_limit: 1
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    lookback_days:
+      type: integer
+      description: ''
+      default: 90
+    payment_ids:
+      type: array
+      description: ''
+      default: null
+      items:
+        type: string
+      originalType: string[]
+  required:
+    - payment_ids

@@ -1,0 +1,9 @@
+summary: Extract structured data from Allied Universal invoice PDFs
+description: Processes all pending PDF attachments in
+  email_extraction.email_attachments. Decodes base64 PDFs, extracts invoice
+  fields using pdfplumber + regex, writes results to
+  email_extraction.extraction_results, updates extraction_status.
+lock: '!inline f/email_extraction/extract_invoices.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

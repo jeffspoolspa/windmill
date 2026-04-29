@@ -1,0 +1,9 @@
+summary: check_bank_feed_cleared
+description: Checks if API-created QBO deposits have been cleared in the bank
+  feed using the TransactionList report. For cleared deposits, runs top-down
+  validation (line-item matching) and marks as reconciled if everything matches.
+  Uses psycopg2 for Supabase access.
+lock: '!inline f/check_buddy/check_bank_feed_cleared.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

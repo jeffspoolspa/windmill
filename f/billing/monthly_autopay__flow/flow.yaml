@@ -1,0 +1,226 @@
+summary: Monthly Autopay Processing (Supabase)
+description: >-
+  Processes monthly autopay for pool service customers using Supabase as the
+  source of truth.
+
+
+  Architecture:
+
+  1. Single QBO token refresh at flow start (no per-customer refreshes)
+
+  2. Applies unapplied maint payment credits
+
+  3. Fetches autopay roster from billing.autopay_customers (Supabase)
+
+  4. Pre-creates transaction records with UNIQUE constraint to prevent
+  double-charging
+
+  5. For each customer: find invoices, charge card/ACH, create QBO payment,
+  email receipt
+
+  6. All state tracked in billing.autopay_transactions + billing.autopay_events
+
+  7. Summary stats written to billing.billing_runs
+
+
+  Replaces: u/carter/monthly_autopay_processing (Airtable-based version)
+
+
+  Modes:
+
+  - test_mode=true + test_qbo_customer_id: Process single customer
+
+  - test_mode=false: Process all active autopay customers
+
+  - dry_run=true: Simulate without charging or creating records
+value:
+  modules:
+    - id: a
+      summary: 'Init: Token Refresh + Billing Run'
+      value:
+        type: rawscript
+        content: '!inline init_token_refresh_+_billing_run.py'
+        input_transforms:
+          billing_month:
+            type: javascript
+            expr: flow_input.billing_month
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run
+        lock: '!inline init_token_refresh_+_billing_run.lock'
+        language: python3
+    - id: b
+      summary: Apply Unapplied Maint Credits
+      value:
+        type: rawscript
+        content: '!inline apply_unapplied_maint_credits.py'
+        input_transforms:
+          access_token:
+            type: javascript
+            expr: results.a.access_token
+          billing_month:
+            type: javascript
+            expr: flow_input.billing_month
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run
+          realm_id:
+            type: javascript
+            expr: results.a.realm_id
+        lock: '!inline apply_unapplied_maint_credits.lock'
+        language: python3
+    - id: c
+      summary: Build Autopay List from Maintenance Invoices
+      value:
+        type: rawscript
+        content: '!inline build_autopay_list_from_maintenance_invoices.py'
+        input_transforms:
+          billing_month:
+            type: javascript
+            expr: flow_input.billing_month
+          billing_run_id:
+            type: javascript
+            expr: results.a.billing_run_id
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run
+          test_mode:
+            type: javascript
+            expr: flow_input.test_mode
+          test_qbo_customer_id:
+            type: javascript
+            expr: flow_input.test_qbo_customer_id
+        lock: '!inline build_autopay_list_from_maintenance_invoices.lock'
+        language: python3
+    - id: d
+      summary: Process Each Customer
+      value:
+        type: forloopflow
+        modules:
+          - id: d1
+            summary: Charge Customer (Card/ACH Fallback + Full Invoice Sweep)
+            value:
+              type: rawscript
+              content: '!inline charge_customer_(cardach_fallback_+_full_invoice_sweep).py'
+              input_transforms:
+                access_token:
+                  type: javascript
+                  expr: results.a.access_token
+                billing_month:
+                  type: javascript
+                  expr: flow_input.billing_month
+                customer:
+                  type: javascript
+                  expr: flow_input.iter.value
+                dry_run:
+                  type: javascript
+                  expr: flow_input.dry_run
+                realm_id:
+                  type: javascript
+                  expr: results.a.realm_id
+              lock: '!inline charge_customer_(cardach_fallback_+_full_invoice_sweep).lock'
+              language: python3
+        iterator:
+          type: javascript
+          expr: results.c.customers
+        parallel: false
+        skip_failures: true
+    - id: f
+      summary: Verify & Email Each Customer
+      value:
+        type: forloopflow
+        modules:
+          - id: f1
+            summary: Verify Charge + Send Emails + Decline Notifications
+            value:
+              type: rawscript
+              content: '!inline verify_charge_+_send_emails_+_decline_notifications.py'
+              input_transforms:
+                access_token:
+                  type: javascript
+                  expr: results.a.access_token
+                billing_month:
+                  type: javascript
+                  expr: flow_input.billing_month
+                customer_result:
+                  type: javascript
+                  expr: flow_input.iter.value
+                dry_run:
+                  type: javascript
+                  expr: flow_input.dry_run
+                realm_id:
+                  type: javascript
+                  expr: results.a.realm_id
+              lock: '!inline verify_charge_+_send_emails_+_decline_notifications.lock'
+              language: python3
+        iterator:
+          type: javascript
+          expr: results.d
+        parallel: false
+        skip_failures: true
+    - id: e
+      summary: Finalize & Sync Invoice Balances
+      value:
+        type: rawscript
+        content: '!inline finalize_&_sync_invoice_balances.py'
+        input_transforms:
+          access_token:
+            type: javascript
+            expr: results.a.access_token
+          billing_month:
+            type: javascript
+            expr: flow_input.billing_month
+          billing_run_id:
+            type: javascript
+            expr: results.a.billing_run_id
+          credits_result:
+            type: javascript
+            expr: results.b
+          customers_result:
+            type: javascript
+            expr: results.c
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run
+          processing_results:
+            type: javascript
+            expr: results.d
+          realm_id:
+            type: javascript
+            expr: results.a.realm_id
+          verification_results:
+            type: javascript
+            expr: results.f
+        lock: '!inline finalize_&_sync_invoice_balances.lock'
+        language: python3
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - billing_month
+    - dry_run
+    - test_mode
+    - test_qbo_customer_id
+  properties:
+    billing_month:
+      type: string
+      description: Billing month in YYYY-MM format (e.g., 2026-03 for March 2026)
+      default: 2026-03
+    dry_run:
+      type: boolean
+      description: If true, simulate without making any changes
+      default: true
+    test_mode:
+      type: boolean
+      description: If true, process only a single customer specified by test_qbo_customer_id
+      default: true
+    test_qbo_customer_id:
+      type: string
+      description: QBO Customer ID to process when in test_mode (e.g., 9578 for
+        NADEAU, JEREMY)
+      default: '9578'
+  required:
+    - billing_month
+    - dry_run
+    - test_mode

@@ -1,0 +1,24 @@
+codebases: []
+defaultTs: bun
+excludes: []
+includeGroups: false
+includeKey: false
+includes:
+  - f/**
+includeSchedules: false
+includeSettings: false
+includeTriggers: false
+includeUsers: false
+nonDottedPaths: true
+skipApps: false
+skipFlows: false
+skipFolders: false
+skipResources: true
+skipResourceTypes: true
+skipScripts: false
+skipSecrets: true
+skipVariables: true
+skipWorkspaceDependencies: false
+syncBehavior: v1
+workspaces:
+  main: {}

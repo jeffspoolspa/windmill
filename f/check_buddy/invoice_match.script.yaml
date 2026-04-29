@@ -1,0 +1,7 @@
+summary: invoice_match
+description: Search QBO for invoices by number using a single batched query.
+  Returns invoice + customer info. Supports multi-customer results.
+lock: '!inline f/check_buddy/invoice_match.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

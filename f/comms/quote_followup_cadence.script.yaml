@@ -1,0 +1,6 @@
+summary: Quote follow-up cadence (day 2/5/10, max 3)
+description: Daily cadence with embedded accept URL.
+lock: '!inline f/comms/quote_followup_cadence.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

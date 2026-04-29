@@ -1,0 +1,21 @@
+summary: read_qbo_deposit
+description: Read a single QBO Deposit by ID. Returns full deposit details
+  including all line items with LinkedTxn expansion for matching payments,
+  journal entries, and cash lines back to app records.
+lock: '!inline f/check_buddy/read_qbo_deposit.script.lock'
+concurrency_key: qbo_api
+concurrency_time_window_s: 10
+concurrent_limit: 1
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    qbo_deposit_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - qbo_deposit_id

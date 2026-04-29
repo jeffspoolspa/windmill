@@ -1,0 +1,8 @@
+summary: Download PDF attachments from Gmail emails to Supabase
+description: 'Reusable script: search Gmail → download PDF attachments → store
+  in email_extraction.email_attachments table. Uses GCP service account with
+  domain-wide delegation.'
+lock: '!inline f/email_extraction/download_email_pdfs.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

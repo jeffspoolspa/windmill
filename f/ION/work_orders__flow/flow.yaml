@@ -1,0 +1,75 @@
+summary: work_orders (scrape + upsert + employee link)
+description: ''
+value:
+  modules:
+    - id: d
+      summary: get_scheduled_wo
+      value:
+        type: rawscript
+        content: '!inline get_scheduled_wo.ts'
+        input_transforms:
+          ion:
+            type: static
+            value:
+              loginUrl: $var:f/ION/LOGIN_URL
+              password: $var:f/ION/PASSWORD
+              username: $var:f/ION/USERNAME
+          start_date:
+            type: javascript
+            expr: "flow_input.start_date || new Date(Date.now() - (flow_input.lookback_days
+              || 180) * 24 * 60 * 60 * 1000).toLocaleDateString('en-CA', {
+              timeZone: 'America/New_York' })"
+          wo_status_1:
+            type: static
+            value: Scheduled
+          wo_status_2:
+            type: static
+            value: Closed
+        lock: '!inline get_scheduled_wo.lock'
+        concurrency_time_window_s: 0
+        language: bun
+        tag: chromium
+      continue_on_error: false
+      retry:
+        constant:
+          attempts: 0
+          seconds: 0
+        exponential:
+          attempts: 3
+          multiplier: 1
+          random_factor: 0
+          seconds: 5
+    - id: b
+      summary: extract_and_upload
+      value:
+        type: rawscript
+        content: '!inline extract_and_upload.py'
+        input_transforms:
+          previous_result:
+            type: javascript
+            expr: results.d
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        lock: '!inline extract_and_upload.lock'
+        language: python3
+        tag: chromium
+  same_worker: true
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - start_date
+    - lookback_days
+  properties:
+    lookback_days:
+      type: integer
+      description: How many days back to pull (default 180).
+      default: 180
+    start_date:
+      type: string
+      description: 'YYYY-MM-DD override for ION ScheduleStart. Default: lookback_days back.'
+      default: null
+  required: []
+tag: chromium

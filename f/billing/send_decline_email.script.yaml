@@ -1,0 +1,11 @@
+summary: Send autopay decline notification email via Gmail API
+description: Sends decline notification emails to customers whose autopay
+  payment was declined, expired, or failed. Uses GCP service account with
+  domain-wide delegation to send via Gmail as jpsbilling@jeffspoolspa.com.
+  Includes card issuer and last 4 digits. Can send to a single customer or batch
+  from autopay_transactions. Supports test_email_override to redirect all emails
+  to a test address.
+lock: '!inline f/billing/send_decline_email.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

@@ -1,0 +1,7 @@
+summary: Generic email sender via Gmail API (office-branded, lead-logged)
+description: Reusable email sender. Uses Gmail API with domain-wide delegation.
+  Logs lead_activities via public.log_lead_activity RPC.
+lock: '!inline f/comms/send_email.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

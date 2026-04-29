@@ -1,0 +1,21 @@
+summary: Compute chemical cost percentiles by month and service frequency for
+  the quote form
+description: >-
+  Aggregates chemical costs from billing_audit.maintenance_invoices into
+  percentiles (p25, median, p75) grouped by calendar month and service
+  frequency. Results are written to billing_audit.chemical_cost_estimates (full
+  refresh each run).
+
+
+  Only includes weekly and biweekly frequencies (the two tiers shown on the
+  residential quote form). Uses the last 24 months of data. Season
+  classification: Winter (Dec-Feb), Shoulder (Mar-May, Sep-Nov), Summer
+  (Jun-Aug).
+
+
+  Consumed by the GetStartedQuote.tsx form component via the Supabase REST API
+  (anon read). Schedule: monthly, 1st of month at 2:00 AM ET.
+lock: '!inline f/billing_audit/compute_chemical_estimates.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

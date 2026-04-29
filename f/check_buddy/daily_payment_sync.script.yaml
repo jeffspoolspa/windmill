@@ -1,0 +1,23 @@
+summary: daily_payment_sync
+description: Daily scheduled sync of unreconciled check_payments against QBO.
+  Detects deleted payments, amount changes, invoice changes, and reconciliation.
+  Updates Supabase records to match QBO state. Only syncs Payment-type entities
+  (skips SalesReceipt, JournalEntry, Transfer). Bottom-up deposit detection only
+  applies to manual deposits; API deposits are handled by
+  check_bank_feed_cleared on its own schedule.
+lock: '!inline f/check_buddy/daily_payment_sync.script.lock'
+concurrency_key: qbo_api
+concurrency_time_window_s: 10
+concurrent_limit: 1
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    supabase:
+      type: object
+      description: ''
+      default: null
+      properties: {}
+  required: []

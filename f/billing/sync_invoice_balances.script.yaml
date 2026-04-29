@@ -1,0 +1,9 @@
+summary: Sync open invoice balances from QBO into maintenance_invoices
+description: Fetches all open invoices (Balance > 0) from QBO via pagination,
+  matches to billing_audit.maintenance_invoices by qbo_invoice_id, updates
+  balance_due. Invoices NOT in QBO open list are marked as paid (balance_due=0).
+  Single token refresh per run.
+lock: '!inline f/billing/sync_invoice_balances.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

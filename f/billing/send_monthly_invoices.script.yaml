@@ -1,0 +1,11 @@
+summary: Send monthly maintenance invoices via QBO email delivery with pre-send
+  safety checks
+description: "Sends pending maintenance invoices via QBO email API. Source of
+  truth is send_status='pending' on maintenance_invoices. Four pre-send safety
+  checks: no-email, send log dedup, live QBO balance, and QBO EmailStatus dedup
+  (prevents re-sending invoices already emailed from QBO). Logs results to
+  invoice_send_log and updates send_status."
+lock: '!inline f/billing/send_monthly_invoices.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

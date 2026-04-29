@@ -1,0 +1,8 @@
+summary: Sync a Supabase customer record to QuickBooks Online
+description: Triggered when a customer record is updated in Supabase. Reads the
+  customer, finds them in QBO by qbo_customer_id, and pushes the updated fields
+  (name, email, phone, address).
+lock: '!inline f/qbo/sync_customer_to_qbo.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

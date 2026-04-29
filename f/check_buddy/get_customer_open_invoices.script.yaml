@@ -1,0 +1,16 @@
+summary: get_customer_open_invoices
+description: ''
+lock: '!inline f/check_buddy/get_customer_open_invoices.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    customer_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - customer_id

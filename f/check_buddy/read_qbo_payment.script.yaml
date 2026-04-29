@@ -1,0 +1,21 @@
+summary: read_qbo_payment
+description: 'Read a single QBO Payment by ID. Returns full payment state
+  including amount, applied invoices (with DocNumbers), customer, and unapplied
+  amount. Returns {exists: false, deleted: true} if payment no longer exists.'
+lock: '!inline f/check_buddy/read_qbo_payment.script.lock'
+concurrency_key: qbo_api
+concurrency_time_window_s: 10
+concurrent_limit: 1
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    qbo_payment_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - qbo_payment_id

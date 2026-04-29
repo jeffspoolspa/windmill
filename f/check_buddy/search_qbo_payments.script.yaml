@@ -1,0 +1,30 @@
+summary: search_qbo_payments
+description: ''
+lock: '!inline f/check_buddy/search_qbo_payments.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    check_amount:
+      type: number
+      description: ''
+      default: null
+    check_date:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    check_number:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    customer_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - customer_id
