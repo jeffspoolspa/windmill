@@ -1,8 +1,3 @@
-# Pre-processing for invoices (single or bulk).
-# Persists credits_applied so the UI can show the credit check result.
-# Emits pre_process_stage updates to billing.invoices at each step so the
-# UI progress modal can subscribe via Supabase Realtime and animate.
-
 import calendar
 import json
 import random
@@ -20,9 +15,6 @@ OPENAI_KEY_VAR = "f/service_billing/OPENAI_API_KEY"
 
 MEMO_CONFIDENCE_THRESHOLD = 0.85
 SUBTOTAL_TOLERANCE = 0.02
-# gpt-4o-mini: ~20-25x cheaper than Sonnet, native json_schema enforcement,
-# 200k TPM at OpenAI Tier 1 (~7x our previous Anthropic Tier 1 ITPM).
-# Our task — short structured memo — is well within its capability.
 MODEL = "gpt-4o-mini"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
@@ -63,7 +55,7 @@ def get_db_conn():
 
 def set_stage(conn, qbo_invoice_id, stage):
     """Persist the current stage so the UI progress modal can animate.
-    Autocommits a small UPDATE so Realtime fires immediately — do NOT bundle
+    Autocommits a small UPDATE so Realtime fires immediately - do NOT bundle
     this into a larger transaction or subscribers won't see the progression."""
     try:
         cur = conn.cursor()
@@ -78,7 +70,6 @@ def set_stage(conn, qbo_invoice_id, stage):
 
 def _qbo_request(method, path, access_token, realm_id, params=None, body=None,
                  max_attempts=5):
-    """QBO HTTP call with 429/5xx/network retry + exponential backoff."""
     url = f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/{path}"
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     if method.upper() == "POST":
@@ -223,32 +214,25 @@ def resolve_payment_method(wo_description, pms):
     return "invoice"
 
 
-# ─── Memo generation ──────────────────────────────────────────────────────
-#
-# Strategy: try a small set of deterministic patterns FIRST (instant, free,
-# can't fail). If none match, fall through to the LLM. Even at OpenAI's
-# generous Tier 1 limits this saves ~30% of calls and zero-cost handles
-# the cases that the LLM was previously low-confidence-failing on.
-
 MEMO_PROMPT = """You write a short customer-friendly memo for a pool service invoice.
 
 Input: a JSON object with these fields:
 - customer: customer name as it appears in QBO (may be "LAST, FIRST" or "First Last")
 - type: work order type (e.g. "GENERAL SERVICE", "DELIVERY", "MAINTENANCE")
 - description: what the technician was sent to do
-- corrective: what the technician actually did — usually most reliable
-- tech_instructions: notes from the office about the job — often clarifies ambiguity
+- corrective: what the technician actually did - usually most reliable
+- tech_instructions: notes from the office about the job - often clarifies ambiguity
 
 Output: a JSON object with:
-- memo: the memo text (NO WO number prefix — just the service description)
-- confidence: 0.0 to 1.0 — how confident you are you understand what was done
+- memo: the memo text (NO WO number prefix - just the service description)
+- confidence: 0.0 to 1.0 - how confident you are you understand what was done
 - reasoning: 1 sentence
 
 Style rules:
 - Title Case, 2-7 words. NEVER more than 7 words.
 - Equipment + Action format: "Autofill Valve Replacement", "Pool Pump Diagnosis"
 - Use "&" to join two related items: "Salt Cell Cleaning & Filter Replacement"
-- Use " — " for a qualifier: "Water Chemistry Service — Shock Treatment"
+- Use " - " for a qualifier: "Water Chemistry Service - Shock Treatment"
 - Add context when meaningful: "Pre-Purchase Pool Inspection", "VSP Pump Error Diagnosis"
 - Action words: Diagnosis, Replacement, Repair, Install, Delivery, Cleaning, Removal, Check, Clearing, Service
 - No trailing punctuation
@@ -256,11 +240,11 @@ Style rules:
 
 Special customer rules:
 - ROBERT O'BRIEN: this customer has THREE pools. If the customer field contains both
-  "ROBERT" and "O'BRIEN" or "OBRIEN" (any case, any order — "ROBERT O'BRIEN",
+  "ROBERT" and "O'BRIEN" or "OBRIEN" (any case, any order - "ROBERT O'BRIEN",
   "O'BRIEN, ROBERT", "obrien robert", etc. all qualify), the memo MUST end with
   the pool tag in ALL CAPS in parens: (LAP POOL), (VOLLEYBALL), or (SPA).
   Look in description, corrective, and tech_instructions for the pool name. If
-  none of those fields mention which specific pool, return confidence below 0.6 —
+  none of those fields mention which specific pool, return confidence below 0.6 -
   DO NOT guess.
 
 If you cannot figure out what was done, return confidence below 0.6.
@@ -284,42 +268,24 @@ MEMO_EXAMPLES = [
      "output": {"memo": "Spa Pump Motor & Seal Plate Replacement", "confidence": 0.96, "reasoning": "Spa pump motor + seal plate replacement."}},
     {"input": {"customer": "Anderson, Pat", "type": "POOL INSPECTION", "description": "Pool Inspection. Due diligence 3/25 or 3/26. Potential buyer access.", "corrective": ".", "tech_instructions": ""},
      "output": {"memo": "Pre-Purchase Pool Inspection", "confidence": 0.93, "reasoning": "Pool inspection for potential buyer."}},
-    # Tech instructions disambiguating "heater" between gas vs electric
     {"input": {"customer": "Miller, Sam", "type": "DIAGNOSIS", "description": "Heater not firing", "corrective": "Replaced thermistor.", "tech_instructions": "Customer reports gas heater showing IF code intermittently"},
      "output": {"memo": "Gas Heater Diagnosis & Thermistor Replacement", "confidence": 0.93, "reasoning": "Tech instructions clarified gas heater + IF code; thermistor replaced."}},
-    # O'Brien: pool name in description → success
     {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Replace lid assembly on commercial chlorinator on the volleyball pool.", "corrective": "Installed new lid assembly. Tested and functional.", "tech_instructions": ""},
      "output": {"memo": "Commercial Chlorinator Lid Assembly Replacement (VOLLEYBALL)", "confidence": 0.95, "reasoning": "Volleyball pool chlorinator lid replaced."}},
-    # O'Brien: pool name in tech_instructions → success
-    {"input": {"customer": "ROBERT O'BRIEN", "type": "DIAGNOSIS", "description": "Heater not firing", "corrective": "Replaced thermistor", "tech_instructions": "Spa heater issue — check IF code"},
+    {"input": {"customer": "ROBERT O'BRIEN", "type": "DIAGNOSIS", "description": "Heater not firing", "corrective": "Replaced thermistor", "tech_instructions": "Spa heater issue - check IF code"},
      "output": {"memo": "Spa Heater Diagnosis & Thermistor Replacement (SPA)", "confidence": 0.93, "reasoning": "Tech instructions specified spa heater."}},
-    # O'Brien: NO pool clue anywhere → must reject with low confidence
     {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Replaced O-ring", "corrective": "O-ring replaced", "tech_instructions": ""},
-     "output": {"memo": "O-Ring Replacement", "confidence": 0.45, "reasoning": "O'Brien WO but no pool name in any field — cannot determine which pool."}},
+     "output": {"memo": "O-Ring Replacement", "confidence": 0.45, "reasoning": "O'Brien WO but no pool name in any field - cannot determine which pool."}},
 ]
 
 
 def deterministic_memo(wo, invoice):
-    """Pre-LLM rule-based memo for known patterns. Returns
-    {memo, confidence, reasoning} on hit, None on miss.
-
-    Currently handles:
-      - Monthly maintenance supplies: any of description/corrective/tech_instructions
-        contain 'not on consumables' → memo = '<Month> Supplies' tied to the
-        invoice txn_date (preferred) or WO completed date.
-
-    Add more patterns here as they emerge — anything where the memo is fully
-    determined by data + simple rules and the LLM was previously low-confidence-
-    failing or wasting tokens.
-    """
     desc = (wo.get("work_description") or "").lower()
     corr = (wo.get("corrective_action") or "").lower()
     instr = (wo.get("technician_instructions") or "").lower()
     haystack = f"{desc} {corr} {instr}"
 
     if "not on consumables" in haystack:
-        # invoice.txn_date is the canonical accounting month; fall back to
-        # wo.completed if invoice isn't loaded yet for some reason.
         date_val = (invoice or {}).get("txn_date") or wo.get("completed")
         if date_val:
             try:
@@ -339,23 +305,10 @@ def deterministic_memo(wo, invoice):
     return None
 
 
-# ─── O'Brien deterministic post-check ────────────────────────────────────
-# The system prompt tells the model "if customer is Robert O'Brien, the memo
-# MUST end with a pool tag," but LLMs sometimes ignore explicit rules
-# (62718's "Moat Line Clearing" is the example: the description had no pool
-# name and the model declined to add a tag — but it ALSO didn't return low
-# confidence, defeating the rule). This is a belt-and-suspenders deterministic
-# check: regardless of what the model returned, if the customer is O'Brien
-# and the memo lacks a pool tag, demote confidence to force human review.
-
 _OBRIEN_POOL_TAGS = ("(LAP POOL)", "(VOLLEYBALL)", "(SPA)")
 
 
 def _is_obrien_customer(name):
-    """True if customer name looks like Robert O'Brien in any format
-    (handles "ROBERT O'BRIEN", "O'BRIEN, ROBERT", "obrien robert", etc).
-    Comma is normalized to space so the surname/forename order doesn't matter.
-    """
     if not name:
         return False
     n = name.lower().replace(",", " ")
@@ -363,7 +316,6 @@ def _is_obrien_customer(name):
 
 
 def _has_obrien_pool_tag(memo):
-    """True if memo contains one of the three required pool tags."""
     if not memo:
         return False
     upper = memo.upper()
@@ -371,16 +323,6 @@ def _has_obrien_pool_tag(memo):
 
 
 def generate_memo(wo, invoice, api_key, max_retries=3):
-    """OpenAI chat.completions with structured outputs (json_schema).
-
-    The strict schema guarantees the model returns the exact
-    {memo, confidence, reasoning} shape — eliminates the parse-failure
-    path we had with the previous Anthropic implementation.
-
-    Returns:
-      success → dict matching the schema
-      failure → {"error": str}
-    """
     customer_name = (invoice or {}).get("customer_name") or wo.get("customer") or ""
     user_payload = {
         "customer": customer_name,
@@ -443,8 +385,6 @@ def generate_memo(wo, invoice, api_key, max_retries=3):
         if resp.ok:
             try:
                 content = resp.json()["choices"][0]["message"]["content"]
-                # Log usage so we can monitor OpenAI auto-cache hit rates +
-                # token consumption per call. Doesn't affect anything else.
                 usage = resp.json().get("usage") or {}
                 cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
                 total_in = usage.get("prompt_tokens", 0)
@@ -460,8 +400,6 @@ def generate_memo(wo, invoice, api_key, max_retries=3):
                 base = min(int(retry_after), 30)
             else:
                 base = min(2 ** attempt, 30)
-            # Jitter: 0–50% extra delay so N parallel callers don't all wake
-            # at the same instant and burst the limit again.
             time.sleep(base + random.random() * base * 0.5)
             continue
         break
@@ -601,7 +539,7 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
         return {"status": "error", "qbo_invoice_id": qbo_invoice_id, "error": "not found"}
     if invoice.get("billing_status") == "processed":
         return {"status": "skipped", "qbo_invoice_id": qbo_invoice_id,
-                "reason": "already processed (terminal — revert first to re-run)"}
+                "reason": "already processed (terminal - revert first to re-run)"}
     if not force and invoice.get("billing_status") == "processing":
         return {"status": "skipped", "qbo_invoice_id": qbo_invoice_id,
                 "reason": "already processing"}
@@ -690,22 +628,14 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
             composed = invoice.get("memo")
             result["memo"] = composed
             result["statement_memo"] = invoice.get("statement_memo") or composed
-            print(f"  memo locked — preserving '{composed}'")
+            print(f"  memo locked - preserving '{composed}'")
         else:
-            # 1) Try deterministic patterns first — instant, free, no API call.
-            # 2) Fall through to the LLM only on miss.
             memo_result = deterministic_memo(wo, invoice)
             memo_source = "deterministic"
             if memo_result is None:
                 memo_result = generate_memo(wo, invoice, api_key)
                 memo_source = "llm"
 
-            # Belt-and-suspenders: O'Brien customer rule.
-            # The model SHOULD return low confidence when it can't determine
-            # the pool, but sometimes glosses over the rule and produces a
-            # generic memo (e.g. "Moat Line Clearing" with confidence 0.9).
-            # Independently verify: O'Brien customer + memo without a pool
-            # tag → demote confidence so the invoice routes to needs_review.
             if memo_result.get("memo") and "error" not in memo_result:
                 customer_for_check = (
                     invoice.get("customer_name") or wo.get("customer") or ""
@@ -717,7 +647,7 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                         **memo_result,
                         "confidence": min(memo_result.get("confidence", 0), 0.4),
                         "reasoning": (
-                            f"O'Brien customer but memo lacks pool tag — "
+                            f"O'Brien customer but memo lacks pool tag - "
                             f"flagged for human review. Original: {orig_reason}"
                         ),
                     }
@@ -779,9 +709,13 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
 
 
 def main(qbo_invoice_id: str = None, force: bool = False,
-         bulk_all: bool = True, limit: int = None, sleep_ms: int = 1500,
+         bulk_all: bool = False, limit: int = None, sleep_ms: int = 1500,
          include_needs_review: bool = True,
          include_ready_to_process: bool = False):
+    # SAFE DEFAULT: bulk_all=False. The previous default of True caused a
+    # production bug - single-WO callers that omitted the parameter silently
+    # flipped into bulk mode and re-fired every needs_review invoice. Bulk
+    # mode is now strictly opt-in: caller must pass bulk_all=True.
     if not qbo_invoice_id and not bulk_all:
         return {"status": "error", "error": "pass qbo_invoice_id or bulk_all=True"}
 
