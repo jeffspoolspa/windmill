@@ -5,6 +5,7 @@ includeGroups: false
 includeKey: false
 includes:
   - f/**
+  - u/**
 includeSchedules: false
 includeSettings: false
 includeTriggers: false
