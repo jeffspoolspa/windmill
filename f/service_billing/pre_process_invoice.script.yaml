@@ -13,6 +13,6 @@ description: "Migrated memo generation from Anthropic Sonnet 4 to OpenAI
   (6) Jitter on 429 retry backoff so N parallel callers don't sync-wake."
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
 concurrency_time_window_s: 0
-concurrent_limit: 2
+concurrent_limit: 5
 kind: script
 schema: null
