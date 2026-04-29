@@ -1,0 +1,8 @@
+summary: 'One-off: backfill acceptance_link from est_emails HTML'
+description: One-off backfill for acceptance_link, recovering from the April 16
+  RLS regression. Re-uses the exact BeautifulSoup parser from flow module 'e'
+  (get_estimate_details). Only updates rows where acceptance_link IS NULL. Safe
+  to delete after running.
+lock: '!inline u/carter/backfill_acceptance_links.script.lock'
+kind: script
+schema: null
