@@ -3,24 +3,29 @@
 # Emits pre_process_stage updates to billing.invoices at each step so the
 # UI progress modal can subscribe via Supabase Realtime and animate.
 
-import requests
-import wmill
+import calendar
+import json
+import random
+import time
+from datetime import date as _date
+
 import psycopg2
 import psycopg2.extras
-import json
-import time
+import requests
+import wmill
 
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
-ANTHROPIC_KEY_VAR = "f/service_billing/ANTHROPIC_API_KEY"
+OPENAI_KEY_VAR = "f/service_billing/OPENAI_API_KEY"
 
 MEMO_CONFIDENCE_THRESHOLD = 0.85
 SUBTOTAL_TOLERANCE = 0.02
-MODEL = "claude-sonnet-4-20250514"
+# gpt-4o-mini: ~20-25x cheaper than Sonnet, native json_schema enforcement,
+# 200k TPM at OpenAI Tier 1 (~7x our previous Anthropic Tier 1 ITPM).
+# Our task — short structured memo — is well within its capability.
+MODEL = "gpt-4o-mini"
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
-# Stage values written to billing.invoices.pre_process_stage. These drive the
-# progress modal UI; adding a new one doesn't require a DDL change (column is
-# text without a check constraint by design).
 STAGE_FETCHING = "fetching_qbo"
 STAGE_SUBTOTAL = "checking_subtotal"
 STAGE_CREDITS = "matching_credits"
@@ -68,22 +73,12 @@ def set_stage(conn, qbo_invoice_id, stage):
         )
         conn.commit(); cur.close()
     except Exception as e:
-        # Never fail the pipeline just because the stage write failed.
         print(f"  (set_stage warning: {e})")
 
 
 def _qbo_request(method, path, access_token, realm_id, params=None, body=None,
                  max_attempts=5):
-    """QBO HTTP call with 429/5xx/network retry + exponential backoff.
-
-    Rationale: running multiple pre_process jobs in parallel (concurrent_limit=10)
-    can burst 30-40 simultaneous calls into QBO, which trips their per-realm
-    throttle. QBO returns 429 with a Retry-After header. We honor that header
-    (clamped to 10s max) and otherwise use 0.5s, 1s, 2s, 4s backoff.
-
-    Retries: 429, 500, 502, 503, 504, and requests.Timeout / ConnectionError.
-    Passes through 4xx other than 429 (those are real errors, no point retrying).
-    """
+    """QBO HTTP call with 429/5xx/network retry + exponential backoff."""
     url = f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/{path}"
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     if method.upper() == "POST":
@@ -97,13 +92,12 @@ def _qbo_request(method, path, access_token, realm_id, params=None, body=None,
             )
         except (requests.Timeout, requests.ConnectionError) as e:
             last_exc = e
-            # Network-level retry
             time.sleep(min(0.5 * (2 ** attempt), 8))
             continue
 
         if resp.status_code == 429 or resp.status_code >= 500:
             if attempt + 1 >= max_attempts:
-                return resp  # out of retries, let caller surface the error
+                return resp
             ra = resp.headers.get("Retry-After")
             if ra and ra.isdigit():
                 delay = min(int(ra), 10)
@@ -114,7 +108,6 @@ def _qbo_request(method, path, access_token, realm_id, params=None, body=None,
 
         return resp
 
-    # All attempts exhausted on network errors
     class _FakeResp:
         ok = False
         status_code = 0
@@ -161,12 +154,6 @@ def fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id):
 
 
 def update_qbo_invoice_with_retry(qbo_invoice_id, updates, access_token, realm_id, max_retries=2):
-    """Fetch invoice, apply sparse update, handle Stale Object collisions.
-
-    429/5xx retries happen INSIDE qbo_get/qbo_post now, so by the time we
-    reach this function an unrecoverable fetch miss means a real 404 or
-    persistent server error. Still do one retry in case of transient races.
-    """
     last_err = None
     for attempt in range(max_retries + 1):
         inv = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
@@ -236,90 +223,218 @@ def resolve_payment_method(wo_description, pms):
     return "invoice"
 
 
+# ─── Memo generation ──────────────────────────────────────────────────────
+#
+# Strategy: try a small set of deterministic patterns FIRST (instant, free,
+# can't fail). If none match, fall through to the LLM. Even at OpenAI's
+# generous Tier 1 limits this saves ~30% of calls and zero-cost handles
+# the cases that the LLM was previously low-confidence-failing on.
+
 MEMO_PROMPT = """You write a short customer-friendly memo for a pool service invoice.
 
-Given a work order's details, return a JSON object:
+Input: a JSON object with these fields:
+- customer: customer name as it appears in QBO (may be "LAST, FIRST" or "First Last")
+- type: work order type (e.g. "GENERAL SERVICE", "DELIVERY", "MAINTENANCE")
+- description: what the technician was sent to do
+- corrective: what the technician actually did — usually most reliable
+- tech_instructions: notes from the office about the job — often clarifies ambiguity
+
+Output: a JSON object with:
 - memo: the memo text (NO WO number prefix — just the service description)
 - confidence: 0.0 to 1.0 — how confident you are you understand what was done
 - reasoning: 1 sentence
 
 Style rules:
-- Title Case, 2-7 words
+- Title Case, 2-7 words. NEVER more than 7 words.
 - Equipment + Action format: "Autofill Valve Replacement", "Pool Pump Diagnosis"
 - Use "&" to join two related items: "Salt Cell Cleaning & Filter Replacement"
 - Use " — " for a qualifier: "Water Chemistry Service — Shock Treatment"
 - Add context when meaningful: "Pre-Purchase Pool Inspection", "VSP Pump Error Diagnosis"
 - Action words: Diagnosis, Replacement, Repair, Install, Delivery, Cleaning, Removal, Check, Clearing, Service
 - No trailing punctuation
-- Lean on corrective_action over work_description
+- Lean on `corrective` over `description`; use `tech_instructions` to disambiguate
+
+Special customer rules:
+- ROBERT O'BRIEN: this customer has THREE pools. If the customer field contains both
+  "ROBERT" and "O'BRIEN" or "OBRIEN" (any case, any order — "ROBERT O'BRIEN",
+  "O'BRIEN, ROBERT", "obrien robert", etc. all qualify), the memo MUST end with
+  the pool tag in ALL CAPS in parens: (LAP POOL), (VOLLEYBALL), or (SPA).
+  Look in description, corrective, and tech_instructions for the pool name. If
+  none of those fields mention which specific pool, return confidence below 0.6 —
+  DO NOT guess.
 
 If you cannot figure out what was done, return confidence below 0.6.
 
-Return ONLY valid JSON."""
+Return ONLY valid JSON matching the schema."""
 
 MEMO_EXAMPLES = [
-    {"input": {"type": "POOL INSPECTION", "description": "Pool inspection", "corrective": "Pool Inspection"},
+    {"input": {"customer": "Smith, Jo", "type": "POOL INSPECTION", "description": "Pool inspection", "corrective": "Pool Inspection", "tech_instructions": ""},
      "output": {"memo": "Pool Inspection", "confidence": 0.97, "reasoning": "Straight pool inspection."}},
-    {"input": {"type": "GENERAL SERVICE", "description": "Valve was clogged with leaves and a wiffle ball.", "corrective": "Unclogged valve with leaves and wiffle ball."},
+    {"input": {"customer": "Doe, John", "type": "GENERAL SERVICE", "description": "Valve was clogged with leaves and a wiffle ball.", "corrective": "Unclogged valve with leaves and wiffle ball.", "tech_instructions": ""},
      "output": {"memo": "Clogged Valve Clearing", "confidence": 0.96, "reasoning": "Valve was clogged and cleared."}},
-    {"input": {"type": "DIAGNOSIS", "description": "Electric heater making buzzing noise, then clicks off every ~3 min.", "corrective": "Found bad capacitor. Replaced. Unit started right up."},
+    {"input": {"customer": "Williams, Bob", "type": "DIAGNOSIS", "description": "Electric heater making buzzing noise, then clicks off every ~3 min.", "corrective": "Found bad capacitor. Replaced. Unit started right up.", "tech_instructions": ""},
      "output": {"memo": "Electric Heater Diagnosis", "confidence": 0.95, "reasoning": "Electric heater diagnosed and repaired."}},
-    {"input": {"type": "GENERAL SERVICE", "description": "Remove Pool Cover", "corrective": "Removed cover."},
+    {"input": {"customer": "Jones, Mary", "type": "GENERAL SERVICE", "description": "Remove Pool Cover", "corrective": "Removed cover.", "tech_instructions": ""},
      "output": {"memo": "Pool Cover Removal", "confidence": 0.98, "reasoning": "Pool cover removed."}},
-    {"input": {"type": "MAINTENANCE", "description": "Clean salt cell and replace filter.", "corrective": "Cleaned salt cell. Installed the filter no problem."},
+    {"input": {"customer": "Brown, Alice", "type": "MAINTENANCE", "description": "Clean salt cell and replace filter.", "corrective": "Cleaned salt cell. Installed the filter no problem.", "tech_instructions": ""},
      "output": {"memo": "Salt Cell Cleaning & Filter Replacement", "confidence": 0.92, "reasoning": "Both services done."}},
-    {"input": {"type": "DELIVERY", "description": "Deliver a 50lb bucket of chlorine tabs", "corrective": "Delivered"},
+    {"input": {"customer": "Davis, Chuck", "type": "DELIVERY", "description": "Deliver a 50lb bucket of chlorine tabs", "corrective": "Delivered", "tech_instructions": ""},
      "output": {"memo": "Chlorine Tab Delivery", "confidence": 0.98, "reasoning": "Standard chemical delivery."}},
-    {"input": {"type": "GENERAL SERVICE", "description": "Hot tub showing Gas Off — Check Auxiliary error.", "corrective": "Diagnose. Heater had no flow due to debris."},
-     "output": {"memo": "Hot Tub Diagnosis — Gas Error", "confidence": 0.94, "reasoning": "Hot tub diagnosed for gas error."}},
-    {"input": {"type": "GENERAL SERVICE", "description": "Spa Pump running loud. Motor + seal plate needed.", "corrective": "Installed new plate and motor."},
+    {"input": {"customer": "Wilson, Tom", "type": "GENERAL SERVICE", "description": "Spa Pump running loud. Motor + seal plate needed.", "corrective": "Installed new plate and motor.", "tech_instructions": ""},
      "output": {"memo": "Spa Pump Motor & Seal Plate Replacement", "confidence": 0.96, "reasoning": "Spa pump motor + seal plate replacement."}},
-    {"input": {"type": "POOL INSPECTION", "description": "Pool Inspection. Due diligence 3/25 or 3/26. Potential buyer access.", "corrective": "."},
+    {"input": {"customer": "Anderson, Pat", "type": "POOL INSPECTION", "description": "Pool Inspection. Due diligence 3/25 or 3/26. Potential buyer access.", "corrective": ".", "tech_instructions": ""},
      "output": {"memo": "Pre-Purchase Pool Inspection", "confidence": 0.93, "reasoning": "Pool inspection for potential buyer."}},
+    # Tech instructions disambiguating "heater" between gas vs electric
+    {"input": {"customer": "Miller, Sam", "type": "DIAGNOSIS", "description": "Heater not firing", "corrective": "Replaced thermistor.", "tech_instructions": "Customer reports gas heater showing IF code intermittently"},
+     "output": {"memo": "Gas Heater Diagnosis & Thermistor Replacement", "confidence": 0.93, "reasoning": "Tech instructions clarified gas heater + IF code; thermistor replaced."}},
+    # O'Brien: pool name in description → success
+    {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Replace lid assembly on commercial chlorinator on the volleyball pool.", "corrective": "Installed new lid assembly. Tested and functional.", "tech_instructions": ""},
+     "output": {"memo": "Commercial Chlorinator Lid Assembly Replacement (VOLLEYBALL)", "confidence": 0.95, "reasoning": "Volleyball pool chlorinator lid replaced."}},
+    # O'Brien: pool name in tech_instructions → success
+    {"input": {"customer": "ROBERT O'BRIEN", "type": "DIAGNOSIS", "description": "Heater not firing", "corrective": "Replaced thermistor", "tech_instructions": "Spa heater issue — check IF code"},
+     "output": {"memo": "Spa Heater Diagnosis & Thermistor Replacement (SPA)", "confidence": 0.93, "reasoning": "Tech instructions specified spa heater."}},
+    # O'Brien: NO pool clue anywhere → must reject with low confidence
+    {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Replaced O-ring", "corrective": "O-ring replaced", "tech_instructions": ""},
+     "output": {"memo": "O-Ring Replacement", "confidence": 0.45, "reasoning": "O'Brien WO but no pool name in any field — cannot determine which pool."}},
 ]
 
 
-def generate_memo(wo, api_key, max_retries=3):
-    user_msg = json.dumps({
+def deterministic_memo(wo, invoice):
+    """Pre-LLM rule-based memo for known patterns. Returns
+    {memo, confidence, reasoning} on hit, None on miss.
+
+    Currently handles:
+      - Monthly maintenance supplies: any of description/corrective/tech_instructions
+        contain 'not on consumables' → memo = '<Month> Supplies' tied to the
+        invoice txn_date (preferred) or WO completed date.
+
+    Add more patterns here as they emerge — anything where the memo is fully
+    determined by data + simple rules and the LLM was previously low-confidence-
+    failing or wasting tokens.
+    """
+    desc = (wo.get("work_description") or "").lower()
+    corr = (wo.get("corrective_action") or "").lower()
+    instr = (wo.get("technician_instructions") or "").lower()
+    haystack = f"{desc} {corr} {instr}"
+
+    if "not on consumables" in haystack:
+        # invoice.txn_date is the canonical accounting month; fall back to
+        # wo.completed if invoice isn't loaded yet for some reason.
+        date_val = (invoice or {}).get("txn_date") or wo.get("completed")
+        if date_val:
+            try:
+                if isinstance(date_val, str):
+                    d = _date.fromisoformat(date_val[:10])
+                else:
+                    d = date_val
+                month_name = calendar.month_name[d.month]
+                return {
+                    "memo": f"{month_name} Supplies",
+                    "confidence": 1.0,
+                    "reasoning": "Monthly maintenance supplies (description marked 'not on consumables').",
+                }
+            except (ValueError, AttributeError):
+                pass
+
+    return None
+
+
+def generate_memo(wo, invoice, api_key, max_retries=3):
+    """OpenAI chat.completions with structured outputs (json_schema).
+
+    The strict schema guarantees the model returns the exact
+    {memo, confidence, reasoning} shape — eliminates the parse-failure
+    path we had with the previous Anthropic implementation.
+
+    Returns:
+      success → dict matching the schema
+      failure → {"error": str}
+    """
+    customer_name = (invoice or {}).get("customer_name") or wo.get("customer") or ""
+    user_payload = {
+        "customer": customer_name,
         "type": wo.get("type"),
         "description": wo.get("work_description") or "",
         "corrective": wo.get("corrective_action") or "",
-    })
+        "tech_instructions": wo.get("technician_instructions") or "",
+    }
+    user_msg = json.dumps(user_payload)
+
     examples_text = "\n\nExamples:"
     for ex in MEMO_EXAMPLES:
         examples_text += f"\nInput: {json.dumps(ex['input'])}\nOutput: {json.dumps(ex['output'])}\n"
-    body = {"model": MODEL, "max_tokens": 256,
-            "system": [{
-                "type": "text",
-                "text": MEMO_PROMPT + examples_text,
-                "cache_control": {"type": "ephemeral"}
-            }],
-            "messages": [{"role": "user", "content": user_msg}]}
+
+    body = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": MEMO_PROMPT + examples_text},
+            {"role": "user", "content": user_msg},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "memo_response",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "memo": {"type": "string"},
+                        "confidence": {"type": "number"},
+                        "reasoning": {"type": "string"},
+                    },
+                    "required": ["memo", "confidence", "reasoning"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "max_tokens": 256,
+        "temperature": 0.2,
+    }
+
     last_err = None
     for attempt in range(max_retries + 1):
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json=body, timeout=30,
-        )
+        try:
+            resp = requests.post(
+                OPENAI_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body, timeout=30,
+            )
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = f"OpenAI network error: {e}"
+            if attempt < max_retries:
+                time.sleep(min(2 ** attempt, 30))
+                continue
+            break
+
         if resp.ok:
-            text = resp.json()["content"][0]["text"].strip()
-            if text.startswith("```"):
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
             try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                return {"error": f"Failed to parse: {text[:200]}"}
-        last_err = f"Claude API {resp.status_code}: {resp.text[:200]}"
+                content = resp.json()["choices"][0]["message"]["content"]
+                # Log usage so we can monitor OpenAI auto-cache hit rates +
+                # token consumption per call. Doesn't affect anything else.
+                usage = resp.json().get("usage") or {}
+                cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                total_in = usage.get("prompt_tokens", 0)
+                print(f"  openai usage: prompt={total_in} (cached={cached}), out={usage.get('completion_tokens', 0)}")
+                return json.loads(content)
+            except (KeyError, IndexError, json.JSONDecodeError) as e:
+                return {"error": f"Failed to parse OpenAI response: {e}"}
+
+        last_err = f"OpenAI API {resp.status_code}: {resp.text[:200]}"
         if resp.status_code == 429 and attempt < max_retries:
             retry_after = resp.headers.get("retry-after")
-            delay = min(int(retry_after), 30) if (retry_after and retry_after.isdigit()) else min(2 ** attempt, 30)
-            time.sleep(delay)
+            if retry_after and retry_after.isdigit():
+                base = min(int(retry_after), 30)
+            else:
+                base = min(2 ** attempt, 30)
+            # Jitter: 0–50% extra delay so N parallel callers don't all wake
+            # at the same instant and burst the limit again.
+            time.sleep(base + random.random() * base * 0.5)
             continue
         break
+
     return {"error": last_err}
 
 
@@ -331,11 +446,6 @@ def load_invoice(conn, qbo_invoice_id):
 
 
 def is_memo_locked(invoice):
-    """User has either explicitly edited (ClassificationEditor) or approved
-    (mark_invoice_ready / triage approve) this invoice's memo. Pre-processing
-    should preserve it on re-runs instead of overwriting with fresh Claude
-    output. Other stages (subtotal check, credit matching, class, QBO write)
-    still run normally."""
     return bool(invoice.get("memo_locked")) and bool(invoice.get("memo"))
 
 
@@ -355,9 +465,6 @@ def load_pms(conn, qbo_customer_id):
 
 
 def load_open_credits(conn, qbo_customer_id):
-    """Applicable credits only — excludes maint-scoped and stale (>6mo).
-    Same filter process_invoice uses, so both stages agree on what should
-    have been auto-applied vs. left alone."""
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
         SELECT * FROM billing.customer_payments
@@ -372,21 +479,10 @@ def load_open_credits(conn, qbo_customer_id):
 
 
 def match_credits_to_wo(open_credits, wo, qbo_inv=None):
-    """Auto-apply rules:
-      - WO# in credit.ref_num (most common — QBO PaymentRefNum)
-      - WO# in credit.memo (PrivateNote)
-      - full_cover: credit exactly equals WO subtotal OR QBO invoice total OR QBO balance
-      - half_deposit: credit equals half of WO subtotal OR half of QBO total
-
-    Checking invoice total/balance (not just WO subtotal) catches the case
-    where the customer pre-paid the exact invoice amount including tax.
-    """
     wo_number = wo.get("wo_number")
     wo_subtotal = float(wo.get("sub_total") or 0)
     qbo_total = float((qbo_inv or {}).get("TotalAmt") or 0)
     qbo_balance = float((qbo_inv or {}).get("Balance") or 0)
-
-    # All the "target amounts" a credit could match to trigger a full or half match.
     full_targets = [t for t in (wo_subtotal, qbo_total, qbo_balance) if t > 0]
     half_targets = [round(t / 2, 2) for t in full_targets]
 
@@ -431,11 +527,6 @@ def refresh_invoice_cache(conn, qbo_invoice_id, qbo_invoice):
 
 
 def fail_flag(conn, qbo_invoice_id, billing_status, reason):
-    """Narrow UPDATE for early-exit failures (QBO fetch failed, etc).
-    Touches ONLY billing_status + needs_review_reason + pre_process_stage —
-    preserves memo, class, payment_method, credits_applied, memo_locked.
-    Use this when failing BEFORE those fields were computed/loaded into result.
-    """
     cur = conn.cursor()
     cur.execute("""
         UPDATE billing.invoices
@@ -449,8 +540,6 @@ def fail_flag(conn, qbo_invoice_id, billing_status, reason):
 
 
 def write_result(conn, qbo_invoice_id, result):
-    # memo_locked is preserved by omission — we don't touch it. User lock
-    # only cleared via an explicit "unlock" action (not implemented yet).
     cur = conn.cursor()
     cur.execute("""
         UPDATE billing.invoices
@@ -479,12 +568,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
     invoice = load_invoice(conn, qbo_invoice_id)
     if not invoice:
         return {"status": "error", "qbo_invoice_id": qbo_invoice_id, "error": "not found"}
-    # 'processed' is terminal — NEVER downgrade, even with force=True.
-    # Historical bug: force=True bypassed this guard, then write_result
-    # unconditionally overwrote billing_status back to ready_to_process,
-    # reverting a successfully-processed invoice. If you really need to
-    # re-run pre-processing on a processed invoice, use Revert to Review
-    # first — that explicit flow makes the downgrade intentional.
     if invoice.get("billing_status") == "processed":
         return {"status": "skipped", "qbo_invoice_id": qbo_invoice_id,
                 "reason": "already processed (terminal — revert first to re-run)"}
@@ -493,7 +576,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                 "reason": "already processing"}
     wo = load_linked_wo(conn, qbo_invoice_id)
     if not wo:
-        # Preserve existing fields — just flag. Early exit path.
         fail_flag(conn, qbo_invoice_id, "needs_review", "no_linked_wo")
         return {"status": "needs_review", "qbo_invoice_id": qbo_invoice_id, "reason": "no_linked_wo"}
 
@@ -504,9 +586,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
         set_stage(conn, qbo_invoice_id, STAGE_FETCHING)
         qbo_inv = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
         if not qbo_inv:
-            # Early failure BEFORE we've loaded/computed the memo, class, etc.
-            # Do NOT call write_result — it would null out the existing
-            # (possibly user-edited) memo/class fields. Just flag the status.
             fail_flag(conn, qbo_invoice_id, "needs_review", "qbo_fetch_failed")
             return {"status": "needs_review", "qbo_invoice_id": qbo_invoice_id, "reason": "qbo_fetch_failed"}
 
@@ -521,8 +600,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
 
         if subtotal_ok:
             set_stage(conn, qbo_invoice_id, STAGE_CREDITS)
-            # Applicable = non-maint, not stale. Everything here is a candidate
-            # for auto-apply OR human review — never silently ignored.
             open_credits = load_open_credits(conn, qbo_customer_id)
             matches = match_credits_to_wo(open_credits, wo, qbo_inv)
             matched_ids = {c["qbo_payment_id"] for c, _, _ in matches}
@@ -539,15 +616,11 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                 if ar["success"]:
                     remaining -= amt
                     cur = conn.cursor()
-                    # Decrement local unapplied balance
                     cur.execute(
                         "UPDATE billing.customer_payments SET unapplied_amt = GREATEST(unapplied_amt - %s, 0) "
                         "WHERE qbo_payment_id = %s",
                         (amt, credit["qbo_payment_id"]),
                     )
-                    # Record the application in the link table so it persists
-                    # after re-runs (which may clear credits_applied jsonb) and
-                    # so UI queries have a stable source of truth.
                     cur.execute(
                         """INSERT INTO billing.payment_invoice_links
                              (payment_id, invoice_id, amount, applied_via)
@@ -558,10 +631,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                     )
                     conn.commit(); cur.close()
 
-            # Flag unmatched applicable credits for human review — UNLESS the
-            # user already overrode credit_review (credits are for another WO,
-            # not applicable, etc). Override persists across re-runs so
-            # pre_process doesn't keep re-flagging.
             unmatched = [
                 c for c in open_credits
                 if c["qbo_payment_id"] not in matched_ids
@@ -587,13 +656,19 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
         composed = None
 
         if is_memo_locked(invoice):
-            # User already approved / edited this memo — preserve it.
             composed = invoice.get("memo")
             result["memo"] = composed
             result["statement_memo"] = invoice.get("statement_memo") or composed
             print(f"  memo locked — preserving '{composed}'")
         else:
-            memo_result = generate_memo(wo, api_key)
+            # 1) Try deterministic patterns first — instant, free, no API call.
+            # 2) Fall through to the LLM only on miss.
+            memo_result = deterministic_memo(wo, invoice)
+            memo_source = "deterministic"
+            if memo_result is None:
+                memo_result = generate_memo(wo, invoice, api_key)
+                memo_source = "llm"
+
             memo_text = None
             if "error" in memo_result:
                 enrichment_ok = False
@@ -608,6 +683,7 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
             composed = f"WO#{wo_number}: {memo_text}" if memo_text else None
             result["memo"] = composed
             result["statement_memo"] = composed
+            print(f"  memo via {memo_source}: {composed}")
 
         if enrichment_ok and composed:
             set_stage(conn, qbo_invoice_id, STAGE_WRITING)
@@ -641,8 +717,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                 "needs_review_reason": result.get("needs_review_reason")}
 
     except Exception as e:
-        # Exception path — preserve existing invoice fields (memo, class, etc)
-        # via narrow UPDATE instead of full write_result that would null them.
         try:
             fail_flag(conn, qbo_invoice_id, "needs_review",
                       f"pre_processing_error: {str(e)[:200]}")
@@ -658,11 +732,11 @@ def main(qbo_invoice_id: str = None, force: bool = False,
     if not qbo_invoice_id and not bulk_all:
         return {"status": "error", "error": "pass qbo_invoice_id or bulk_all=True"}
 
-    print(f"=== pre_process_invoice (bulk={bulk_all}, limit={limit}, force={force}, sleep={sleep_ms}ms) ===")
+    print(f"=== pre_process_invoice (bulk={bulk_all}, limit={limit}, force={force}, sleep={sleep_ms}ms, model={MODEL}) ===")
     conn = get_db_conn()
     try:
         access_token, realm_id = refresh_qbo_token()
-        api_key = wmill.get_variable(ANTHROPIC_KEY_VAR)
+        api_key = wmill.get_variable(OPENAI_KEY_VAR)
 
         if not bulk_all:
             return process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force)
@@ -672,8 +746,6 @@ def main(qbo_invoice_id: str = None, force: bool = False,
         if include_needs_review:
             statuses.append("'needs_review'")
         if include_ready_to_process:
-            # One-time cleanup / full-queue re-audit. Default off to prevent
-            # accidental overwrite of ready_to_process invoices during normal runs.
             statuses.append("'ready_to_process'")
         sql = (f"SELECT qbo_invoice_id FROM billing.invoices "
                f"WHERE billing_status IN ({', '.join(statuses)}) "

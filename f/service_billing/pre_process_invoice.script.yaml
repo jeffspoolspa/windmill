@@ -1,9 +1,16 @@
-summary: Processed is terminal — never revert on re-run even with force
-description: 'Bug: bulk pre_process (force=True) bypassed the processed-state
-  guard, then write_result overwrote billing_status back to ready_to_process or
-  needs_review. One invoice (ISLAND RETREAT 7798893) was reverted this way after
-  it had been successfully processed. Fix: processed is terminal regardless of
-  force; if you want to re-run pre-processing, Revert to Review first.'
+summary: OpenAI gpt-4o-mini + structured outputs; deterministic 'not on
+  consumables' supplies; Robert O'Brien pool-tag rule; tech_instructions +
+  customer added to prompt; jitter on retries
+description: "Migrated memo generation from Anthropic Sonnet 4 to OpenAI
+  gpt-4o-mini. (1) Tier 1 OpenAI is 7x ITPM and 10x RPM headroom vs Anthropic
+  Tier 1, plus 20-25x cheaper, and auto-tiers on spend instead of sales-call
+  gating. (2) Switched to structured outputs via response_format json_schema,
+  eliminating parse-failure path. (3) Added deterministic_memo for 'not on
+  consumables' descriptions (April Supplies, May Supplies etc — keyed off
+  invoice.txn_date). (4) Robert O'Brien customer rule: memo MUST end with (LAP
+  POOL) | (VOLLEYBALL) | (SPA); low confidence if pool can't be determined from
+  any field. (5) tech_instructions and customer now sent in the user payload.
+  (6) Jitter on 429 retry backoff so N parallel callers don't sync-wake."
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
 concurrency_time_window_s: 0
 concurrent_limit: 2
