@@ -339,6 +339,37 @@ def deterministic_memo(wo, invoice):
     return None
 
 
+# ─── O'Brien deterministic post-check ────────────────────────────────────
+# The system prompt tells the model "if customer is Robert O'Brien, the memo
+# MUST end with a pool tag," but LLMs sometimes ignore explicit rules
+# (62718's "Moat Line Clearing" is the example: the description had no pool
+# name and the model declined to add a tag — but it ALSO didn't return low
+# confidence, defeating the rule). This is a belt-and-suspenders deterministic
+# check: regardless of what the model returned, if the customer is O'Brien
+# and the memo lacks a pool tag, demote confidence to force human review.
+
+_OBRIEN_POOL_TAGS = ("(LAP POOL)", "(VOLLEYBALL)", "(SPA)")
+
+
+def _is_obrien_customer(name):
+    """True if customer name looks like Robert O'Brien in any format
+    (handles "ROBERT O'BRIEN", "O'BRIEN, ROBERT", "obrien robert", etc).
+    Comma is normalized to space so the surname/forename order doesn't matter.
+    """
+    if not name:
+        return False
+    n = name.lower().replace(",", " ")
+    return ("robert" in n) and ("obrien" in n or "o'brien" in n)
+
+
+def _has_obrien_pool_tag(memo):
+    """True if memo contains one of the three required pool tags."""
+    if not memo:
+        return False
+    upper = memo.upper()
+    return any(tag in upper for tag in _OBRIEN_POOL_TAGS)
+
+
 def generate_memo(wo, invoice, api_key, max_retries=3):
     """OpenAI chat.completions with structured outputs (json_schema).
 
@@ -668,6 +699,28 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
             if memo_result is None:
                 memo_result = generate_memo(wo, invoice, api_key)
                 memo_source = "llm"
+
+            # Belt-and-suspenders: O'Brien customer rule.
+            # The model SHOULD return low confidence when it can't determine
+            # the pool, but sometimes glosses over the rule and produces a
+            # generic memo (e.g. "Moat Line Clearing" with confidence 0.9).
+            # Independently verify: O'Brien customer + memo without a pool
+            # tag → demote confidence so the invoice routes to needs_review.
+            if memo_result.get("memo") and "error" not in memo_result:
+                customer_for_check = (
+                    invoice.get("customer_name") or wo.get("customer") or ""
+                )
+                if (_is_obrien_customer(customer_for_check)
+                        and not _has_obrien_pool_tag(memo_result["memo"])):
+                    orig_reason = memo_result.get("reasoning") or ""
+                    memo_result = {
+                        **memo_result,
+                        "confidence": min(memo_result.get("confidence", 0), 0.4),
+                        "reasoning": (
+                            f"O'Brien customer but memo lacks pool tag — "
+                            f"flagged for human review. Original: {orig_reason}"
+                        ),
+                    }
 
             memo_text = None
             if "error" in memo_result:
