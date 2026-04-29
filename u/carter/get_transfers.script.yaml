@@ -1,0 +1,10 @@
+summary: get_transfers
+description: ''
+lock: '!inline u/carter/get_transfers.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []

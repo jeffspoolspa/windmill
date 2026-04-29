@@ -1,0 +1,9 @@
+summary: rc_lookup_phone_number
+description: Look up all calls to/from a phone number in the RingCentral call
+  log. Searches the Brunswick account call log, finds matching calls, identifies
+  recordings (including park location legs), and optionally transcribes them via
+  OpenAI. Accepts any phone number format.
+lock: '!inline u/carter/rc_lookup_number.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

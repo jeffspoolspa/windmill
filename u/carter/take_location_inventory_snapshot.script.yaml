@@ -1,0 +1,18 @@
+summary: take_snapshot
+description: ''
+lock: '!inline u/carter/take_location_inventory_snapshot.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - event_id
+    - zoho_location_id
+  properties:
+    event_id:
+      type: integer
+      description: ''
+      default: null
+  required:
+    - event_id

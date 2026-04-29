@@ -1,0 +1,54 @@
+summary: ''
+description: ''
+value:
+  modules:
+    - id: a
+      summary: create_bill
+      value:
+        type: rawscript
+        content: '!inline create_bill.py'
+        input_transforms:
+          purchase_receipt:
+            type: javascript
+            expr: flow_input.purchasereceive
+        lock: '!inline create_bill.lock'
+        language: python3
+      continue_on_error: false
+    - id: b
+      summary: create_invoice
+      value:
+        type: rawscript
+        content: '!inline create_invoice.py'
+        input_transforms:
+          bill_id:
+            type: javascript
+            expr: results.a.bill_id
+          bill_number:
+            type: javascript
+            expr: results.a.bill_number
+          po_id:
+            type: javascript
+            expr: results.a.po_id
+          po_number:
+            type: javascript
+            expr: results.a.po_number
+          po_type:
+            type: javascript
+            expr: results.a.po_type
+          work_order_number:
+            type: javascript
+            expr: results.a.work_order_number
+        lock: '!inline create_invoice.lock'
+        language: python3
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - purchase_receive
+  properties:
+    purchase_receive:
+      type: object
+      description: ''
+      default: null
+  required: []

@@ -1,0 +1,9 @@
+summary: rc_extension_call_analysis
+description: Analyze call patterns for a RC extension over multiple months.
+  Tracks answered/missed/outbound calls, identifies avoidable missed calls (not
+  on another call or within 1 min of one), and breaks down patterns by time of
+  day and day of week.
+lock: '!inline u/carter/rc_call_analysis.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

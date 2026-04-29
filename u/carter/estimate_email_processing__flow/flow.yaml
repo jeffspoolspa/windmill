@@ -1,0 +1,205 @@
+summary: estimate_email_processing
+description: ''
+value:
+  modules:
+    - id: a
+      summary: classify_email
+      value:
+        type: rawscript
+        content: '!inline classify_email.py'
+        input_transforms:
+          parsed_email:
+            type: javascript
+            expr: flow_input.parsed_email
+        lock: '!inline classify_email.lock'
+        language: python3
+    - id: b
+      summary: ''
+      value:
+        type: branchone
+        branches:
+          - summary: Initial Estimate Email
+            modules:
+              - id: j
+                summary: get_email_details
+                value:
+                  type: rawscript
+                  content: '!inline get_email_details.py'
+                  input_transforms:
+                    message_id_header:
+                      type: javascript
+                      expr: flow_input.parsed_email['headers']['Message-ID']
+                  assets:
+                    - access_type: null
+                      alt_access_type: null
+                      kind: resource
+                      path: u/carter/gmail_gcp_service_account
+                  lock: '!inline get_email_details.lock'
+                  language: python3
+                continue_on_error: false
+              - id: k
+                summary: format_details_and_upload_to_table
+                value:
+                  type: rawscript
+                  content: '!inline format_details_and_upload_to_table.py'
+                  input_transforms:
+                    gmail_message:
+                      type: javascript
+                      expr: results.j
+                  lock: '!inline format_details_and_upload_to_table.lock'
+                  language: python3
+              - id: e
+                summary: get_estimate_details
+                value:
+                  type: rawscript
+                  content: '!inline get_estimate_details.py'
+                  input_transforms:
+                    x:
+                      type: javascript
+                      expr: flow_input.parsed_email
+                  lock: '!inline get_estimate_details.lock'
+                  language: python3
+              - id: n
+                summary: ensure_work_order_exists
+                value:
+                  type: rawscript
+                  content: '!inline ensure_work_order_exists.py'
+                  input_transforms:
+                    assigned_to:
+                      type: javascript
+                      expr: results.e['Assigned To'] ?? null
+                    email_address:
+                      type: javascript
+                      expr: results.e['To'] ?? null
+                    wo_number:
+                      type: javascript
+                      expr: "results.e['Work Order #']"
+                    work_description:
+                      type: javascript
+                      expr: results.e['Work Description'] ?? null
+                  lock: '!inline ensure_work_order_exists.lock'
+                  language: python3
+              - id: g
+                summary: upsert_estimate
+                value:
+                  type: rawscript
+                  content: '!inline upsert_estimate.py'
+                  input_transforms:
+                    x:
+                      type: javascript
+                      expr: results.e
+                  lock: '!inline upsert_estimate.lock'
+                  language: python3
+              - id: h
+                summary: upload_estimate_pdf
+                value:
+                  type: rawscript
+                  content: '!inline upload_estimate_pdf.py'
+                  input_transforms:
+                    html_content:
+                      type: javascript
+                      expr: results.e['html']
+                    subject:
+                      type: javascript
+                      expr: flow_input.parsed_email['headers']['Subject']
+                    wo_number:
+                      type: javascript
+                      expr: "results.e['Work Order #']"
+                  lock: '!inline upload_estimate_pdf.lock'
+                  language: python3
+            expr: results.a['subject'].includes("Estimate") && results.a['from'] ==
+              "donotreply@ionpoolcare.com" || results.a['from'] ==
+              "info@perfectpoolscleaning.com"
+            parallel: true
+            skip_failure: true
+          - summary: Estimate Acceptance/Declined
+            modules:
+              - id: d
+                summary: get_wo_number
+                value:
+                  type: rawscript
+                  content: '!inline get_wo_number.py'
+                  input_transforms:
+                    x:
+                      type: javascript
+                      expr: results.a['subject']
+                  lock: '!inline get_wo_number.lock'
+                  language: python3
+              - id: f
+                summary: mark_as_accepted_or_declined
+                value:
+                  type: rawscript
+                  content: '!inline mark_as_accepted_or_declined.py'
+                  input_transforms:
+                    subject:
+                      type: javascript
+                      expr: results.a['subject']
+                    wo_number:
+                      type: javascript
+                      expr: "results.d['Work Order #']"
+                  lock: '!inline mark_as_accepted_or_declined.lock'
+                  language: python3
+            expr: results.a['subject'].includes("Acceptance") ||
+              results.a['subject'].includes("Declined")
+            parallel: true
+            skip_failure: true
+          - summary: Estimate Reply
+            modules:
+              - id: l
+                summary: get_email_details
+                value:
+                  type: rawscript
+                  content: '!inline get_email_details_1.py'
+                  input_transforms:
+                    message_id_header:
+                      type: javascript
+                      expr: flow_input.parsed_email['headers']['Message-ID']
+                  assets:
+                    - access_type: null
+                      alt_access_type: null
+                      kind: resource
+                      path: u/carter/gmail_gcp_service_account
+                  lock: '!inline get_email_details_1.lock'
+                  language: python3
+              - id: m
+                summary: format_details_and_upload_to_table
+                value:
+                  type: rawscript
+                  content: '!inline format_details_and_upload_to_table_2.py'
+                  input_transforms:
+                    emails:
+                      type: javascript
+                      expr: results.l['emails']
+                  lock: '!inline format_details_and_upload_to_table_2.lock'
+                  language: python3
+            expr: results.a['subject'].includes("Estimate") && results.a['from'] !=
+              "donotreply@ionpoolcare.com"
+            parallel: true
+            skip_failure: true
+        default:
+          - id: i
+            value:
+              type: rawscript
+              content: '!inline i.py'
+              input_transforms:
+                x:
+                  type: javascript
+                  expr: flow_input.parsed_email
+              lock: '!inline i.lock'
+              language: python3
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - raw_email
+    - parsed_email
+  properties:
+    parsed_email:
+      type: object
+      description: ''
+    raw_email:
+      type: string
+      description: ''
+      default: ''
+  required: []

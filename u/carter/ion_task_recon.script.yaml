@@ -1,0 +1,9 @@
+summary: 'ION Recon: Map customer task endpoints'
+description: Recon script to discover ION ColdFusion endpoints for customer task
+  management. Navigates Customers → search → Tasks tab → task detail, logging
+  all network requests.
+lock: '!inline u/carter/ion_task_recon.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium

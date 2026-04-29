@@ -1,0 +1,19 @@
+# py: 3.11
+beautifulsoup4==4.14.2
+brotli==1.1.0
+bs4==0.0.2
+cffi==2.0.0
+cssselect2==0.8.0
+fonttools==4.60.1
+pillow==12.0.0
+psycopg2-binary==2.9.11
+pycparser==2.23
+pydyf==0.11.0
+pyphen==0.17.2
+soupsieve==2.8
+tinycss2==1.4.0
+tinyhtml5==2.0.0
+typing-extensions==4.15.0
+weasyprint==66.0
+webencodings==0.5.1
+zopfli==0.2.3.post1

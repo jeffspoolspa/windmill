@@ -1,0 +1,40 @@
+summary: send_sms_rc
+description: ''
+lock: '!inline u/carter/rightful_script.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    home_phone:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    message:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    mobile_phone:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    office:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    wo_number:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - wo_number
+    - home_phone
+    - mobile_phone
+    - office
+    - message

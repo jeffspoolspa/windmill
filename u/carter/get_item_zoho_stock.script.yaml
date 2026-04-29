@@ -1,0 +1,24 @@
+summary: get_item_zoho_stock
+description: ''
+lock: '!inline u/carter/get_item_zoho_stock.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - event_id
+    - zoho_location_id
+  properties:
+    zoho_item_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    zoho_location_id:
+      type: integer
+      description: ''
+      default: null
+  required:
+    - zoho_item_id
+    - zoho_location_id

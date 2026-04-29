@@ -1,0 +1,8 @@
+summary: rc_deep_phone_lookup
+description: Deep phone number lookup — searches RC call log day-by-day to avoid
+  250-per-page pagination limits. Slower but guaranteed to find every call.
+  Optionally transcribes recordings.
+lock: '!inline u/carter/rc_deep_lookup.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

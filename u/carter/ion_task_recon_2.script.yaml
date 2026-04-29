@@ -1,0 +1,8 @@
+summary: 'ION Recon 2: Robyn Cheek task detail + edit form mapping'
+description: "Recon 2: Deep dive into Robyn Cheek's tasks. Direct HTTP fetch of
+  task list, find perpetual/active task, map edit form and save endpoints."
+lock: '!inline u/carter/ion_task_recon_2.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium

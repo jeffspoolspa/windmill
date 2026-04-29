@@ -1,0 +1,26 @@
+summary: incoming_wo_assignment
+description: ''
+lock: '!inline u/carter/effective_script.script.lock'
+concurrency_time_window_s: 0
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - email
+  properties:
+    parsed_email:
+      type: object
+      description: ''
+      default: null
+      properties: {}
+    raw_email:
+      type: object
+      description: ''
+      default: null
+      originalType: string
+      properties: {}
+  required:
+    - raw_email
+    - parsed_email

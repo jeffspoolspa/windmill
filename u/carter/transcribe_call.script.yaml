@@ -1,0 +1,7 @@
+summary: transcribe_call_recording
+description: Download a call recording from RingCentral by recording ID and
+  transcribe it using OpenAI gpt-4o-transcribe-diarize with speaker labels.
+lock: '!inline u/carter/transcribe_call.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

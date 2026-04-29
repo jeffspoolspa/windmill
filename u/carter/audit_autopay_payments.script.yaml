@@ -1,0 +1,21 @@
+summary: 'Audit autopay records: cross-check Airtable completed records against
+  QBO payments and charges'
+description: >-
+  Pulls all "Completed" records from Airtable autopay table, extracts Payment
+  IDs and Charge IDs from the Notes field, then verifies each payment still
+  exists in QBO and each charge was actually captured at the processor level.
+
+
+  Returns categorized results:
+
+  - CRITICAL: Customer was charged but QBO payment is deleted/missing
+
+  - WARNING: QBO payment missing, charge status unknown
+
+  - INFO: Payment deleted but customer not charged
+
+  - METADATA: Payment exists but missing CreditCardPayment block
+lock: '!inline u/carter/audit_autopay_payments.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

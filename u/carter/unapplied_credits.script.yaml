@@ -1,0 +1,10 @@
+summary: unapplied_credits
+description: ''
+lock: '!inline u/carter/unapplied_credits.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []

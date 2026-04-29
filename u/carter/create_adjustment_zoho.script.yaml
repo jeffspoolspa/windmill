@@ -1,0 +1,29 @@
+summary: create_adjustment_zoho
+description: ''
+lock: '!inline u/carter/create_adjustment_zoho.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    adjustments:
+      type: array
+      description: ''
+      default: null
+      items:
+        type: string
+      originalType: string[]
+    event_id:
+      type: integer
+      description: ''
+      default: null
+    zoho_location_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - adjustments
+    - zoho_location_id
+    - event_id

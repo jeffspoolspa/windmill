@@ -1,0 +1,22 @@
+summary: get_est_emails
+description: ''
+lock: '!inline u/carter/get_est_emails.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    user_email:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    wo_number:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - wo_number
+    - user_email

@@ -1,0 +1,9 @@
+summary: 'ION Recon 3: Task edit form + save endpoint mapping'
+description: 'Recon 3: Fetch the task edit form for EventID 1553095 (Robyn Cheek
+  perpetual task), map every form field, dropdown, submit button, and JavaScript
+  handler.'
+lock: '!inline u/carter/ion_task_recon_3.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium

@@ -1,0 +1,8 @@
+summary: Landing page for bi-weekly to weekly switch email campaign
+description: Serves HTML landing page for customers clicking 'Switch to Weekly
+  Service' from email campaign. Called via webhook GET request with query params
+  (name, email, office, rate, etc). Returns raw HTML response.
+lock: '!inline u/carter/switch_to_weekly_page.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
