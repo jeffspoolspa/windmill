@@ -1,12 +1,9 @@
-summary: Push user-edited classification (memo/class/payment_method) to QBO +
-  lock memo + mark enriched
-description: "Atomic 'Save & mark ready' backend: PATCHes QBO with user-supplied
-  memo + statement_memo + qbo_class, then writes the same values to
-  billing.invoices along with memo_locked=true and enrichment_ok=true. Strips
-  memo_low_confidence from needs_review_reason (the lock affirms the memo).
-  Calls billing.recheck_invoice_status to recompute billing_status from current
-  state — invoice should flip to ready_to_process if no other reasons remain.
-  Idempotent."
+summary: Track webhook_expectations after QBO PATCH for sync verification
+description: Inserts a webhook_expectations row after a successful QBO Invoice
+  PATCH. The webhook handler's confirm_webhook_expectation RPC marks it
+  confirmed when the matching invoice.update webhook arrives; the cdc_reconciler
+  flips overdue rows to 'missing'. Closes the verification loop on
+  user-initiated invoice edits.
 lock: '!inline f/service_billing/push_invoice_edits.script.lock'
 concurrency_time_window_s: 0
 concurrent_limit: 5

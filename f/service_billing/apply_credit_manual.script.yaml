@@ -1,12 +1,9 @@
-summary: Drop chained pre_process_invoice (redundant with reactive credit trigger)
-description: "Removes the async pre_process_invoice fire-and-forget call after a
-  successful credit apply. The reactive trg_recheck_credits_on_payment_change
-  trigger now handles status recomputation when customer_payments.unapplied_amt
-  changes; recheck_invoice_status (called inline above) covers the rest. This
-  eliminates a wasteful OpenAI call + QBO PATCH on every credit application —
-  visible improvement: the PreProcessActivity toast no longer appears for credit
-  applies. Manual 'Re-run pre-process' remains the escape hatch for cases that
-  actually need memo regeneration."
+summary: Track webhook_expectations for both Payment/CreditMemo and Invoice
+  after credit apply
+description: 'Inserts two webhook_expectations rows after a successful credit
+  apply: one for the Payment (or CreditMemo) we modified, one for the Invoice
+  whose balance changed. Webhook handler confirms when matching events arrive;
+  reconciler flags missing ones for surface to the sync issues badge.'
 lock: '!inline f/service_billing/apply_credit_manual.script.lock'
 concurrency_time_window_s: 0
 concurrent_limit: 5

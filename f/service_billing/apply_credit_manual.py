@@ -295,6 +295,28 @@ def main(qbo_invoice_id: str, credit_id: str, amount: float = None):
         print(f"  recheck: {recheck.get('prev_billing_status')} → "
               f"{recheck.get('new_billing_status')} (changed={recheck.get('changed')})")
 
+        # Track expected QBO webhooks for both the Payment we modified
+        # AND the Invoice whose balance changed. The webhook handler will
+        # mark each as confirmed when the matching event arrives; the
+        # cdc_reconciler flips overdue ones to 'missing'.
+        try:
+            _exp_cur = conn.cursor()
+            # The credit_id may be a CreditMemo prefixed with "CM-" — strip
+            # it so the entity_id matches what QBO emits in its webhook.
+            _cm_match = credit_id.startswith("CM-")
+            _entity_type = "CreditMemo" if _cm_match else "Payment"
+            _entity_id = credit_id[3:] if _cm_match else credit_id
+            _exp_cur.execute("""
+                INSERT INTO billing.webhook_expectations
+                  (entity_type, entity_id, expected_by, source)
+                VALUES (%s, %s, now() + interval '5 minutes', 'self_initiated'),
+                       ('Invoice', %s, now() + interval '5 minutes', 'self_initiated')
+            """, (_entity_type, _entity_id, qbo_invoice_id))
+            conn.commit()
+            _exp_cur.close()
+        except Exception as e:
+            print(f"  (webhook_expectation insert failed: {e})")
+
         # NOTE: previously this script chained an async pre_process_invoice
         # run to re-derive subtotal + memo. With the new reactive
         # architecture, that's redundant + wasteful:

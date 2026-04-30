@@ -165,6 +165,27 @@ def main(qbo_invoice_id: str,
                     "qbo_invoice_id": qbo_invoice_id}
         print(f"  QBO PATCH ok ({list(updates.keys())})")
 
+        # Track that we expect a corresponding QBO webhook back. The webhook
+        # handler's confirm_webhook_expectation RPC will mark this row
+        # confirmed when the matching invoice.update event arrives. If it
+        # doesn't arrive within the grace window, the cdc_reconciler flips
+        # the row to status='missing' — surfaces in the sync issues badge.
+        try:
+            _exp_conn = get_db_conn()
+            _cur = _exp_conn.cursor()
+            _cur.execute("""
+                INSERT INTO billing.webhook_expectations
+                  (entity_type, entity_id, expected_by, source)
+                VALUES ('Invoice', %s, now() + interval '5 minutes', 'self_initiated')
+            """, (qbo_invoice_id,))
+            _exp_conn.commit()
+            _cur.close()
+            _exp_conn.close()
+        except Exception as e:
+            # Expectation tracking is observability — don't fail the operation
+            # if we can't write the row. Log and continue.
+            print(f"  (webhook_expectation insert failed: {e})")
+
     # Update the cache. Set memo_locked=true and enrichment_ok=true. Strip
     # memo_low_confidence from needs_review_reason since the user has
     # affirmed the memo.
