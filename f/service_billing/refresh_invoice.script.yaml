@@ -1,12 +1,12 @@
-summary: Add Void handling (operation hint + heuristic); WO unlink →
-  awaiting_invoice; needs_review reason invoice_voided
-description: "Webhook-driven refresh script for the Invoice entity. Four paths:
-  existing invoice (UPSERT + always-try-link + recheck), new invoice (full
-  INSERT + link + auto-fire pre-processing), voided invoice (operation='Void'
-  from webhook OR heuristic from response → unlink WO → mark needs_review with
-  reason invoice_voided), or hard-deleted invoice (404 → same as void but reason
-  invoice_deleted_in_qbo). Both void/delete paths leave the WO eligible for
-  re-invoicing (returns to awaiting_invoice via v_awaiting_invoice)."
+summary: Sync memo from QBO; auto-lock + clear low-conf flag on detected
+  external memo edits
+description: 'Two changes to the UPSERT path: (1) memo + statement_memo are now
+  in the upsert column list — previously a user editing the memo in QBO went
+  silently ignored because we never wrote back to cache. (2) When the cache had
+  a memo and QBO returns a different one, treat as user-affirmed: set
+  memo_locked=true and strip memo_low_confidence from needs_review_reason. Pairs
+  with the pre_process_invoice update that locks high-confidence memos at write
+  time.'
 lock: '!inline f/service_billing/refresh_invoice.script.lock'
 concurrency_time_window_s: 0
 concurrent_limit: 5

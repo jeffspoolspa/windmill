@@ -178,7 +178,11 @@ def looks_voided(qbo_inv):
 
 
 def upsert_invoice(conn, qbo_inv):
-    """Full upsert. Returns (was_new: bool, qbo_invoice_id: str)."""
+    """Full upsert. Returns (was_new, qbo_invoice_id, prev_memo, qbo_memo).
+
+    The latter two enable the caller to detect when QBO's PrivateNote
+    differs from what we had cached — that signals a user edited the memo
+    directly in QBO and we should auto-lock + clear memo_low_confidence."""
     customer_ref = qbo_inv.get("CustomerRef", {}) or {}
     line_items = parse_line_items(qbo_inv)
     qbo_invoice_id = qbo_inv.get("Id")
@@ -188,18 +192,30 @@ def upsert_invoice(conn, qbo_inv):
 
     cur = conn.cursor()
     cur.execute(
-        "SELECT 1 FROM billing.invoices WHERE qbo_invoice_id = %s",
+        "SELECT memo, statement_memo FROM billing.invoices WHERE qbo_invoice_id = %s",
         (qbo_invoice_id,),
     )
-    was_new = cur.fetchone() is None
+    existing = cur.fetchone()
+    was_new = existing is None
+    prev_memo = existing[0] if existing else None
+
+    # Pull memo + statement_memo from QBO. PrivateNote is what we use as the
+    # canonical memo (pre_process writes the composed "WO#XXX: <text>" there);
+    # CustomerMemo.value mirrors it. If the user edits in QBO they typically
+    # change CustomerMemo first, so accept either as the new memo source.
+    qbo_private_note = qbo_inv.get("PrivateNote")
+    qbo_customer_memo = (qbo_inv.get("CustomerMemo") or {}).get("value")
+    qbo_memo = qbo_private_note or qbo_customer_memo
 
     cur.execute("""
         INSERT INTO billing.invoices (
             qbo_invoice_id, doc_number, qbo_customer_id, customer_name,
             txn_date, due_date, total_amt, subtotal, balance, email_status,
+            memo, statement_memo,
             line_items, raw, fetched_at, qbo_last_updated_time,
             sync_state, sync_state_changed_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now(), %s,
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  %s::jsonb, %s::jsonb, now(), %s,
                   'synced', now())
         ON CONFLICT (qbo_invoice_id) DO UPDATE SET
             doc_number            = EXCLUDED.doc_number,
@@ -211,6 +227,8 @@ def upsert_invoice(conn, qbo_inv):
             subtotal              = EXCLUDED.subtotal,
             balance               = EXCLUDED.balance,
             email_status          = EXCLUDED.email_status,
+            memo                  = EXCLUDED.memo,
+            statement_memo        = EXCLUDED.statement_memo,
             line_items            = EXCLUDED.line_items,
             raw                   = EXCLUDED.raw,
             fetched_at            = now(),
@@ -226,11 +244,12 @@ def upsert_invoice(conn, qbo_inv):
         qbo_invoice_subtotal(qbo_inv),
         float(qbo_inv.get("Balance", 0) or 0),
         qbo_inv.get("EmailStatus"),
+        qbo_memo, qbo_customer_memo or qbo_memo,
         _dumps(line_items), _dumps(qbo_inv),
         qbo_last_updated,
     ))
     cur.close()
-    return was_new, qbo_invoice_id
+    return was_new, qbo_invoice_id, prev_memo, qbo_memo
 
 
 def link_to_work_order(conn, qbo_invoice_id, doc_number):
@@ -424,8 +443,39 @@ def main(qbo_invoice_id: str, operation: str = ""):
     # Normal upsert path
     conn = get_db_conn()
     try:
-        was_new, qbo_invoice_id = upsert_invoice(conn, qbo_inv)
+        was_new, qbo_invoice_id, prev_memo, qbo_memo = upsert_invoice(conn, qbo_inv)
         conn.commit()
+
+        # Detect external memo edit: cache had a memo, QBO has a different
+        # one. That means a human edited it in QBO directly (or another
+        # integration did). Treat as user-affirmed:
+        #   - Lock the memo so pre_process re-runs preserve it
+        #   - Strip memo_low_confidence (NN%) from needs_review_reason
+        # We skip this for the new-invoice path (was_new=True) — there's no
+        # prior cache value to compare against, and pre_process is about to
+        # run and set its own lock state.
+        if (not was_new) and prev_memo is not None and qbo_memo is not None \
+                and prev_memo != qbo_memo:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE billing.invoices
+                SET memo_locked = true,
+                    needs_review_reason = NULLIF(
+                        regexp_replace(
+                            COALESCE(needs_review_reason, ''),
+                            'memo_low_confidence \\([0-9]+%\\)(, )?',
+                            '',
+                            'g'
+                        ),
+                        ''
+                    )
+                WHERE qbo_invoice_id = %s
+            """, (qbo_invoice_id,))
+            cur.close()
+            conn.commit()
+            print(f"  external memo edit detected — locked + cleared low-conf flag "
+                  f"(prev='{prev_memo[:60] if prev_memo else None}', "
+                  f"new='{qbo_memo[:60] if qbo_memo else None}')")
 
         # Always try the WO link — idempotent, no-op when link exists.
         link_result = link_to_work_order(conn, qbo_invoice_id, qbo_inv.get("DocNumber"))
