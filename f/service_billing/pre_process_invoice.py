@@ -53,6 +53,27 @@ def get_db_conn():
     )
 
 
+def set_skip_recheck(conn, on: bool):
+    """Toggle the billing.skip_recheck GUC on the current session.
+
+    The unified column trigger billing.fn_recheck_on_invoice_change reads
+    this and bails when 'on'. Pre_process needs that bail because it writes
+    subtotal / enrichment_ok / memo / payment_method / qbo_class across
+    multiple commits and computes the final billing_status itself. Without
+    the skip, the trigger would fire mid-flight and the invoice would
+    briefly transition to ready_to_process and back, causing UI flickers
+    over Realtime. Always RESET in the finally block so the connection is
+    safe to reuse (Windmill recycles connection pool).
+    """
+    cur = conn.cursor()
+    if on:
+        cur.execute("SET billing.skip_recheck = 'on'")
+    else:
+        cur.execute("RESET billing.skip_recheck")
+    conn.commit()
+    cur.close()
+
+
 def set_stage(conn, qbo_invoice_id, stage):
     """Persist the current stage so the UI progress modal can animate.
     Autocommits a small UPDATE so Realtime fires immediately - do NOT bundle
@@ -734,6 +755,16 @@ def main(qbo_invoice_id: str = None, force: bool = False,
     print(f"=== pre_process_invoice (bulk={bulk_all}, limit={limit}, force={force}, sleep={sleep_ms}ms, model={MODEL}) ===")
     conn = get_db_conn()
     try:
+        # Suppress the unified column-trigger recheck for the duration of
+        # this run. We compute billing_status ourselves in write_result()
+        # after writing all criteria atomically (subtotal cache, payment
+        # method, class, memo, enrichment_ok). Without this skip, the
+        # trigger fires on each intermediate UPDATE and re-runs recheck
+        # against a half-populated row, producing brief status flickers
+        # over Realtime. Always RESET in finally so connection reuse is
+        # safe (psycopg2 pool reuse, Windmill worker recycling, etc).
+        set_skip_recheck(conn, True)
+
         access_token, realm_id = refresh_qbo_token()
         api_key = wmill.get_variable(OPENAI_KEY_VAR)
 
@@ -774,4 +805,10 @@ def main(qbo_invoice_id: str = None, force: bool = False,
         return {"status": "success", "total": len(targets), "stats": stats, "sample": sample}
 
     finally:
+        # Always clear the GUC, even on exceptions, so a recycled conn
+        # in another script doesn't inherit the skip.
+        try:
+            set_skip_recheck(conn, False)
+        except Exception:
+            pass
         conn.close()

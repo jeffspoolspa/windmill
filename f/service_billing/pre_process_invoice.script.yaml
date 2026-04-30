@@ -1,11 +1,8 @@
-summary: Lock high-confidence memos so subsequent re-runs preserve them (no
-  extra OpenAI calls)
-description: Set memo_locked=true when the LLM returns confidence >= 0.85 or
-  when a deterministic shortcut fires (April Supplies, etc., confidence 1.0).
-  Low-confidence memos stay unlocked — they need user affirmation (manual lock
-  action OR a QBO-side edit detected by refresh_invoice) to be considered final.
-  Pairs with the upcoming refresh_invoice update that auto-locks on detected
-  QBO-side memo edits.
+summary: Skip column-trigger recheck during atomic pre_process writes
+description: Set billing.skip_recheck=on while pre_process writes multiple
+  criteria fields atomically. Without this skip, the new unified column trigger
+  trg_recheck_on_invoice_change fires mid-flight and produces status flickers
+  over Realtime. RESET in finally so connection reuse is clean.
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
 concurrency_time_window_s: 0
 concurrent_limit: 5
