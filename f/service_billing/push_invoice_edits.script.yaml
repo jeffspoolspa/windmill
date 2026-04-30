@@ -1,0 +1,15 @@
+summary: Push user-edited classification (memo/class/payment_method) to QBO +
+  lock memo + mark enriched
+description: "Atomic 'Save & mark ready' backend: PATCHes QBO with user-supplied
+  memo + statement_memo + qbo_class, then writes the same values to
+  billing.invoices along with memo_locked=true and enrichment_ok=true. Strips
+  memo_low_confidence from needs_review_reason (the lock affirms the memo).
+  Calls billing.recheck_invoice_status to recompute billing_status from current
+  state — invoice should flip to ready_to_process if no other reasons remain.
+  Idempotent."
+lock: '!inline f/service_billing/push_invoice_edits.script.lock'
+concurrency_time_window_s: 0
+concurrent_limit: 5
+has_on_behalf_of: false
+kind: script
+schema: null
