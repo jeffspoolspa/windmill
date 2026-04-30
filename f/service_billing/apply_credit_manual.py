@@ -295,18 +295,17 @@ def main(qbo_invoice_id: str, credit_id: str, amount: float = None):
         print(f"  recheck: {recheck.get('prev_billing_status')} → "
               f"{recheck.get('new_billing_status')} (changed={recheck.get('changed')})")
 
-        # Fire pre_process async as a backstop — it re-does subtotal + memo
-        # which the recheck can't cover. Cheap (concurrent_limit=2 on their
-        # side) and doesn't block this response.
-        try:
-            wmill.run_script_by_path_async(
-                path="f/service_billing/pre_process_invoice",
-                args={"qbo_invoice_id": qbo_invoice_id, "bulk_all": False, "force": True},
-            )
-            chained = True
-        except Exception as e:
-            print(f"  (pre_process chain failed: {e})")
-            chained = False
+        # NOTE: previously this script chained an async pre_process_invoice
+        # run to re-derive subtotal + memo. With the new reactive
+        # architecture, that's redundant + wasteful:
+        #   - subtotal_ok is recomputed by recheck (called above) AND by
+        #     the reactive triggers we'll add later
+        #   - credit_review is recomputed by trg_recheck_credits_on_payment_change
+        #     which fires on the customer_payments UPDATE we just did
+        #   - memo doesn't depend on credits and shouldn't be regenerated
+        #     (would burn an OpenAI call + re-PATCH QBO)
+        # Manual "Re-run pre-process" remains the escape hatch when memo
+        # actually needs regeneration.
 
         return {
             "status": "success",
@@ -324,7 +323,7 @@ def main(qbo_invoice_id: str, credit_id: str, amount: float = None):
                 "prev_reason": recheck.get("prev_reason"),
                 "new_reason": recheck.get("new_reason"),
             }),
-            "chained_pre_process": chained,
+            "chained_pre_process": False,
         }
     finally:
         conn.close()
