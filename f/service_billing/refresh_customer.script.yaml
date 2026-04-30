@@ -1,9 +1,10 @@
-summary: Single-customer QBO refresh — propagates display_name renames to invoices
-description: 'Webhook-driven cache refresh script. Called by /api/webhooks/qbo
-  when QBO fires the matching entity event. Idempotent: safe to call multiple
-  times for the same entity (re-deliveries from Intuit, manual retries,
-  reconciler healing). Returns a status object the webhook handler logs to
-  billing.webhook_log.'
+summary: Single-customer QBO -> Supabase refresh; upserts public.Customers +
+  propagates display_name renames
+description: 'Webhook-driven cache refresh script for the Customer entity.
+  Upserts QBO customer state into public.Customers (note: capital C,
+  case-sensitive), keeping qbo_customer_id, display_name, address, contact info,
+  balance, and is_active in sync. Also propagates display_name renames to
+  billing.invoices.customer_name. Idempotent.'
 lock: '!inline f/service_billing/refresh_customer.script.lock'
 concurrency_time_window_s: 0
 concurrent_limit: 5

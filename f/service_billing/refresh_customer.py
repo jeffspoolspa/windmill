@@ -1,22 +1,13 @@
 # f/service_billing/refresh_customer
 #
-# Customer-entity webhook handler. Triggered when a Customer is created or
-# updated in QBO. We don't have a dedicated `customers` table (customer info
-# is denormalized into invoices and payments), so this script's job is to:
+# Single-customer QBO -> Supabase refresh. Triggered by the QBO webhook
+# handler when a Customer is created or updated in QBO. Upserts the QBO
+# customer into public."Customers" (note: case-sensitive — Supabase
+# auto-generated this table from a CSV import that capitalized it) and
+# propagates display_name renames to billing.invoices.customer_name.
 #
-#   1. Fetch the customer from QBO so we have a current snapshot for any
-#      audit-style queries.
-#   2. Re-pull the customer's payment methods (`billing.customer_payment_methods`)
-#      since the most useful customer-level cached state is which cards/banks
-#      they have on file. A QBO customer edit often = adding/removing a payment
-#      method, which directly affects how we route process_invoice.
-#   3. Mark customer-context columns as fresh on related tables (touch
-#      fetched_at on any open invoices for this customer so reconciliation
-#      knows we recently saw them).
-#
-# Webhook latency target: <2s. We don't recheck invoice statuses here —
-# that's refresh_invoice's job. Customer edits don't directly affect
-# invoice billing_status.
+# Idempotent: re-running for the same customer is a safe no-op once the
+# row matches QBO state.
 
 import json
 from datetime import date, datetime
@@ -63,102 +54,135 @@ def refresh_qbo_token():
 def get_db_conn():
     sb = wmill.get_resource(SUPABASE_RESOURCE)
     return psycopg2.connect(
-        host=sb["host"],
-        port=sb.get("port", 6543),
-        dbname=sb.get("dbname", "postgres"),
-        user=sb["user"],
-        password=sb["password"],
-        sslmode=sb.get("sslmode", "require"),
+        host=sb["host"], port=sb.get("port", 6543),
+        dbname=sb.get("dbname", "postgres"), user=sb["user"],
+        password=sb["password"], sslmode=sb.get("sslmode", "require"),
     )
 
 
-def qbo_get(path, access_token, realm_id, params=None):
+def qbo_get(path, access_token, realm_id):
     return requests.get(
         f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/{path}",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
-        params=params,
         timeout=30,
     )
 
 
-def fetch_customer_payment_methods(qbo_customer_id, access_token, realm_id):
-    """
-    Fetch all payment methods QBO has on file for this customer. QBO exposes
-    these via the QuickBooks Payments API (separate from the Accounting API).
-
-    The pull_customer_payment_methods script does the same call workspace-wide;
-    here we narrow to one customer for webhook latency.
-    """
-    # The Payments API uses a different base URL (api.intuit.com vs
-    # quickbooks.api.intuit.com). Fall back to listing all wallet items for
-    # the company and filtering — Intuit doesn't expose a per-customer wallet
-    # endpoint, but the existing puller already handles this; we can defer
-    # to it for now.
-    return None  # placeholder — see "next step" comment below
+def parse_qbo_timestamp(ts):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
 
 
 def main(qbo_customer_id: str):
-    """
-    Returns:
-      {"status": "ok", "qbo_customer_id": "...", "display_name": "...",
-       "active": <bool>, "open_invoice_count": <n>}
-      {"status": "error", "error": "..."}
-    """
     if not qbo_customer_id:
         return {"status": "error", "error": "qbo_customer_id required"}
 
     print(f"=== refresh_customer {qbo_customer_id} ===")
     access_token, realm_id = refresh_qbo_token()
 
-    # Fetch the customer from QBO
     resp = qbo_get(f"customer/{qbo_customer_id}", access_token, realm_id)
+
+    if resp.status_code == 404:
+        conn = get_db_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                'UPDATE public."Customers" SET deleted_at = now() WHERE qbo_customer_id = %s AND deleted_at IS NULL',
+                (qbo_customer_id,),
+            )
+            affected = cur.rowcount
+            conn.commit()
+            cur.close()
+            return {"status": "deleted", "qbo_customer_id": qbo_customer_id,
+                    "rows_marked_deleted": affected}
+        finally:
+            conn.close()
+
     if not resp.ok:
-        return {
-            "status": "error",
-            "error": f"QBO fetch failed: {resp.status_code}",
-            "detail": resp.text[:200],
-        }
+        return {"status": "error", "error": f"QBO fetch failed: {resp.status_code}",
+                "detail": resp.text[:200]}
 
     qbo_cust = (resp.json() or {}).get("Customer")
     if not qbo_cust:
         return {"status": "error", "error": "QBO returned no Customer"}
 
-    display_name = qbo_cust.get("DisplayName") or qbo_cust.get("CompanyName")
-    active = bool(qbo_cust.get("Active", True))
+    display_name = qbo_cust.get("DisplayName")
+    given_name = qbo_cust.get("GivenName")
+    family_name = qbo_cust.get("FamilyName")
+    company_name = qbo_cust.get("CompanyName")
+    is_active = bool(qbo_cust.get("Active", True))
+    balance = float(qbo_cust.get("Balance") or 0)
     primary_email = (qbo_cust.get("PrimaryEmailAddr") or {}).get("Address")
     primary_phone = (qbo_cust.get("PrimaryPhone") or {}).get("FreeFormNumber")
+
+    bill_addr = qbo_cust.get("BillAddr") or {}
+    street_parts = [bill_addr.get("Line1"), bill_addr.get("Line2"), bill_addr.get("Line3")]
+    street = ", ".join(p for p in street_parts if p)
+    city = bill_addr.get("City")
+    state = bill_addr.get("CountrySubDivisionCode")
+    zip_code = bill_addr.get("PostalCode")
+    latitude = bill_addr.get("Lat")
+    longitude = bill_addr.get("Long")
+    try:
+        latitude = float(latitude) if latitude is not None else None
+        longitude = float(longitude) if longitude is not None else None
+    except (ValueError, TypeError):
+        latitude = longitude = None
+
+    qbo_last_updated = parse_qbo_timestamp(
+        (qbo_cust.get("MetaData") or {}).get("LastUpdatedTime")
+    )
 
     conn = get_db_conn()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        # Update cached customer_name on any invoices for this customer
-        # (customer might have been renamed in QBO).
-        cur.execute("""
+        cur.execute('''
+            INSERT INTO public."Customers"
+              (qbo_customer_id, display_name, first_name, last_name, company,
+               street, city, state, zip, phone, email,
+               is_active, balance, latitude, longitude,
+               qbo_last_updated, imported_at, deleted_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, now(), NULL)
+            ON CONFLICT (qbo_customer_id) DO UPDATE SET
+              display_name     = EXCLUDED.display_name,
+              first_name       = EXCLUDED.first_name,
+              last_name        = EXCLUDED.last_name,
+              company          = EXCLUDED.company,
+              street           = EXCLUDED.street,
+              city             = EXCLUDED.city,
+              state            = EXCLUDED.state,
+              zip              = EXCLUDED.zip,
+              phone            = EXCLUDED.phone,
+              email            = EXCLUDED.email,
+              is_active        = EXCLUDED.is_active,
+              balance          = EXCLUDED.balance,
+              latitude         = COALESCE(EXCLUDED.latitude, public."Customers".latitude),
+              longitude        = COALESCE(EXCLUDED.longitude, public."Customers".longitude),
+              qbo_last_updated = EXCLUDED.qbo_last_updated,
+              deleted_at       = NULL
+            RETURNING id, qbo_customer_id, display_name, is_active
+        ''', (
+            qbo_customer_id, display_name, given_name, family_name, company_name,
+            street or None, city, state, zip_code, primary_phone, primary_email,
+            is_active, balance, latitude, longitude, qbo_last_updated,
+        ))
+        upserted = cur.fetchone()
+
+        cur.execute('''
             UPDATE billing.invoices
             SET customer_name = %s,
                 fetched_at    = now()
             WHERE qbo_customer_id = %s
               AND COALESCE(customer_name, '') <> COALESCE(%s, '')
             RETURNING qbo_invoice_id
-        """, (display_name, qbo_customer_id, display_name))
-        invoice_renames = cur.fetchall()
-
-        # Count open invoices for this customer (informational return)
-        cur.execute("""
-            SELECT count(*) AS c
-            FROM billing.invoices
-            WHERE qbo_customer_id = %s
-              AND billing_status NOT IN ('processed')
-        """, (qbo_customer_id,))
-        open_invoice_count = cur.fetchone()["c"]
-
-        # No dedicated customers table to write to. Customer info lives
-        # denormalized in billing.invoices.customer_name (which we already
-        # updated above for any changes) and is used only for display.
-        # qbo_customer_sync_log is a bulk-sync job log, not per-customer.
-        # The webhook_log row inserted by the API route already carries the
-        # full QBO Customer payload for audit; we don't need a duplicate.
+        ''', (display_name, qbo_customer_id, display_name))
+        invoice_renames = [r["qbo_invoice_id"] for r in cur.fetchall()]
 
         conn.commit()
         cur.close()
@@ -166,13 +190,11 @@ def main(qbo_customer_id: str):
         return {
             "status": "ok",
             "qbo_customer_id": qbo_customer_id,
+            "id": upserted["id"] if upserted else None,
             "display_name": display_name,
-            "active": active,
-            "primary_email": primary_email,
-            "primary_phone": primary_phone,
-            "invoice_renames": [r["qbo_invoice_id"] for r in invoice_renames],
-            "open_invoice_count": open_invoice_count,
-            "note": "Payment methods sync deferred to scheduled pull_customer_payment_methods cron",
+            "is_active": is_active,
+            "balance": balance,
+            "invoice_renames": invoice_renames,
         }
     finally:
         conn.close()
