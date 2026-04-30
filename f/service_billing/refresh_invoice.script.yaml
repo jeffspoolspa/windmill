@@ -1,12 +1,12 @@
-summary: QBO invoice refresh — handles new-invoice INSERT + WO link +
-  pre-processing trigger
+summary: Always try WO link on UPDATE; better deleted-invoice handling (unlink
+  WO + mark needs_review)
 description: 'Webhook-driven refresh script for the Invoice entity. Three paths:
-  existing invoice (UPSERT volatile fields + recheck status), new invoice (full
-  INSERT with all QBO fields, then link to matching WO via doc_number →
-  invoice_number, which auto-fires the existing pre-processing trigger), or
-  deleted invoice (404 from QBO → mark in cache). Pairs with the new
-  fn_link_invoice_on_wo_change trigger that handles the inverse race (WO arrives
-  after invoice).'
+  existing invoice (UPSERT + always-try-link to handle missed-link cases +
+  recheck status), new invoice (full INSERT + link + auto-fire pre-processing
+  via trigger), or deleted invoice (404 → unlink WO so it falls back to
+  awaiting_invoice + mark cache row as needs_review with reason
+  invoice_deleted_in_qbo). Pairs with fn_link_invoice_on_wo_change for the
+  inverse race direction.'
 lock: '!inline f/service_billing/refresh_invoice.script.lock'
 concurrency_time_window_s: 0
 concurrent_limit: 5
