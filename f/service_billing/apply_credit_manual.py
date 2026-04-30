@@ -295,23 +295,27 @@ def main(qbo_invoice_id: str, credit_id: str, amount: float = None):
         print(f"  recheck: {recheck.get('prev_billing_status')} → "
               f"{recheck.get('new_billing_status')} (changed={recheck.get('changed')})")
 
-        # Track expected QBO webhooks for both the Payment we modified
-        # AND the Invoice whose balance changed. The webhook handler will
-        # mark each as confirmed when the matching event arrives; the
-        # cdc_reconciler flips overdue ones to 'missing'.
+        # Track expected QBO webhook for the Payment (or CreditMemo) we
+        # modified. This is the canonical event QBO fires when LinkedTxn
+        # changes — confirms QBO accepted our write.
+        #
+        # We INTENTIONALLY do not track an Invoice webhook expectation
+        # here, even though the invoice's balance changed: QBO often does
+        # not fire the derived Invoice.update webhook for credit applies,
+        # and we've already updated billing.invoices.balance directly from
+        # the post-apply QBO read above. Tracking it would surface
+        # spurious 'missing' alerts for invoices whose cache state is in
+        # fact correct.
         try:
             _exp_cur = conn.cursor()
-            # The credit_id may be a CreditMemo prefixed with "CM-" — strip
-            # it so the entity_id matches what QBO emits in its webhook.
             _cm_match = credit_id.startswith("CM-")
             _entity_type = "CreditMemo" if _cm_match else "Payment"
             _entity_id = credit_id[3:] if _cm_match else credit_id
             _exp_cur.execute("""
                 INSERT INTO billing.webhook_expectations
                   (entity_type, entity_id, expected_by, source)
-                VALUES (%s, %s, now() + interval '5 minutes', 'self_initiated'),
-                       ('Invoice', %s, now() + interval '5 minutes', 'self_initiated')
-            """, (_entity_type, _entity_id, qbo_invoice_id))
+                VALUES (%s, %s, now() + interval '5 minutes', 'self_initiated')
+            """, (_entity_type, _entity_id))
             conn.commit()
             _exp_cur.close()
         except Exception as e:
