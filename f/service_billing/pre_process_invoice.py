@@ -514,6 +514,7 @@ def write_result(conn, qbo_invoice_id, result):
         UPDATE billing.invoices
         SET billing_status = %s, needs_review_reason = %s, payment_method = %s,
             qbo_class = %s, memo = %s, statement_memo = %s,
+            memo_locked = %s,
             subtotal_ok = %s, enrichment_ok = %s,
             credits_applied = %s::jsonb,
             pre_processed_at = now(),
@@ -521,6 +522,7 @@ def write_result(conn, qbo_invoice_id, result):
         WHERE qbo_invoice_id = %s
     """, (result["billing_status"], result.get("needs_review_reason"), result.get("payment_method"),
           result.get("qbo_class"), result.get("memo"), result.get("statement_memo"),
+          bool(result.get("memo_locked")),
           result.get("subtotal_ok"), result.get("enrichment_ok"),
           json.dumps(result.get("credits_applied") or []),
           STAGE_DONE,
@@ -628,6 +630,7 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
             composed = invoice.get("memo")
             result["memo"] = composed
             result["statement_memo"] = invoice.get("statement_memo") or composed
+            result["memo_locked"] = True
             print(f"  memo locked - preserving '{composed}'")
         else:
             memo_result = deterministic_memo(wo, invoice)
@@ -653,6 +656,7 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                     }
 
             memo_text = None
+            memo_locked_new = False
             if "error" in memo_result:
                 enrichment_ok = False
                 issues.append(f"memo_api_error ({memo_result['error'][:80]})")
@@ -660,13 +664,21 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                 enrichment_ok = False
                 issues.append(f"memo_low_confidence ({memo_result.get('confidence', 0):.0%})")
                 memo_text = memo_result.get("memo")
+                # Low confidence — leave memo_locked false. User affirmation
+                # (manual lock OR external QBO edit detected by refresh_invoice)
+                # is what flips this to true.
             else:
                 memo_text = memo_result.get("memo")
+                # High confidence (>= 0.85) OR deterministic shortcut (1.0)
+                # → lock. Subsequent re-runs of pre_process_invoice will see
+                # is_memo_locked() and skip the OpenAI call entirely.
+                memo_locked_new = True
 
             composed = f"WO#{wo_number}: {memo_text}" if memo_text else None
             result["memo"] = composed
             result["statement_memo"] = composed
-            print(f"  memo via {memo_source}: {composed}")
+            result["memo_locked"] = memo_locked_new
+            print(f"  memo via {memo_source}: {composed} (locked={memo_locked_new})")
 
         if enrichment_ok and composed:
             set_stage(conn, qbo_invoice_id, STAGE_WRITING)
