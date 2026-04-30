@@ -1,12 +1,12 @@
-summary: Always try WO link on UPDATE; better deleted-invoice handling (unlink
-  WO + mark needs_review)
-description: 'Webhook-driven refresh script for the Invoice entity. Three paths:
-  existing invoice (UPSERT + always-try-link to handle missed-link cases +
-  recheck status), new invoice (full INSERT + link + auto-fire pre-processing
-  via trigger), or deleted invoice (404 → unlink WO so it falls back to
-  awaiting_invoice + mark cache row as needs_review with reason
-  invoice_deleted_in_qbo). Pairs with fn_link_invoice_on_wo_change for the
-  inverse race direction.'
+summary: Add Void handling (operation hint + heuristic); WO unlink →
+  awaiting_invoice; needs_review reason invoice_voided
+description: "Webhook-driven refresh script for the Invoice entity. Four paths:
+  existing invoice (UPSERT + always-try-link + recheck), new invoice (full
+  INSERT + link + auto-fire pre-processing), voided invoice (operation='Void'
+  from webhook OR heuristic from response → unlink WO → mark needs_review with
+  reason invoice_voided), or hard-deleted invoice (404 → same as void but reason
+  invoice_deleted_in_qbo). Both void/delete paths leave the WO eligible for
+  re-invoicing (returns to awaiting_invoice via v_awaiting_invoice)."
 lock: '!inline f/service_billing/refresh_invoice.script.lock'
 concurrency_time_window_s: 0
 concurrent_limit: 5
