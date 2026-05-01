@@ -1,0 +1,15 @@
+summary: Stamp "[Month] Pool Maintenance" on empty memo fields for a billing
+  month's QBO invoices
+description: Idempotent memo stamper. For every maintenance invoice in
+  `billing_audit.maintenance_invoices` for the given billing_month, fetches the
+  live QBO invoice and sparse-updates `PrivateNote` and `CustomerMemo.value`
+  field-by-field with `"{Month} Pool Maintenance"` ONLY where the field is
+  currently empty. Existing memos are never overwritten — if PrivateNote has
+  content but CustomerMemo is blank, only CustomerMemo gets stamped, and vice
+  versa. Safe to re-run. Used as the first step of `f/billing/monthly_autopay`
+  and `f/billing/send_monthly_invoices`. Throttles at 200ms between API calls.
+  Use dry_run=True to preview without modifying QBO.
+lock: '!inline f/billing/stamp_invoice_memos.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
