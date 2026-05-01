@@ -151,7 +151,7 @@ def main(
                     autopay_failed = %s,
                     autopay_no_invoice = %s,
                     autopay_no_payment_method = %s,
-                    completed_at = CASE WHEN %s THEN NULL ELSE now() END,
+                    completed_at = now(),
                     updated_at = now(),
                     notes = %s
                 WHERE id = %s::uuid

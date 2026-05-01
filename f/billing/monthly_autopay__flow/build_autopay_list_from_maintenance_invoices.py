@@ -41,7 +41,7 @@ def main(
                 mi.billing_month
             FROM billing_audit.maintenance_invoices mi
             JOIN billing.autopay_customers ac ON mi.qbo_customer_id = ac.qbo_customer_id
-            WHERE mi.balance_due > 0
+            WHERE COALESCE(mi.balance_due, mi.invoice_total) > 0
         """
 
         if test_mode and test_qbo_customer_id:
