@@ -35,6 +35,18 @@ description: >-
   - dry_run=true: Simulate without charging or creating records
 value:
   modules:
+    - id: memo_stamp
+      summary: Stamp '[Month] Pool Maintenance' on empty memo fields (idempotent)
+      value:
+        type: script
+        input_transforms:
+          billing_month:
+            type: javascript
+            expr: flow_input.billing_month
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run
+        path: f/billing/stamp_invoice_memos
     - id: a
       summary: 'Init: Token Refresh + Billing Run'
       value:
