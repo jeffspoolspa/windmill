@@ -23,9 +23,6 @@ def refresh_qbo_tokens(resource_path: str) -> tuple:
 
 
 def get_qbo_invoice_details(invoice_id: str, realm_id: str, access_token: str):
-    """Fetch live balance and EmailStatus from QBO.
-    Returns dict with 'balance' (float|None) and 'email_status' (str|None).
-    Returns None on complete failure."""
     try:
         resp = requests.get(
             f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/invoice/{invoice_id}?minorversion=65",
@@ -43,7 +40,6 @@ def get_qbo_invoice_details(invoice_id: str, realm_id: str, access_token: str):
 
 
 def send_qbo_invoice_email(invoice_id: str, email: str, realm_id: str, access_token: str) -> tuple:
-    """Send invoice via QBO email API. Returns (success: bool, error_msg: str|None)."""
     try:
         resp = requests.post(
             f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/invoice/{invoice_id}/send?sendTo={requests.utils.quote(email)}",
@@ -55,8 +51,7 @@ def send_qbo_invoice_email(invoice_id: str, email: str, realm_id: str, access_to
         )
         if resp.ok:
             return True, None
-        err = f"QBO {resp.status_code}: {resp.text[:300]}"
-        return False, err
+        return False, f"QBO {resp.status_code}: {resp.text[:300]}"
     except Exception as e:
         return False, str(e)
 
@@ -66,10 +61,16 @@ def main(
     dry_run: bool = True,
     batch_delay_ms: int = 350,
 ):
-    # -- 1. Auth
+    # -- 0. Stamp "{Month} Pool Maintenance" on empty memo fields. Idempotent.
+    # Runs even on dry_run because memo stamping is pre-billing setup, not a send action.
+    memo_result = wmill.run_script(
+        path="f/billing/stamp_invoice_memos",
+        args={"billing_month": billing_month, "dry_run": dry_run},
+    )
+    print(f"[memo stamp] {memo_result}")
+
     access_token, realm_id = refresh_qbo_tokens("u/carter/quickbooks_api")
 
-    # -- 2. DB connection
     pg = wmill.get_resource("u/carter/supabase")
     conn = psycopg2.connect(
         host=pg["host"], port=pg["port"], dbname=pg["dbname"],
@@ -81,7 +82,6 @@ def main(
     billing_date = f"{billing_month}-01"
 
     try:
-        # -- 3. Fetch pending invoices
         cur.execute(
             """
             SELECT mi.id, mi.qbo_invoice_id, mi.qbo_customer_id, mi.customer_name,
@@ -99,6 +99,7 @@ def main(
         if dry_run:
             return {
                 "dry_run": True, "billing_month": billing_month,
+                "memo_stamp": memo_result,
                 "would_send": len(invoices),
                 "invoices": [
                     {"customer": inv["customer_name"], "invoice_id": inv["qbo_invoice_id"],
@@ -109,7 +110,6 @@ def main(
                 ],
             }
 
-        # -- 4. Send loop
         results = {
             "sent": 0, "skipped_already_sent": 0, "skipped_already_emailed_qbo": 0,
             "skipped_already_paid": 0, "skipped_balance_check_failed": 0,
@@ -123,7 +123,6 @@ def main(
             customer_name = inv["customer_name"]
             email = inv["email"]
 
-            # Pre-check: email address exists
             if not email or not email.strip():
                 print(f"SKIP {customer_name} ({qbo_invoice_id}) -- no email on file")
                 cur.execute(
@@ -143,7 +142,6 @@ def main(
                 results["errors"].append(f"{customer_name}: No email on file")
                 continue
 
-            # Safety check A: already in send log as sent?
             cur.execute(
                 """SELECT id FROM billing.invoice_send_log
                    WHERE billing_month = %s AND qbo_invoice_id = %s AND status = 'sent'""",
@@ -158,7 +156,6 @@ def main(
                 results["skipped_already_sent"] += 1
                 continue
 
-            # Safety check B: live QBO balance + EmailStatus
             details = get_qbo_invoice_details(qbo_invoice_id, realm_id, access_token)
 
             if details is None:
@@ -194,7 +191,6 @@ def main(
                 results["skipped_already_paid"] += 1
                 continue
 
-            # Safety check C: already emailed in QBO?
             if email_status == "EmailSent":
                 print(f"SKIP {customer_name} ({qbo_invoice_id}) -- QBO EmailStatus=EmailSent, already emailed")
                 cur.execute(
@@ -213,7 +209,6 @@ def main(
                 results["skipped_already_emailed_qbo"] += 1
                 continue
 
-            # All checks passed -- send
             success, err_msg = send_qbo_invoice_email(qbo_invoice_id, email, realm_id, access_token)
 
             if success:
@@ -247,7 +242,6 @@ def main(
 
             time.sleep(batch_delay_ms / 1000.0)
 
-        # -- 5. Update billing_runs
         cur.execute(
             """UPDATE billing.billing_runs
                SET invoices_emailed = (
@@ -258,7 +252,6 @@ def main(
             (billing_date, billing_month),
         )
 
-        # -- 6. Summary
         cur.execute(
             """SELECT send_status, send_held_reason, COUNT(*) as count
                FROM billing_audit.maintenance_invoices
@@ -272,19 +265,9 @@ def main(
             for r in cur.fetchall()
         ]
 
-        print(
-            f"\n=== Complete === Sent: {results['sent']} | Failed: {results['failed']}"
-            f" | Already sent (log): {results['skipped_already_sent']}"
-            f" | Already emailed (QBO): {results['skipped_already_emailed_qbo']}"
-            f" | Already paid: {results['skipped_already_paid']}"
-            f" | Balance check failed: {results['skipped_balance_check_failed']}"
-            f" | No email: {results['skipped_no_email']}"
-        )
-        if results["errors"]:
-            print(f"\nErrors:\n" + "\n".join(results["errors"]))
-
         return {
             "billing_month": billing_month,
+            "memo_stamp": memo_result,
             "this_run": results,
             "month_summary": summary,
         }
