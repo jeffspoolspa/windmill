@@ -61,6 +61,12 @@ value:
             expr: flow_input.dry_run
         lock: '!inline init_token_refresh_+_billing_run.lock'
         language: python3
+    - id: sync_balances
+      summary: Pull live QBO balances into maintenance_invoices.balance_due (idempotent)
+      value:
+        type: script
+        input_transforms: {}
+        path: f/billing/sync_invoice_balances
     - id: b
       summary: Apply Unapplied Maint Credits
       value:
