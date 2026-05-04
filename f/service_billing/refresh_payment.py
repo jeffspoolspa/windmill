@@ -9,8 +9,11 @@
 # Mirrors the shape of refresh_invoice:
 #   1. Fetch QBO payment
 #   2. Upsert into billing.customer_payments (volatile fields only)
-#   3. Recheck linked invoices' billing_status via billing.recheck_invoice_status
-#   4. Return the updated row + recheck summary
+#   3. Verify CCTransId on QBO Payment matches our processing_attempts.charge_id
+#      (catches the rare case where QBO commits the Payment but drops our
+#      CCTransId, which would break Intuit↔QBO reconciliation later)
+#   4. Recheck linked invoices' billing_status via billing.recheck_invoice_status
+#   5. Return the updated row + recheck summary + any verification warnings
 #
 # Idempotent: re-runs upsert with same data are no-ops at the DB level.
 # Designed to be called repeatedly via webhook re-deliveries.
@@ -86,10 +89,105 @@ def parse_qbo_timestamp(ts):
         return None
 
 
+def verify_cc_trans_id(conn, qbo_payment_id, cc_trans_id_from_qbo):
+    """Cross-check the CCTransId on the QBO Payment against our recorded
+    charge_id from the original processing_attempts row.
+
+    Three outcomes:
+      - 'no_attempt': no processing_attempts row links to this payment.
+        It's a customer-initiated payment (or a credit-memo application,
+        or refresh fired before our process_invoice script committed
+        the qbo_payment_id back). No verification possible — return None.
+      - 'verified': attempt.charge_id matches QBO's CCTransId. Happy path.
+      - 'cc_trans_id_missing': we expected a CCTransId (we have a charge_id
+        on the attempt) but QBO doesn't have one on the Payment. Means our
+        record_payment call didn't preserve it — Intuit↔QBO reconciliation
+        will be broken. Log warning + stamp the attempt's error_message.
+      - 'cc_trans_id_mismatch': QBO has a CCTransId but it's not our
+        charge_id. Very serious — money is linked to wrong charge.
+        Flag attempt as needs_reconcile_review.
+
+    Returns: {"outcome": str, "expected": str|None, "actual": str|None,
+              "attempt_id": str|None}
+    """
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # Find our own processing_attempts row for this Payment. There can only
+    # be one with qbo_payment_id set to this value (we set it once after
+    # record_payment succeeds; it's never re-used).
+    cur.execute("""
+        SELECT id, charge_id, status, attempted_at
+          FROM billing.processing_attempts
+         WHERE qbo_payment_id = %s
+           AND dry_run = false
+         ORDER BY attempted_at DESC
+         LIMIT 1
+    """, (qbo_payment_id,))
+    attempt = cur.fetchone()
+
+    # No matching attempt — this Payment wasn't created by us. Skip silently.
+    if not attempt:
+        cur.close()
+        return {"outcome": "no_attempt", "expected": None,
+                "actual": cc_trans_id_from_qbo, "attempt_id": None}
+
+    attempt_dict = dict(attempt)
+    expected = attempt_dict.get("charge_id")
+    attempt_id = str(attempt_dict["id"])
+
+    # Our attempt has no charge_id either (e.g. an email-only attempt that
+    # somehow ended up linked to a Payment row, or pre-charge_succeeded
+    # state). Nothing to verify.
+    if not expected:
+        cur.close()
+        return {"outcome": "no_attempt", "expected": None,
+                "actual": cc_trans_id_from_qbo, "attempt_id": attempt_id}
+
+    # CCTransId missing on QBO Payment but we expected one
+    if not cc_trans_id_from_qbo:
+        msg = (f"verify_cc_trans_id: missing on QBO Payment {qbo_payment_id}; "
+               f"expected charge_id={expected}. Intuit↔QBO reconciliation broken.")
+        print(f"  WARN  {msg}")
+        cur.execute("""
+            UPDATE billing.processing_attempts
+               SET error_message = COALESCE(error_message, '')
+                                   || CASE WHEN COALESCE(error_message, '') = '' THEN '' ELSE ' | ' END
+                                   || %s
+             WHERE id = %s
+        """, (f"cc_trans_id_missing (expected {expected})", attempt_dict["id"]))
+        conn.commit()
+        cur.close()
+        return {"outcome": "cc_trans_id_missing", "expected": expected,
+                "actual": None, "attempt_id": attempt_id}
+
+    # CCTransId mismatch — money linked to a different charge than ours
+    if cc_trans_id_from_qbo != expected:
+        msg = (f"verify_cc_trans_id: MISMATCH on Payment {qbo_payment_id}: "
+               f"expected charge_id={expected}, got CCTransId={cc_trans_id_from_qbo}")
+        print(f"  ERROR {msg}")
+        cur.execute("""
+            UPDATE billing.processing_attempts
+               SET status = 'needs_reconcile_review',
+                   error_message = COALESCE(error_message, '')
+                                   || CASE WHEN COALESCE(error_message, '') = '' THEN '' ELSE ' | ' END
+                                   || %s
+             WHERE id = %s
+        """, (f"cc_trans_id_mismatch (expected {expected}, got {cc_trans_id_from_qbo})",
+              attempt_dict["id"]))
+        conn.commit()
+        cur.close()
+        return {"outcome": "cc_trans_id_mismatch", "expected": expected,
+                "actual": cc_trans_id_from_qbo, "attempt_id": attempt_id}
+
+    cur.close()
+    return {"outcome": "verified", "expected": expected,
+            "actual": cc_trans_id_from_qbo, "attempt_id": attempt_id}
+
+
 def main(qbo_payment_id: str):
     """
     Returns:
-      {"status": "ok", "payment": {...}, "linked_invoices_rechecked": [...]}
+      {"status": "ok", "payment": {...}, "linked_invoices_rechecked": [...],
+       "verification": {"outcome": "...", ...}}
       {"status": "deleted", ...} if QBO returns 404 (payment voided/deleted)
       {"status": "error", "error": "..."}
     """
@@ -203,10 +301,18 @@ def main(qbo_payment_id: str):
             cc_trans_id, cc_status, _dumps(qbo_pmt), qbo_last_updated,
         ))
         upserted = cur.fetchone()
+        cur.close()
+
+        # Verify CCTransId matches our recorded charge_id (if this Payment
+        # was one we created via process_invoice). Catches the rare case
+        # where QBO commits the Payment but drops our CCTransId — which
+        # would silently break Intuit↔QBO reconciliation later.
+        verification = verify_cc_trans_id(conn, qbo_payment_id, cc_trans_id)
 
         # Recheck linked invoices — their billing_status may have flipped
         # to 'processed' if this payment zeroed them out.
         recheck_results = []
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         for inv_id in linked_invoice_ids:
             try:
                 cur.execute(
@@ -236,6 +342,7 @@ def main(qbo_payment_id: str):
             "total_amt": total_amt,
             "unapplied_amt": unapplied_amt,
             "linked_invoices_rechecked": recheck_results,
+            "verification": verification,
             "payment_id": str(upserted["id"]) if upserted else None,
         }
     finally:

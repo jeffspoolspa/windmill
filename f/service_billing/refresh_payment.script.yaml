@@ -1,12 +1,13 @@
-summary: Single-payment QBO -> Supabase refresh + linked-invoice status recheck
-description: 'Webhook-driven cache refresh script. Called by /api/webhooks/qbo
-  when QBO fires the matching entity event. Idempotent: safe to call multiple
-  times for the same entity (re-deliveries from Intuit, manual retries,
-  reconciler healing). Returns a status object the webhook handler logs to
-  billing.webhook_log.'
+summary: Verify CCTransId on QBO Payment matches our recorded charge_id
+description: 'After upserting the QBO Payment cache, cross-check that the
+  CCTransId on the Payment matches the charge_id from our processing_attempts
+  row. Three outcomes: verified (no-op), cc_trans_id_missing (warn + stamp
+  attempts.error_message — Intuit↔QBO reconciliation broken),
+  cc_trans_id_mismatch (flip attempt to needs_reconcile_review — money linked to
+  wrong charge). Skips silently for Payments not created by our process_invoice
+  (customer-initiated, credit memo applications). Adds verification result to
+  the script return for the webhook handler to log.'
 lock: '!inline f/service_billing/refresh_payment.script.lock'
-concurrency_time_window_s: 0
-concurrent_limit: 5
 has_on_behalf_of: false
 kind: script
 schema: null

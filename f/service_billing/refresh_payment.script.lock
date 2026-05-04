@@ -10,4 +10,4 @@ psycopg2-binary==2.9.12
 requests==2.33.1
 typing-extensions==4.15.0
 urllib3==2.6.3
-wmill==1.693.3
+wmill==1.694.0
