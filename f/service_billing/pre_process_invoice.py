@@ -213,35 +213,6 @@ def derive_qbo_class(assigned_to, wo_type, description):
 
 
 def resolve_payment_for_invoice(conn, qbo_customer_id, wo_description):
-    """Resolve all payment-method-related fields for an invoice in one shot.
-
-    Calls the new SQL functions:
-      - billing.resolve_preferred_payment_type — handles *bill* override,
-        customer-level override, commercial→email default, residential
-        default cascade (most-recently-added default PM's type → email
-        fallback). Source of truth for the type decision.
-      - billing.pick_target_payment_method — given the resolved type, picks
-        the specific PM uuid (NULL for email). Mirrors process_work_order's
-        get_active_payment_method picker — same is_default + most-recent
-        ordering — so what gets stored here is what would actually be
-        charged.
-
-    Also derives the LEGACY payment_method ('invoice' | 'on_file') so we
-    can dual-write during the rollout. This goes away when legacy column
-    is dropped.
-
-    And surfaces the "active PMs but no defaults" data anomaly as a
-    needs_review reason — the SQL function silently falls back to email
-    in that case, but it's a bad data state we want a human to fix.
-
-    Returns:
-      {
-        "preferred":            'email' | 'ach' | 'credit_card',
-        "legacy_payment_method": 'invoice' | 'on_file',
-        "target_pm_id":          uuid str or None,
-        "anomaly_no_default":    bool,
-      }
-    """
     cur = conn.cursor()
 
     cur.execute(
@@ -256,9 +227,6 @@ def resolve_payment_for_invoice(conn, qbo_customer_id, wo_description):
     )
     target_pm_id = cur.fetchone()[0]
 
-    # Anomaly check: customer has active PMs but none flagged is_default.
-    # Only meaningful when the resolution fell back to 'email' — a customer
-    # with ANY active+default PM would have resolved to that type instead.
     anomaly = False
     if preferred == 'email':
         cur.execute("""
@@ -274,8 +242,6 @@ def resolve_payment_for_invoice(conn, qbo_customer_id, wo_description):
 
     cur.close()
 
-    # Derive legacy value. Dual-write so the existing process_work_order.py
-    # + UI keep working until they're updated to read the new field.
     legacy = 'invoice' if preferred == 'email' else 'on_file'
 
     return {
@@ -310,14 +276,39 @@ Style rules:
 - No trailing punctuation
 - Lean on `corrective` over `description`; use `tech_instructions` to disambiguate
 
-Special customer rules:
-- ROBERT O'BRIEN: this customer has THREE pools. If the customer field contains both
-  "ROBERT" and "O'BRIEN" or "OBRIEN" (any case, any order - "ROBERT O'BRIEN",
-  "O'BRIEN, ROBERT", "obrien robert", etc. all qualify), the memo MUST end with
-  the pool tag in ALL CAPS in parens: (LAP POOL), (VOLLEYBALL), or (SPA).
-  Look in description, corrective, and tech_instructions for the pool name. If
-  none of those fields mention which specific pool, return confidence below 0.6 -
-  DO NOT guess.
+**SPECIAL CUSTOMER RULE — ROBERT O'BRIEN (3-pool property)**
+
+If the `customer` field contains BOTH "ROBERT" AND ("O'BRIEN" or "OBRIEN") —
+case-insensitive, any order ("ROBERT O'BRIEN", "O'BRIEN, ROBERT",
+"obrien robert" all qualify) — this rule applies:
+
+1. The memo body describes the SERVICE only. Do NOT include the pool name
+   in the body.
+2. The memo MUST END with EXACTLY ONE of these tags (uppercase, in parens):
+       (LAP POOL)
+       (VOLLEYBALL)
+       (SPA)
+3. The tag is REQUIRED. The tag does NOT count toward the 7-word memo limit.
+4. Pick the tag by scanning description, corrective, and tech_instructions
+   for these keywords (case-insensitive):
+       "lap pool"                               → (LAP POOL)
+       "volleyball" / "vball" / "v-ball"        → (VOLLEYBALL)
+       "spa"                                    → (SPA)
+5. If you cannot find ANY pool keyword in the inputs, return confidence
+   below 0.6 — DO NOT guess.
+
+✅ CORRECT format (note: action first, tag at the end, ALL CAPS in parens):
+   "Heat Exchanger Diagnosis (VOLLEYBALL)"
+   "Spa Heater Repair (SPA)"
+   "Booster Pump Replacement (LAP POOL)"
+   "Salt Cell Cleaning & Filter Replacement (LAP POOL)"
+
+❌ WRONG format (do NOT produce any of these):
+   "Volleyball Pool Heat Exchanger Diagnosis"    ← pool name in body, no tag
+   "Heat Exchanger Diagnosis (Volleyball Pool)"  ← wrong tag wording/case
+   "Heat Exchanger Diagnosis VOLLEYBALL"         ← missing parens
+   "Heat Exchanger Diagnosis"                    ← tag missing entirely
+   "Volleyball Heat Exchanger Diagnosis (VOLLEYBALL)"  ← redundant pool reference
 
 If you cannot figure out what was done, return confidence below 0.6.
 
@@ -348,6 +339,12 @@ MEMO_EXAMPLES = [
      "output": {"memo": "Spa Heater Diagnosis & Thermistor Replacement (SPA)", "confidence": 0.93, "reasoning": "Tech instructions specified spa heater."}},
     {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Replaced O-ring", "corrective": "O-ring replaced", "tech_instructions": ""},
      "output": {"memo": "O-Ring Replacement", "confidence": 0.45, "reasoning": "O'Brien WO but no pool name in any field - cannot determine which pool."}},
+    {"input": {"customer": "O'BRIEN, ROBERT", "type": "DIAGNOSIS", "description": "Travis received call the Vball pool drained on Saturday. Need to diagnose. Customer filling, equipment off.", "corrective": "Diagnosed. Volley ball heat exchanger cracked draining pool. Shut off bypass to faulty heat pump.", "tech_instructions": ""},
+     "output": {"memo": "Heat Exchanger Diagnosis (VOLLEYBALL)", "confidence": 0.95, "reasoning": "Vball/volleyball mentioned in both description and corrective — heat exchanger diagnosis on the volleyball pool."}},
+    {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Lap pool booster pump making grinding noise", "corrective": "Replaced booster pump motor and seal", "tech_instructions": ""},
+     "output": {"memo": "Booster Pump Motor & Seal Replacement (LAP POOL)", "confidence": 0.96, "reasoning": "Lap pool explicitly named; booster pump motor + seal replacement."}},
+    {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Salt cell needs cleaning on volleyball", "corrective": "Cleaned salt cell, replaced o-rings", "tech_instructions": ""},
+     "output": {"memo": "Salt Cell Cleaning & O-Ring Replacement (VOLLEYBALL)", "confidence": 0.94, "reasoning": "Volleyball pool salt cell cleaning + o-ring replacement."}},
 ]
 
 
@@ -573,12 +570,6 @@ def fail_flag(conn, qbo_invoice_id, billing_status, reason):
 
 
 def write_result(conn, qbo_invoice_id, result):
-    """Single-shot UPDATE that writes ALL the pre-process outputs.
-
-    Dual-writes payment_method (legacy) + preferred_payment_type +
-    target_payment_method_id during the rollout. Once readers are off
-    the legacy column, the payment_method line goes away.
-    """
     cur = conn.cursor()
     cur.execute("""
         UPDATE billing.invoices
@@ -691,12 +682,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                     f"${total_unmatched:.2f} unapplied)"
                 )
 
-        # Resolve payment method via the new SQL functions. This replaces
-        # the old binary 'invoice'/'on_file' picker — the new function
-        # handles *bill* override, customer-level override, commercial
-        # default, and residential default cascade in one call. We dual-
-        # write the legacy column for now; drops in a later phase once
-        # process_work_order + UI are off it.
         set_stage(conn, qbo_invoice_id, STAGE_PAYMENT_METHOD)
         pm_resolution = resolve_payment_for_invoice(
             conn, qbo_customer_id, wo.get("work_description")
@@ -705,9 +690,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
         result["payment_method"]           = pm_resolution["legacy_payment_method"]
         result["target_payment_method_id"] = pm_resolution["target_pm_id"]
 
-        # Surface the "active PMs but no defaults" anomaly. The function
-        # silently fell back to email; this reason tells the human to
-        # promote a PM to default in QBO.
         if pm_resolution["anomaly_no_default"]:
             issues.append("no_default_payment_method")
 

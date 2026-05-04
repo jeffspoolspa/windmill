@@ -1,15 +1,14 @@
-summary: Resolve preferred_payment_type via SQL function + dual-write legacy
-description: Replaces the binary on_file/invoice resolver with a call to
-  billing.resolve_preferred_payment_type, which handles *bill* override +
-  customer override + commercial default + residential default cascade. Also
-  calls billing.pick_target_payment_method to set
-  invoices.target_payment_method_id so process_work_order can charge the
-  specific PM without re-picking. Dual-writes the legacy payment_method column
-  for transition. Adds no_default_payment_method needs_review reason for the
-  data anomaly where customer has active PMs but none flagged default.
+summary: Strengthen O'Brien memo prompt with explicit format/counter-examples +
+  3 new few-shots
+description: The LLM was producing memos like Volleyball Pool Heat Exchanger
+  Diagnosis (pool name in body, no tag) instead of the required Heat Exchanger
+  Diagnosis (VOLLEYBALL) format. Reformatted the rule with structured numbered
+  steps, added an explicit list of CORRECT and WRONG examples (one matching the
+  actual failure case), and added 3 new O'Brien few-shot examples covering the
+  volleyball pool drained scenario and other variants. Existing low-confidence
+  flag still triggers for missing tags as a safety net. No deterministic
+  post-processor.
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
-concurrency_time_window_s: 0
-concurrent_limit: 5
 has_on_behalf_of: false
 kind: script
 schema: null
