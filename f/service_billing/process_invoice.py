@@ -182,6 +182,29 @@ def mark_invoice_processed(conn, qbo_invoice_id):
     conn.commit(); cur.close()
 
 
+def mark_invoice_needs_review(conn, qbo_invoice_id, reason):
+    """Flip the invoice back to needs_review with a human-readable reason.
+
+    Called from every halt-state transition in process_invoice (charge_declined,
+    payment_orphan, no_payment_method, email_failed) so the invoice surfaces
+    in the needs-review queue. Without this, the invoice stays at
+    ready_to_process even though the latest attempt failed — only visible
+    on the WO detail page's processing timeline, not in the queue list.
+
+    Skips terminal 'processed' invoices defensively (shouldn't happen, but
+    if it did, we'd be unwinding a successful payment which is wrong).
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE billing.invoices
+        SET billing_status = 'needs_review',
+            needs_review_reason = %s
+        WHERE qbo_invoice_id = %s
+          AND billing_status != 'processed'
+    """, (reason, qbo_invoice_id))
+    conn.commit(); cur.close()
+
+
 # How long we expect QBO webhooks to arrive after we make a write. If they
 # don't show up within this window, cdc_reconciler will flip the expectation
 # to 'missing' and surface in the UI for human investigation.
@@ -772,8 +795,17 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
         return _result(qbo_invoice_id, "already_succeeded", attempt_id=str(prior["id"]),
                        note="prior succeeded but QBO state could not be verified")
 
-    # Halt for human-required states
+    # Halt for human-required states. These pre-flight halts return WITHOUT
+    # creating a new attempt row — but the invoice itself should reflect
+    # the halt status so it surfaces in the needs-review queue (not stuck
+    # at ready_to_process). mark_invoice_needs_review is idempotent +
+    # skips already-processed invoices.
     if prior and prior["status"] == "payment_orphan":
+        mark_invoice_needs_review(
+            conn, qbo_invoice_id,
+            f"payment_orphan (charged ${float(prior['charge_amount'] or 0):.2f}, "
+            f"ledger write failed; verify in QBO + Intuit before retrying)",
+        )
         return _result(qbo_invoice_id, "needs_human", reason="payment_orphan",
                        charge_id=prior["charge_id"],
                        amount=float(prior["charge_amount"] or 0),
@@ -785,10 +817,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
         # the user has switched channels (e.g. credit_card → email) OR
         # picked a different PM (different card on the same channel), it's
         # a fresh attempt path, not a retry of the failed one.
-        #
-        # Practical example: prior attempt charged Visa-ending-1234 and was
-        # declined. User edits the invoice to email-only and clicks Process.
-        # We should email, not block on the prior card decline.
         new_target_pm_id = invoice.get("target_payment_method_id")
         new_target_pm_id_str = (
             str(new_target_pm_id) if new_target_pm_id else None
@@ -803,6 +831,10 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
             and channel != "email"  # email path always safe to re-attempt
         )
         if same_attempt_path:
+            mark_invoice_needs_review(
+                conn, qbo_invoice_id,
+                f"charge_declined ({(prior.get('error_message') or 'declined')[:120]})",
+            )
             return _result(qbo_invoice_id, "needs_human", reason="charge_declined",
                            error=prior.get("error_message"),
                            attempt_id=str(prior["id"]),
@@ -810,8 +842,11 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
                                 "change channel/PM or pass force=true to retry")
 
     # Reconciler couldn't determine charge state — human investigation required.
-    # Force=True bypasses this (admin override after manual verification).
     if prior and prior["status"] == "needs_reconcile_review" and not force:
+        mark_invoice_needs_review(
+            conn, qbo_invoice_id,
+            f"needs_reconcile_review ({(prior.get('error_message') or 'reconciler could not determine state')[:120]})",
+        )
         return _result(qbo_invoice_id, "needs_human", reason="needs_reconcile_review",
                        error=prior.get("error_message"),
                        attempt_id=str(prior["id"]))
@@ -1073,6 +1108,10 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
         update_attempt(conn, attempt["id"], status="charge_declined",
                         error_message=pm.get("error", "no payment method"),
                         charge_result=json.dumps(pm))
+        mark_invoice_needs_review(
+            conn, qbo_invoice_id,
+            f"no_payment_method ({pm.get('error', 'no PM on file')[:120]})",
+        )
         return _result(qbo_invoice_id, "needs_human", reason="no_payment_method",
                        attempt_id=str(attempt["id"]),
                        error=pm.get("error"))
@@ -1110,6 +1149,10 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
         update_attempt(conn, attempt["id"], status="charge_declined",
                         charge_result=json.dumps(cr),
                         error_message=cr.get("error"))
+        mark_invoice_needs_review(
+            conn, qbo_invoice_id,
+            f"charge_declined ({(cr.get('error') or 'declined')[:120]})",
+        )
         return _result(qbo_invoice_id, "needs_human", reason="charge_declined",
                        attempt_id=str(attempt["id"]),
                        error=cr.get("error"))
@@ -1127,6 +1170,11 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
         # DANGER: money moved, ledger didn't. Halt + flag for human.
         update_attempt(conn, attempt["id"], status="payment_orphan",
                         error_message=f"record_payment failed: {pay.get('error', '')[:300]}")
+        mark_invoice_needs_review(
+            conn, qbo_invoice_id,
+            f"payment_orphan (charged ${balance:.2f}, ledger write failed; "
+            f"verify in QBO + Intuit before retrying)",
+        )
         return _result(qbo_invoice_id, "needs_human", reason="payment_orphan",
                        attempt_id=str(attempt["id"]),
                        charge_id=cr["charge_id"],
@@ -1192,6 +1240,10 @@ def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer
     if not pay["success"]:
         update_attempt(conn, prior["id"], status="payment_orphan",
                         error_message=f"orphan recovery: record_payment still failing: {pay.get('error', '')[:300]}")
+        mark_invoice_needs_review(
+            conn, qbo_invoice_id,
+            f"payment_orphan (charged ${amount:.2f}, ledger retry still failing)",
+        )
         return _result(qbo_invoice_id, "needs_human", reason="payment_orphan",
                        attempt_id=str(prior["id"]),
                        charge_id=charge_id, amount=amount,
@@ -1252,6 +1304,10 @@ def _process_invoice_only(conn, attempt, invoice, qbo_inv, customer_id, access_t
     update_attempt(conn, attempt["id"], status="email_failed",
                     error_message=last_err,
                     raw_result=json.dumps({"attempts": EMAIL_RETRY_MAX, "last_error": last_err}))
+    mark_invoice_needs_review(
+        conn, qbo_invoice_id,
+        f"email_failed (after {EMAIL_RETRY_MAX} retries: {(last_err or 'unknown')[:120]})",
+    )
     return _result(qbo_invoice_id, "email_failed",
                    attempt_id=str(attempt["id"]),
                    error=last_err)

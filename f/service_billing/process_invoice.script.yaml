@@ -1,10 +1,12 @@
-summary: Drop bogus Invoice expectations + safety net for orphaned pending rows
-description: Removed Invoice webhook expectation INSERT after
-  refresh_invoice_cache in both charge path and orphan recovery — QBO does NOT
-  fire Invoice.Update webhooks for payment-driven balance changes. Added
-  top-level try/except around _process_invoice_only and _process_charge_path so
-  uncaught exceptions flip the attempt to charge_uncertain instead of leaving it
-  pending forever.
+summary: Flip invoice to needs_review on every halt path so it surfaces in queue
+description: 'Adds mark_invoice_needs_review helper + calls it from every halt
+  path: charge_declined, payment_orphan, no_payment_method, email_failed
+  (post-charge AND pre-flight). Without this, an invoice with a failed attempt
+  stays at billing_status=ready_to_process (visible in process queue, not in
+  needs-review queue) — only the WO detail page processing-card showed the
+  problem. Now the invoice flips back to needs_review with a human-readable
+  reason like charge_declined (HTTP 201: status=DECLINED) so it appears in the
+  needs-review queue for follow-up.'
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script
