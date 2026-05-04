@@ -1,10 +1,13 @@
-summary: '24h-aware retry: reuse key inside Intuit cache window, fresh key after'
-description: 'Refines retry policy for charge_uncertain attempts. Within 24h:
-  reuse the same row + idempotency_key (Intuit dedupes). Beyond 24h:
-  auto-promote prior attempt to charge_uncertain_expired and create a fresh
-  attempt with a new key. Honors charge_uncertain_expired (set by
-  reconcile_payments) the same way. Adds needs_reconcile_review halt for cases
-  where reconciler couldnt determine state.'
+summary: Insert webhook_expectations for Payment + Invoice writes (independent
+  QBO confirmation)
+description: 'After every QBO write (record_qbo_payment, send_invoice_email,
+  refresh_invoice_cache), insert a billing.webhook_expectations row with 5min
+  grace. The /api/webhooks/qbo handler calls
+  confirm_webhook_expectation(entity_type, entity_id) which flips matching rows
+  to confirmed. Stragglers go to missing via cdc_reconciler. Closes the
+  dual-write gap: even if QBO returns 200 but never commits, we know within 5min
+  via the missing expectation. Best-effort INSERT (failures dont fail the
+  write).'
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

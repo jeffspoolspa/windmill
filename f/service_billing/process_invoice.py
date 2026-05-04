@@ -182,6 +182,41 @@ def mark_invoice_processed(conn, qbo_invoice_id):
     conn.commit(); cur.close()
 
 
+# How long we expect QBO webhooks to arrive after we make a write. If they
+# don't show up within this window, cdc_reconciler will flip the expectation
+# to 'missing' and surface in the UI for human investigation.
+WEBHOOK_GRACE_MINUTES = 5
+
+
+def insert_webhook_expectation(conn, entity_type, entity_id):
+    """Record an expectation that QBO will send a webhook for this entity
+    within the grace window. The webhook handler at /api/webhooks/qbo calls
+    confirm_webhook_expectation(entity_type, entity_id) which matches by
+    those two fields and flips status='pending' → 'confirmed'.
+
+    Use this immediately after any QBO write whose effect we want to verify
+    independently. It's optional — failure here doesn't fail the write
+    (the webhook is the verification layer; this just lets us catch missed
+    confirmations). Best-effort only.
+    """
+    if not entity_id:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO billing.webhook_expectations (
+                entity_type, entity_id, expected_by, source, status
+            ) VALUES (%s, %s, now() + (%s || ' minutes')::interval,
+                      'self_initiated', 'pending')
+        """, (entity_type, entity_id, str(WEBHOOK_GRACE_MINUTES)))
+        conn.commit(); cur.close()
+    except Exception as e:
+        # Don't fail the write — log + continue. cdc_reconciler is the
+        # safety net; missed expectation rows just mean we'd see the
+        # change via webhook but no green-check confirmation in the UI.
+        print(f"  (webhook_expectation insert warning [{entity_type}:{entity_id}]: {e})")
+
+
 def refresh_invoice_cache(conn, qbo_invoice_id, qbo_invoice):
     """After charge + payment, refresh the cached balance/email_status so UI sees the new state."""
     def _subtotal(inv):
@@ -1057,6 +1092,15 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
 
     update_attempt(conn, attempt["id"], qbo_payment_id=pay["payment_id"])
 
+    # Webhook confirmation: QBO should fire a Payment.Create webhook for the
+    # Payment we just made. /api/webhooks/qbo's handler calls
+    # confirm_webhook_expectation('Payment', pay["payment_id"]) which matches
+    # this row and flips status='confirmed'. If it never arrives within the
+    # grace window, cdc_reconciler flips it to 'missing' — that's our signal
+    # to investigate (record_payment returned 200 but QBO didn't actually
+    # commit it).
+    insert_webhook_expectation(conn, "Payment", pay["payment_id"])
+
     # Send receipt (best-effort — financial state already correct)
     receipt = send_payment_receipt(pay["payment_id"], customer_id, access_token, realm_id)
     update_attempt(conn, attempt["id"], email_sent=receipt["success"])
@@ -1065,6 +1109,9 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
     fresh, _ = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
     if fresh:
         refresh_invoice_cache(conn, qbo_invoice_id, fresh)
+        # Invoice.Update webhook expected (balance changed, possibly
+        # email_status too if QBO auto-sends a receipt-related notification).
+        insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
 
     update_attempt(conn, attempt["id"], status="succeeded",
                     raw_result=json.dumps({"payment": pay, "receipt": receipt}))
@@ -1106,12 +1153,16 @@ def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer
 
     update_attempt(conn, prior["id"], qbo_payment_id=pay["payment_id"])
 
+    # Same webhook-confirmation pattern as the primary charge path.
+    insert_webhook_expectation(conn, "Payment", pay["payment_id"])
+
     receipt = send_payment_receipt(pay["payment_id"], customer_id, access_token, realm_id)
     update_attempt(conn, prior["id"], email_sent=receipt["success"])
 
     fresh, _ = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
     if fresh:
         refresh_invoice_cache(conn, qbo_invoice_id, fresh)
+        insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
 
     update_attempt(conn, prior["id"], status="succeeded",
                     raw_result=json.dumps({"orphan_recovery": True, "payment": pay,
@@ -1125,7 +1176,7 @@ def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer
 
 
 def _process_invoice_only(conn, attempt, invoice, qbo_inv, customer_id, access_token, realm_id):
-    """payment_method='invoice' — email IS the deliverable. Auto-retry email up to N times."""
+    """preferred_payment_type='email' — email IS the deliverable. Auto-retry email up to N times."""
     qbo_invoice_id = invoice["qbo_invoice_id"]
     last_err = None
     for i in range(EMAIL_RETRY_MAX):
@@ -1133,6 +1184,11 @@ def _process_invoice_only(conn, attempt, invoice, qbo_inv, customer_id, access_t
         if email["success"]:
             update_attempt(conn, attempt["id"], status="succeeded", email_sent=True,
                             raw_result=json.dumps({"email": email, "attempts": i + 1}))
+            # Webhook confirmation: QBO fires Invoice.Emailed when send succeeds.
+            # If 'skipped' (EmailStatus was already EmailSent), the webhook
+            # already happened — no need to expect another.
+            if not email.get("skipped"):
+                insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
             mark_invoice_processed(conn, qbo_invoice_id)
             fresh, _ = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
             if fresh:
