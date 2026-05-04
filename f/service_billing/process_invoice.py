@@ -922,16 +922,34 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
                        attempt_id=str(attempt["id"]),
                        plan=plan)
 
-    # 5. ROUTE — based on the new preferred_payment_type (channel decision
-    # now lives there, not the legacy 'invoice'/'on_file' field). Email
-    # path and charge path stay the same shape; just the gate changed.
-    if preferred_type == "email":
-        return _process_invoice_only(conn, attempt, invoice, qbo_inv, customer_id,
-                                      access_token, realm_id)
-
-    # preferred_type IN ('ach', 'credit_card') → charge path
-    return _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_name,
-                                 wo_number, invoice_number, qbo_balance, access_token, realm_id)
+    # 5. ROUTE — based on the new preferred_payment_type. Wrapped in a
+    # safety-net try/except so any uncaught exception doesn't leave the
+    # write-ahead attempt row stuck at status='pending' forever. We flip
+    # to 'charge_uncertain' on crash because we don't know whether the
+    # external call (charge or email) actually fired or not — the
+    # reconciler will resolve charges; email path is no-op safe (its
+    # internal retries handle their own state, so reaching this except
+    # means something deeper crashed).
+    try:
+        if preferred_type == "email":
+            return _process_invoice_only(conn, attempt, invoice, qbo_inv, customer_id,
+                                          access_token, realm_id)
+        # preferred_type IN ('ach', 'credit_card') → charge path
+        return _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_name,
+                                     wo_number, invoice_number, qbo_balance, access_token, realm_id)
+    except Exception as e:
+        # Don't leave a pending row orphaned. Mark as charge_uncertain so
+        # reconcile_payments queries Intuit and resolves it on next tick.
+        try:
+            update_attempt(
+                conn, attempt["id"],
+                status="charge_uncertain",
+                error_message=f"process_one crashed mid-flight: {str(e)[:300]}",
+            )
+        except Exception as inner:
+            print(f"  WARN: failed to mark attempt charge_uncertain: {inner}")
+        # Re-raise so the bulk loop's except still captures it for stats.
+        raise
 
 
 def _build_dry_run_plan(payment_method, balance, email_already_sent, customer_id,
@@ -1117,14 +1135,21 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
 
     update_attempt(conn, attempt["id"], qbo_payment_id=pay["payment_id"])
 
-    # Webhook confirmation: QBO should fire a Payment.Create webhook for the
-    # Payment we just made. /api/webhooks/qbo's handler calls
-    # confirm_webhook_expectation('Payment', pay["payment_id"]) which matches
-    # this row and flips status='confirmed'. If it never arrives within the
-    # grace window, cdc_reconciler flips it to 'missing' — that's our signal
-    # to investigate (record_payment returned 200 but QBO didn't actually
-    # commit it).
+    # Webhook confirmation: QBO fires Payment.Create for the Payment we made.
+    # /api/webhooks/qbo's confirm_webhook_expectation('Payment', payment_id)
+    # matches this row and flips status='confirmed'. If it never arrives,
+    # cdc_reconciler flips it to 'missing' — that's our signal that QBO
+    # didn't actually commit despite returning 200.
     insert_webhook_expectation(conn, "Payment", pay["payment_id"])
+
+    # NOTE: We deliberately do NOT insert an Invoice expectation here even
+    # though the invoice's balance changed. QBO does NOT fire Invoice.Update
+    # webhooks for balance changes driven by Payment application — only for
+    # direct PATCHes on the invoice (memo, due date, etc.). Empirically
+    # observed: every Invoice expectation we used to insert here went to
+    # 'missing'. The Payment.Create webhook is sufficient — refresh_payment
+    # updates the invoice cache as a side effect, and the auto-promote
+    # trigger flips billing_status to processed.
 
     # Send receipt (best-effort — financial state already correct)
     receipt = send_payment_receipt(pay["payment_id"], customer_id, access_token, realm_id)
@@ -1134,9 +1159,6 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
     fresh, _ = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
     if fresh:
         refresh_invoice_cache(conn, qbo_invoice_id, fresh)
-        # Invoice.Update webhook expected (balance changed, possibly
-        # email_status too if QBO auto-sends a receipt-related notification).
-        insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
 
     update_attempt(conn, attempt["id"], status="succeeded",
                     raw_result=json.dumps({"payment": pay, "receipt": receipt}))
@@ -1178,7 +1200,9 @@ def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer
 
     update_attempt(conn, prior["id"], qbo_payment_id=pay["payment_id"])
 
-    # Same webhook-confirmation pattern as the primary charge path.
+    # Same webhook-confirmation pattern as the primary charge path:
+    # Payment.Create fires; Invoice.Update for balance change does not
+    # (so we don't insert an Invoice expectation here either).
     insert_webhook_expectation(conn, "Payment", pay["payment_id"])
 
     receipt = send_payment_receipt(pay["payment_id"], customer_id, access_token, realm_id)
@@ -1187,7 +1211,6 @@ def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer
     fresh, _ = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
     if fresh:
         refresh_invoice_cache(conn, qbo_invoice_id, fresh)
-        insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
 
     update_attempt(conn, prior["id"], status="succeeded",
                     raw_result=json.dumps({"orphan_recovery": True, "payment": pay,

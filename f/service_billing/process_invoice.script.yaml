@@ -1,11 +1,10 @@
-summary: 'Soften charge_declined halt: only block when retrying the SAME (channel, PM)'
-description: 'The charge_declined pre-flight halt was unconditional, blocking
-  ANY processing after a prior decline (even if the user switched to email or
-  picked a different card). Now: only halt if the new attempts (channel,
-  customer_payment_method_id) matches the declined attempts. Channel change →
-  proceed (email is always safe; ach != credit_card is a different network). PM
-  change → proceed (different card likely works). Same-card retry still requires
-  force=true.'
+summary: Drop bogus Invoice expectations + safety net for orphaned pending rows
+description: Removed Invoice webhook expectation INSERT after
+  refresh_invoice_cache in both charge path and orphan recovery — QBO does NOT
+  fire Invoice.Update webhooks for payment-driven balance changes. Added
+  top-level try/except around _process_invoice_only and _process_charge_path so
+  uncaught exceptions flip the attempt to charge_uncertain instead of leaving it
+  pending forever.
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script
