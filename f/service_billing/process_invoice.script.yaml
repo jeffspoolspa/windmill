@@ -1,13 +1,11 @@
-summary: Insert webhook_expectations for Payment + Invoice writes (independent
-  QBO confirmation)
-description: 'After every QBO write (record_qbo_payment, send_invoice_email,
-  refresh_invoice_cache), insert a billing.webhook_expectations row with 5min
-  grace. The /api/webhooks/qbo handler calls
-  confirm_webhook_expectation(entity_type, entity_id) which flips matching rows
-  to confirmed. Stragglers go to missing via cdc_reconciler. Closes the
-  dual-write gap: even if QBO returns 200 but never commits, we know within 5min
-  via the missing expectation. Best-effort INSERT (failures dont fail the
-  write).'
+summary: 'Soften charge_declined halt: only block when retrying the SAME (channel, PM)'
+description: 'The charge_declined pre-flight halt was unconditional, blocking
+  ANY processing after a prior decline (even if the user switched to email or
+  picked a different card). Now: only halt if the new attempts (channel,
+  customer_payment_method_id) matches the declined attempts. Channel change →
+  proceed (email is always safe; ach != credit_card is a different network). PM
+  change → proceed (different card likely works). Same-card retry still requires
+  force=true.'
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

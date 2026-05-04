@@ -780,9 +780,34 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
                        attempt_id=str(prior["id"]))
 
     if prior and prior["status"] == "charge_declined" and not force:
-        return _result(qbo_invoice_id, "needs_human", reason="charge_declined",
-                       error=prior.get("error_message"),
-                       attempt_id=str(prior["id"]))
+        # Only halt if the new attempt would do the SAME THING the declined
+        # attempt did. The decline is specific to a (channel, PM) pair — if
+        # the user has switched channels (e.g. credit_card → email) OR
+        # picked a different PM (different card on the same channel), it's
+        # a fresh attempt path, not a retry of the failed one.
+        #
+        # Practical example: prior attempt charged Visa-ending-1234 and was
+        # declined. User edits the invoice to email-only and clicks Process.
+        # We should email, not block on the prior card decline.
+        new_target_pm_id = invoice.get("target_payment_method_id")
+        new_target_pm_id_str = (
+            str(new_target_pm_id) if new_target_pm_id else None
+        )
+        prior_pm_id_str = (
+            str(prior.get("customer_payment_method_id"))
+            if prior.get("customer_payment_method_id") else None
+        )
+        same_attempt_path = (
+            prior.get("channel") == channel
+            and prior_pm_id_str == new_target_pm_id_str
+            and channel != "email"  # email path always safe to re-attempt
+        )
+        if same_attempt_path:
+            return _result(qbo_invoice_id, "needs_human", reason="charge_declined",
+                           error=prior.get("error_message"),
+                           attempt_id=str(prior["id"]),
+                           note="prior attempt declined this same PM; "
+                                "change channel/PM or pass force=true to retry")
 
     # Reconciler couldn't determine charge state — human investigation required.
     # Force=True bypasses this (admin override after manual verification).
