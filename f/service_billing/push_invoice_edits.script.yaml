@@ -1,12 +1,14 @@
-summary: Track webhook_expectations after QBO PATCH for sync verification
-description: Inserts a webhook_expectations row after a successful QBO Invoice
-  PATCH. The webhook handler's confirm_webhook_expectation RPC marks it
-  confirmed when the matching invoice.update webhook arrives; the cdc_reconciler
-  flips overdue rows to 'missing'. Closes the verification loop on
-  user-initiated invoice edits.
+summary: Sync new payment fields + clear all non-deterministic reasons on save
+description: 'Two fixes: (1) When payment_method changes, also derive + write
+  preferred_payment_type AND target_payment_method_id (legacy
+  invoice→email/NULL, on_file→most-recent-default-PMs type+uuid). Without this,
+  changing the dropdown to email-only would leave process_invoice charging the
+  same card. (2) Clear needs_review_reason entirely instead of regex-stripping
+  just memo_low_confidence. The user is asserting the invoice is ready, so
+  non-deterministic reasons (user_revert, qbo_write_failed, memo_api_error)
+  should all be wiped. recheck_invoice_status rebuilds the deterministic ones
+  (subtotal_mismatch, credit_review) afterward if they still apply.'
 lock: '!inline f/service_billing/push_invoice_edits.script.lock'
-concurrency_time_window_s: 0
-concurrent_limit: 5
 has_on_behalf_of: false
 kind: script
 schema: null

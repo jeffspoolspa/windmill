@@ -8,8 +8,13 @@
 #   - Does NOT regenerate the memo via OpenAI (user-supplied)
 #   - Does NOT re-derive qbo_class (user-supplied)
 #   - Sets memo_locked=true (user has affirmed the memo)
-#   - Strips memo_low_confidence from needs_review_reason (lock affirms it)
+#   - Clears needs_review_reason entirely (user is asserting the issues are
+#     resolved); recheck_invoice_status rebuilds the deterministic ones
+#     (subtotal_mismatch, credit_review) if still applicable
 #   - Sets enrichment_ok=true (the QBO write went through)
+#   - When payment_method changes, ALSO updates preferred_payment_type AND
+#     target_payment_method_id so the new model stays in sync. 'invoice' →
+#     'email' + NULL target. 'on_file' → most-recent-default PM's type + uuid.
 #
 # After this script returns, billing.recheck_invoice_status (called inline)
 # recomputes billing_status based on the now-cleaner needs_review_reason
@@ -119,6 +124,49 @@ def update_qbo_with_retry(qbo_invoice_id, updates, access_token, realm_id, max_r
     return {"success": False, "error": last_err}
 
 
+def derive_new_payment_fields(conn, qbo_invoice_id, payment_method):
+    """Translate the legacy payment_method dropdown value into the new
+    preferred_payment_type + target_payment_method_id pair.
+
+      'invoice' (email)  → preferred_payment_type='email',  target=NULL
+      'on_file' (charge) → preferred_payment_type=<type>,   target=<uuid>
+                          where <type, uuid> is the customer's most-recently-
+                          added default PM. Falls back to ('email', NULL) if
+                          no default is on file (matches resolve_preferred_
+                          payment_type's behavior).
+
+    Returns (preferred_payment_type, target_payment_method_id). Returns
+    (None, None) if payment_method is None or unknown — caller should leave
+    those fields untouched.
+    """
+    if payment_method == "invoice":
+        return ("email", None)
+
+    if payment_method != "on_file":
+        return (None, None)  # unknown — don't touch
+
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT cpm.id, cpm.type
+          FROM billing.customer_payment_methods cpm
+          JOIN billing.invoices i ON i.qbo_customer_id = cpm.qbo_customer_id
+         WHERE i.qbo_invoice_id = %s
+           AND cpm.is_active = true
+           AND cpm.is_default = true
+         ORDER BY (cpm.raw->>'created') DESC NULLS LAST,
+                  cpm.fetched_at DESC
+         LIMIT 1
+    """, (qbo_invoice_id,))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        # No default PM available — process_invoice would fail anyway,
+        # so resolve to email to keep the user from clicking Process and
+        # hitting a no_payment_method error.
+        return ("email", None)
+    return (row["type"], str(row["id"]))
+
+
 def main(qbo_invoice_id: str,
          qbo_class: str = None,
          payment_method: str = None,
@@ -186,43 +234,79 @@ def main(qbo_invoice_id: str,
             # if we can't write the row. Log and continue.
             print(f"  (webhook_expectation insert failed: {e})")
 
-    # Update the cache. Set memo_locked=true and enrichment_ok=true. Strip
-    # memo_low_confidence from needs_review_reason since the user has
-    # affirmed the memo.
+    # Update the cache. Set memo_locked=true and enrichment_ok=true. Clear
+    # needs_review_reason entirely — the user is asserting the invoice is
+    # ready, so any non-deterministic reasons (memo_low_confidence,
+    # user_revert, qbo_write_failed, memo_api_error) should be wiped.
+    # recheck_invoice_status rebuilds the deterministic reasons
+    # (subtotal_mismatch, credit_review) below if any still apply.
+    #
+    # If payment_method changed, ALSO derive + write the new vocab fields
+    # so process_invoice charges the right thing.
     conn = get_db_conn()
     try:
+        # Derive new payment fields from the legacy dropdown value.
+        new_preferred, new_target = (None, None)
+        explicitly_set_pm_fields = False
+        if payment_method is not None:
+            new_preferred, new_target = derive_new_payment_fields(
+                conn, qbo_invoice_id, payment_method
+            )
+            explicitly_set_pm_fields = True
+            print(f"  payment_method={payment_method!r} → preferred={new_preferred!r}, target={new_target}")
+
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""
-            UPDATE billing.invoices
-            SET memo               = COALESCE(%s, memo),
-                statement_memo     = COALESCE(%s, statement_memo),
-                qbo_class          = COALESCE(%s, qbo_class),
-                payment_method     = COALESCE(%s, payment_method),
-                memo_locked        = true,
-                enrichment_ok      = true,
-                needs_review_reason = NULLIF(
-                    regexp_replace(
-                        COALESCE(needs_review_reason, ''),
-                        'memo_low_confidence \([0-9]+%%\)(, )?',
-                        '',
-                        'g'
-                    ),
-                    ''
-                ),
-                fetched_at         = now()
-            WHERE qbo_invoice_id = %s
-            RETURNING qbo_invoice_id, billing_status, needs_review_reason,
-                      memo, statement_memo, qbo_class, payment_method,
-                      memo_locked, enrichment_ok
-        """, (composed_memo, composed_statement, qbo_class, payment_method,
-              qbo_invoice_id))
+
+        # Two UPDATE shapes depending on whether we're changing PM fields.
+        # Avoids overwriting target_payment_method_id with NULL when the
+        # user didn't change payment_method.
+        if explicitly_set_pm_fields:
+            cur.execute("""
+                UPDATE billing.invoices
+                SET memo                      = COALESCE(%s, memo),
+                    statement_memo            = COALESCE(%s, statement_memo),
+                    qbo_class                 = COALESCE(%s, qbo_class),
+                    payment_method            = %s,
+                    preferred_payment_type    = %s,
+                    target_payment_method_id  = %s,
+                    memo_locked               = true,
+                    enrichment_ok             = true,
+                    needs_review_reason       = NULL,
+                    fetched_at                = now()
+                WHERE qbo_invoice_id = %s
+                RETURNING qbo_invoice_id, billing_status, needs_review_reason,
+                          memo, statement_memo, qbo_class, payment_method,
+                          preferred_payment_type, target_payment_method_id,
+                          memo_locked, enrichment_ok
+            """, (composed_memo, composed_statement, qbo_class,
+                  payment_method, new_preferred, new_target,
+                  qbo_invoice_id))
+        else:
+            cur.execute("""
+                UPDATE billing.invoices
+                SET memo                = COALESCE(%s, memo),
+                    statement_memo      = COALESCE(%s, statement_memo),
+                    qbo_class           = COALESCE(%s, qbo_class),
+                    memo_locked         = true,
+                    enrichment_ok       = true,
+                    needs_review_reason = NULL,
+                    fetched_at          = now()
+                WHERE qbo_invoice_id = %s
+                RETURNING qbo_invoice_id, billing_status, needs_review_reason,
+                          memo, statement_memo, qbo_class, payment_method,
+                          preferred_payment_type, target_payment_method_id,
+                          memo_locked, enrichment_ok
+            """, (composed_memo, composed_statement, qbo_class, qbo_invoice_id))
+
         updated = cur.fetchone()
         if not updated:
             conn.rollback()
             return {"status": "error",
                     "error": f"invoice {qbo_invoice_id} not in billing.invoices"}
 
-        # Run recheck to recompute billing_status from current state.
+        # Run recheck to recompute billing_status from current state. Will
+        # rebuild needs_review_reason with subtotal_mismatch / credit_review
+        # if they still apply against the now-clean slate.
         cur.execute("SELECT billing.recheck_invoice_status(%s) AS r", (qbo_invoice_id,))
         recheck = cur.fetchone()["r"]
         conn.commit()
