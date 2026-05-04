@@ -72,7 +72,7 @@ def refresh_qbo_token():
     tokens = resp.json()
     resource["refresh_token"] = tokens["refresh_token"]
     wmill.set_resource(QBO_RESOURCE, resource)
-    return tokens["access_token"]
+    return tokens["access_token"], resource["realm_id"]
 
 
 def get_db_conn():
@@ -111,19 +111,118 @@ def load_uncertain_attempts(conn):
     return rows
 
 
-def search_intuit_for_charge(attempt, access_token):
-    """Query Intuit Payments for a charge matching this attempt.
+def search_qbo_for_payment(attempt, access_token, realm_id):
+    """Query QBO Payment entities to verify whether a charge landed.
 
-    Intuit's /v4/payments/charges supports filters; we use:
-      - createdAfter / createdBefore (ISO dates)
-      - cardOnFile (the CC token id)
-      - amount (filter client-side because Intuit's filter is fuzzy)
+    Why QBO and not Intuit Payments directly:
+      Intuit Payments V4 has no list endpoint — only POST (charge) and
+      GET by specific charge_id. We can't enumerate charges by date/
+      customer/amount. So we use the QBO Data API instead: process_invoice
+      records every successful charge as a QBO Payment with the Intuit
+      charge_id stored in CreditCardPayment.CreditChargeResponse.CCTransId.
 
-    Returns one of:
-      {"found": True, "charge": <intuit charge dict>, "match_confidence": "exact"}
+    Limitation: this only works if process_invoice got far enough to
+    record the QBO Payment. If the script crashed BETWEEN the Intuit
+    charge and the record_qbo_payment call, no QBO Payment exists and
+    we can't auto-verify — the attempt stays charge_uncertain until
+    the 24h window passes (then promotes to expired) or a human checks
+    Intuit Merchant Center directly.
+
+    Returns the same shape as before:
+      {"found": True, "charge": {charge_id, amount, ...}, "match_confidence": "exact"}
       {"found": False, "reason": "..."}
-      {"error": "..."}                      — query failed, retry next tick
+      {"error": "..."}
     """
+    customer_id = attempt.get("qbo_customer_id")
+    if not customer_id:
+        return {"error": "attempt has no qbo_customer_id"}
+
+    attempted_at = attempt["attempted_at"]
+    if attempted_at.tzinfo is None:
+        attempted_at = attempted_at.replace(tzinfo=timezone.utc)
+    # QBO TxnDate is a date, not a timestamp — search a 2-day window
+    # around the attempt to catch off-by-one timezone edges.
+    date_after  = (attempted_at - timedelta(days=1)).date().isoformat()
+    date_before = (attempted_at + timedelta(days=1)).date().isoformat()
+
+    # QBO query language (similar to SQL but limited). Filter by customer
+    # + date range + payment method (CC=21, ACH=20). TotalAmt filter is
+    # client-side because QBO doesn't always honor decimal equality on
+    # numeric fields.
+    pmt_method_id = "20" if attempt["pm_type"] == "ach" else "21"
+    query = (
+        f"SELECT * FROM Payment "
+        f"WHERE CustomerRef = '{customer_id}' "
+        f"AND TxnDate >= '{date_after}' "
+        f"AND TxnDate <= '{date_before}' "
+        f"AND PaymentMethodRef = '{pmt_method_id}'"
+    )
+    try:
+        resp = requests.get(
+            f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/query",
+            headers={"Authorization": f"Bearer {access_token}",
+                     "Accept": "application/json"},
+            params={"query": query}, timeout=30,
+        )
+    except (requests.Timeout, requests.ConnectionError) as e:
+        return {"error": f"qbo query timeout: {str(e)[:200]}"}
+
+    if not resp.ok:
+        return {"error": f"qbo query HTTP {resp.status_code}: {resp.text[:200]}"}
+
+    try:
+        body = resp.json()
+    except Exception:
+        return {"error": "qbo query returned unparseable body"}
+
+    payments = (body.get("QueryResponse") or {}).get("Payment", [])
+
+    target_amount = float(attempt["charge_amount"] or 0)
+
+    # Match by amount within $0.01 AND has a CCTransId (proves it was a
+    # charged payment, not a manual one). The CCTransId IS the Intuit
+    # charge_id we'd want to store on the attempt.
+    matches = []
+    for p in payments:
+        p_amount = float(p.get("TotalAmt", 0) or 0)
+        if abs(p_amount - target_amount) >= 0.01:
+            continue
+        cc_info = p.get("CreditCardPayment") or {}
+        cc_trans_id = (cc_info.get("CreditChargeResponse") or {}).get("CCTransId")
+        if cc_trans_id:
+            matches.append({
+                "qbo_payment_id": p.get("Id"),
+                "charge_id": cc_trans_id,
+                "amount": p_amount,
+                "txn_date": p.get("TxnDate"),
+                "raw": p,
+            })
+
+    if len(matches) == 1:
+        m = matches[0]
+        return {
+            "found": True,
+            "charge": {
+                "id": m["charge_id"],
+                "amount": m["amount"],
+                "qbo_payment_id": m["qbo_payment_id"],
+                "txn_date": m["txn_date"],
+            },
+            "match_confidence": "exact",
+        }
+    if len(matches) > 1:
+        return {"found": False,
+                "reason": f"ambiguous: {len(matches)} QBO payments match amount + customer"}
+    return {"found": False, "reason": "no matching QBO payment found"}
+
+
+# Legacy alias — keep so we don't break the call site if anything else uses it.
+def search_intuit_for_charge(attempt, access_token):
+    """DEPRECATED — Intuit V4 doesn't support listCharges. Kept as a stub
+    that always returns no-match so the caller falls into the expiration
+    path. Real verification happens in search_qbo_for_payment now."""
+    return {"found": False, "reason": "intuit listCharges not supported by V4 API"}
+    # Original code preserved below for reference, never executed:
     if not attempt.get("card_on_file_id"):
         return {"error": "attempt has no card_on_file_id (no cpm linked)"}
 
@@ -250,7 +349,7 @@ def main(dry_run: bool = False):
     print(f"=== reconcile_payments (dry_run={dry_run}, lookback={LOOKBACK_DAYS}d) ===")
     conn = get_db_conn()
     try:
-        access_token = refresh_qbo_token()
+        access_token, realm_id = refresh_qbo_token()
         attempts = load_uncertain_attempts(conn)
         print(f"Found {len(attempts)} charge_uncertain attempts to check")
 
@@ -268,7 +367,7 @@ def main(dry_run: bool = False):
             tag = (f"attempt={a['id']} inv={a['qbo_invoice_id']} "
                    f"amount=${float(a['charge_amount'] or 0):.2f} age={age}")
 
-            search = search_intuit_for_charge(a, access_token)
+            search = search_qbo_for_payment(a, access_token, realm_id)
 
             if "error" in search:
                 stats["errored"] += 1

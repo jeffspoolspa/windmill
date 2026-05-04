@@ -1,11 +1,13 @@
-summary: Resolve charge_uncertain attempts via Intuit /charges search
-description: For each processing_attempts.status=charge_uncertain, query Intuit
-  Payments to confirm whether the charge actually landed. Match → promote to
-  charge_succeeded (process_invoice picks it up). No match + >24h → promote to
-  charge_uncertain_expired (safe for fresh attempt with new key). No match +
-  <24h → leave alone, retry next cron tick. >7d still no match →
-  needs_reconcile_review for human. Read-only against external APIs; safe to
-  re-run.
+summary: Use QBO Payment query (Intuit V4 has no listCharges endpoint)
+description: 'Replaced Intuit listCharges (which doesn''t exist in V4 — was
+  returning PMT-4000 "listCharges is invalid") with a QBO Payment query. After
+  every successful charge, process_invoice records a QBO Payment with CCTransId
+  set to the Intuit charge_id. The reconciler now searches QBO for Payments
+  matching the customer + amount + date window + payment method. If one exists
+  with CCTransId set, we know the charge landed and what its ID is. Limitation:
+  doesn''t help when the script crashed BEFORE record_qbo_payment (no QBO record
+  exists). Those still wait for the 24h window to expire and get auto-promoted
+  to charge_uncertain_expired for fresh retry.'
 lock: '!inline f/service_billing/reconcile_payments.script.lock'
 has_on_behalf_of: false
 kind: script
