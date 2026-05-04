@@ -54,17 +54,6 @@ def get_db_conn():
 
 
 def set_skip_recheck(conn, on: bool):
-    """Toggle the billing.skip_recheck GUC on the current session.
-
-    The unified column trigger billing.fn_recheck_on_invoice_change reads
-    this and bails when 'on'. Pre_process needs that bail because it writes
-    subtotal / enrichment_ok / memo / payment_method / qbo_class across
-    multiple commits and computes the final billing_status itself. Without
-    the skip, the trigger would fire mid-flight and the invoice would
-    briefly transition to ready_to_process and back, causing UI flickers
-    over Realtime. Always RESET in the finally block so the connection is
-    safe to reuse (Windmill recycles connection pool).
-    """
     cur = conn.cursor()
     if on:
         cur.execute("SET billing.skip_recheck = 'on'")
@@ -75,9 +64,6 @@ def set_skip_recheck(conn, on: bool):
 
 
 def set_stage(conn, qbo_invoice_id, stage):
-    """Persist the current stage so the UI progress modal can animate.
-    Autocommits a small UPDATE so Realtime fires immediately - do NOT bundle
-    this into a larger transaction or subscribers won't see the progression."""
     try:
         cur = conn.cursor()
         cur.execute(
@@ -226,13 +212,78 @@ def derive_qbo_class(assigned_to, wo_type, description):
     return "Service"
 
 
-def resolve_payment_method(wo_description, pms):
-    desc = (wo_description or "").lower()
-    if "*bill*" in desc:
-        return "invoice"
-    if any(pm.get("is_active") for pm in pms):
-        return "on_file"
-    return "invoice"
+def resolve_payment_for_invoice(conn, qbo_customer_id, wo_description):
+    """Resolve all payment-method-related fields for an invoice in one shot.
+
+    Calls the new SQL functions:
+      - billing.resolve_preferred_payment_type — handles *bill* override,
+        customer-level override, commercial→email default, residential
+        default cascade (most-recently-added default PM's type → email
+        fallback). Source of truth for the type decision.
+      - billing.pick_target_payment_method — given the resolved type, picks
+        the specific PM uuid (NULL for email). Mirrors process_work_order's
+        get_active_payment_method picker — same is_default + most-recent
+        ordering — so what gets stored here is what would actually be
+        charged.
+
+    Also derives the LEGACY payment_method ('invoice' | 'on_file') so we
+    can dual-write during the rollout. This goes away when legacy column
+    is dropped.
+
+    And surfaces the "active PMs but no defaults" data anomaly as a
+    needs_review reason — the SQL function silently falls back to email
+    in that case, but it's a bad data state we want a human to fix.
+
+    Returns:
+      {
+        "preferred":            'email' | 'ach' | 'credit_card',
+        "legacy_payment_method": 'invoice' | 'on_file',
+        "target_pm_id":          uuid str or None,
+        "anomaly_no_default":    bool,
+      }
+    """
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT billing.resolve_preferred_payment_type(%s, %s)",
+        (qbo_customer_id, wo_description),
+    )
+    preferred = cur.fetchone()[0]
+
+    cur.execute(
+        "SELECT billing.pick_target_payment_method(%s, %s)",
+        (qbo_customer_id, preferred),
+    )
+    target_pm_id = cur.fetchone()[0]
+
+    # Anomaly check: customer has active PMs but none flagged is_default.
+    # Only meaningful when the resolution fell back to 'email' — a customer
+    # with ANY active+default PM would have resolved to that type instead.
+    anomaly = False
+    if preferred == 'email':
+        cur.execute("""
+            SELECT
+              bool_or(is_active = true) AS has_active,
+              bool_or(is_active = true AND is_default = true) AS has_default
+            FROM billing.customer_payment_methods
+            WHERE qbo_customer_id = %s
+        """, (qbo_customer_id,))
+        row = cur.fetchone()
+        if row and row[0] and not row[1]:
+            anomaly = True
+
+    cur.close()
+
+    # Derive legacy value. Dual-write so the existing process_work_order.py
+    # + UI keep working until they're updated to read the new field.
+    legacy = 'invoice' if preferred == 'email' else 'on_file'
+
+    return {
+        "preferred":              preferred,
+        "legacy_payment_method":  legacy,
+        "target_pm_id":           target_pm_id,
+        "anomaly_no_default":     anomaly,
+    }
 
 
 MEMO_PROMPT = """You write a short customer-friendly memo for a pool service invoice.
@@ -446,14 +497,6 @@ def load_linked_wo(conn, qbo_invoice_id):
     return dict(row) if row else None
 
 
-def load_pms(conn, qbo_customer_id):
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM billing.customer_payment_methods WHERE qbo_customer_id = %s AND is_active = true",
-                (qbo_customer_id,))
-    rows = [dict(r) for r in cur.fetchall()]; cur.close()
-    return rows
-
-
 def load_open_credits(conn, qbo_customer_id):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -530,10 +573,19 @@ def fail_flag(conn, qbo_invoice_id, billing_status, reason):
 
 
 def write_result(conn, qbo_invoice_id, result):
+    """Single-shot UPDATE that writes ALL the pre-process outputs.
+
+    Dual-writes payment_method (legacy) + preferred_payment_type +
+    target_payment_method_id during the rollout. Once readers are off
+    the legacy column, the payment_method line goes away.
+    """
     cur = conn.cursor()
     cur.execute("""
         UPDATE billing.invoices
-        SET billing_status = %s, needs_review_reason = %s, payment_method = %s,
+        SET billing_status = %s, needs_review_reason = %s,
+            payment_method = %s,
+            preferred_payment_type = %s,
+            target_payment_method_id = %s,
             qbo_class = %s, memo = %s, statement_memo = %s,
             memo_locked = %s,
             subtotal_ok = %s, enrichment_ok = %s,
@@ -541,7 +593,10 @@ def write_result(conn, qbo_invoice_id, result):
             pre_processed_at = now(),
             pre_process_stage = %s
         WHERE qbo_invoice_id = %s
-    """, (result["billing_status"], result.get("needs_review_reason"), result.get("payment_method"),
+    """, (result["billing_status"], result.get("needs_review_reason"),
+          result.get("payment_method"),
+          result.get("preferred_payment_type"),
+          result.get("target_payment_method_id"),
           result.get("qbo_class"), result.get("memo"), result.get("statement_memo"),
           bool(result.get("memo_locked")),
           result.get("subtotal_ok"), result.get("enrichment_ok"),
@@ -554,7 +609,8 @@ def write_result(conn, qbo_invoice_id, result):
 def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=False):
     issues = []
     result = {"qbo_invoice_id": qbo_invoice_id, "billing_status": None, "needs_review_reason": None,
-              "payment_method": None, "qbo_class": None, "memo": None, "statement_memo": None,
+              "payment_method": None, "preferred_payment_type": None, "target_payment_method_id": None,
+              "qbo_class": None, "memo": None, "statement_memo": None,
               "subtotal_ok": None, "enrichment_ok": None, "credits_applied": []}
 
     invoice = load_invoice(conn, qbo_invoice_id)
@@ -635,9 +691,25 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                     f"${total_unmatched:.2f} unapplied)"
                 )
 
+        # Resolve payment method via the new SQL functions. This replaces
+        # the old binary 'invoice'/'on_file' picker — the new function
+        # handles *bill* override, customer-level override, commercial
+        # default, and residential default cascade in one call. We dual-
+        # write the legacy column for now; drops in a later phase once
+        # process_work_order + UI are off it.
         set_stage(conn, qbo_invoice_id, STAGE_PAYMENT_METHOD)
-        pms = load_pms(conn, qbo_customer_id)
-        result["payment_method"] = resolve_payment_method(wo.get("work_description"), pms)
+        pm_resolution = resolve_payment_for_invoice(
+            conn, qbo_customer_id, wo.get("work_description")
+        )
+        result["preferred_payment_type"]   = pm_resolution["preferred"]
+        result["payment_method"]           = pm_resolution["legacy_payment_method"]
+        result["target_payment_method_id"] = pm_resolution["target_pm_id"]
+
+        # Surface the "active PMs but no defaults" anomaly. The function
+        # silently fell back to email; this reason tells the human to
+        # promote a PM to default in QBO.
+        if pm_resolution["anomaly_no_default"]:
+            issues.append("no_default_payment_method")
 
         set_stage(conn, qbo_invoice_id, STAGE_CLASS)
         result["qbo_class"] = derive_qbo_class(wo.get("assigned_to"), wo.get("type"),
@@ -685,14 +757,8 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                 enrichment_ok = False
                 issues.append(f"memo_low_confidence ({memo_result.get('confidence', 0):.0%})")
                 memo_text = memo_result.get("memo")
-                # Low confidence — leave memo_locked false. User affirmation
-                # (manual lock OR external QBO edit detected by refresh_invoice)
-                # is what flips this to true.
             else:
                 memo_text = memo_result.get("memo")
-                # High confidence (>= 0.85) OR deterministic shortcut (1.0)
-                # → lock. Subsequent re-runs of pre_process_invoice will see
-                # is_memo_locked() and skip the OpenAI call entirely.
                 memo_locked_new = True
 
             composed = f"WO#{wo_number}: {memo_text}" if memo_text else None
@@ -727,7 +793,10 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
 
         return {"status": result["billing_status"], "qbo_invoice_id": qbo_invoice_id,
                 "wo_number": wo_number, "subtotal_ok": subtotal_ok, "enrichment_ok": enrichment_ok,
-                "payment_method": result["payment_method"], "qbo_class": result["qbo_class"],
+                "payment_method": result["payment_method"],
+                "preferred_payment_type": result["preferred_payment_type"],
+                "target_payment_method_id": result["target_payment_method_id"],
+                "qbo_class": result["qbo_class"],
                 "memo": composed,
                 "credits_applied_count": len([c for c in result["credits_applied"] if c["success"]]),
                 "needs_review_reason": result.get("needs_review_reason")}
@@ -745,24 +814,12 @@ def main(qbo_invoice_id: str = None, force: bool = False,
          bulk_all: bool = False, limit: int = None, sleep_ms: int = 1500,
          include_needs_review: bool = True,
          include_ready_to_process: bool = False):
-    # SAFE DEFAULT: bulk_all=False. The previous default of True caused a
-    # production bug - single-WO callers that omitted the parameter silently
-    # flipped into bulk mode and re-fired every needs_review invoice. Bulk
-    # mode is now strictly opt-in: caller must pass bulk_all=True.
     if not qbo_invoice_id and not bulk_all:
         return {"status": "error", "error": "pass qbo_invoice_id or bulk_all=True"}
 
     print(f"=== pre_process_invoice (bulk={bulk_all}, limit={limit}, force={force}, sleep={sleep_ms}ms, model={MODEL}) ===")
     conn = get_db_conn()
     try:
-        # Suppress the unified column-trigger recheck for the duration of
-        # this run. We compute billing_status ourselves in write_result()
-        # after writing all criteria atomically (subtotal cache, payment
-        # method, class, memo, enrichment_ok). Without this skip, the
-        # trigger fires on each intermediate UPDATE and re-runs recheck
-        # against a half-populated row, producing brief status flickers
-        # over Realtime. Always RESET in finally so connection reuse is
-        # safe (psycopg2 pool reuse, Windmill worker recycling, etc).
         set_skip_recheck(conn, True)
 
         access_token, realm_id = refresh_qbo_token()
@@ -805,8 +862,6 @@ def main(qbo_invoice_id: str = None, force: bool = False,
         return {"status": "success", "total": len(targets), "stats": stats, "sample": sample}
 
     finally:
-        # Always clear the GUC, even on exceptions, so a recycled conn
-        # in another script doesn't inherit the skip.
         try:
             set_skip_recheck(conn, False)
         except Exception:

@@ -1,8 +1,12 @@
-summary: Skip column-trigger recheck during atomic pre_process writes
-description: Set billing.skip_recheck=on while pre_process writes multiple
-  criteria fields atomically. Without this skip, the new unified column trigger
-  trg_recheck_on_invoice_change fires mid-flight and produces status flickers
-  over Realtime. RESET in finally so connection reuse is clean.
+summary: Resolve preferred_payment_type via SQL function + dual-write legacy
+description: Replaces the binary on_file/invoice resolver with a call to
+  billing.resolve_preferred_payment_type, which handles *bill* override +
+  customer override + commercial default + residential default cascade. Also
+  calls billing.pick_target_payment_method to set
+  invoices.target_payment_method_id so process_work_order can charge the
+  specific PM without re-picking. Dual-writes the legacy payment_method column
+  for transition. Adds no_default_payment_method needs_review reason for the
+  data anomaly where customer has active PMs but none flagged default.
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
 concurrency_time_window_s: 0
 concurrent_limit: 5
