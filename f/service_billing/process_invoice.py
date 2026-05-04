@@ -396,6 +396,65 @@ def _classify_charge_response(resp, payment_type):
         return "uncertain"
 
 
+def extract_charge_error(resp, body=None):
+    """Build the most useful human-readable error from a charge response.
+
+    Intuit puts error info in different places depending on the failure mode:
+      - Standard 4xx with errors array → errors[0].message + code + detail
+      - 4xx with non-standard body → body.message or body.detail
+      - 5xx with no body → "HTTP 502: <text fragment>"
+      - 5xx with HTML body → "HTTP 503: text=..."
+      - 200 with explicit failure status → "status=DECLINED" + any detail
+      - Pre-classified body with no errors structure → fall back to dump
+    Returns a string suitable for processing_attempts.error_message — never
+    None if there's anything useful at all (which lets the UI always surface
+    something instead of a blank).
+    """
+    if resp is None:
+        return "no response from Intuit (network error)"
+
+    # Try parsing body if not provided
+    if body is None:
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+
+    sc = resp.status_code
+
+    # Body unparseable — fall back to raw text
+    if body is None:
+        text = (resp.text or "").strip()
+        # HTML responses (gateway errors) are too long to dump verbatim
+        if text.startswith("<") or "<html" in text[:200].lower():
+            return f"HTTP {sc}: gateway returned HTML (likely 5xx upstream)"
+        return f"HTTP {sc}: {text[:300] if text else 'empty body'}"
+
+    # Standard Intuit errors array
+    errors = body.get("errors") or []
+    if errors:
+        e = errors[0] if isinstance(errors[0], dict) else {}
+        parts = []
+        if e.get("message"):
+            parts.append(e["message"])
+        if e.get("detail") and e.get("detail") != e.get("message"):
+            parts.append(e["detail"])
+        if e.get("code"):
+            parts.append(f"code={e['code']}")
+        if e.get("moreInfo"):
+            parts.append(f"info={e['moreInfo']}")
+        if parts:
+            return f"HTTP {sc}: " + " | ".join(parts)
+
+    # Some failures put it on the top level (rare but observed)
+    if body.get("status") and body.get("status") not in ("CAPTURED", "PENDING", "SUCCEEDED"):
+        msg = body.get("message") or body.get("detail") or ""
+        return f"HTTP {sc}: status={body.get('status')}" + (f" | {msg}" if msg else "")
+
+    # Catch-all: dump a slice of the body
+    return f"HTTP {sc}: " + json.dumps(body)[:300]
+
+
 def charge_card(card_id, amount, request_id, invoice_num, customer_name, access_token):
     """Charge a stored card. request_id is the persisted idempotency key."""
     payload = {
@@ -420,14 +479,14 @@ def charge_card(card_id, amount, request_id, invoice_num, customer_name, access_
     classification = _classify_charge_response(resp, "card")
     base = {"classification": classification, "request_id": request_id, "payment_type": "card",
             "status_code": resp.status_code, "amount_requested": amount}
+    body = None
     try:
         body = resp.json()
         base["raw_response"] = body
     except Exception:
         base["raw_text"] = resp.text[:500]
-        return base
 
-    if classification == "success":
+    if classification == "success" and body:
         return {**base,
                 "charge_id": body.get("id"),
                 "amount": float(body.get("amount", 0)),
@@ -437,8 +496,9 @@ def charge_card(card_id, amount, request_id, invoice_num, customer_name, access_
                 "card_type": (body.get("card") or {}).get("cardType"),
                 "created": body.get("created")}
 
-    err = body.get("errors", [{}])[0].get("message") if body.get("errors") else None
-    return {**base, "error": err or f"status={body.get('status')}"}
+    # Failure of any kind (declined, uncertain, or success-with-no-body) —
+    # capture a useful error message regardless of body shape.
+    return {**base, "error": extract_charge_error(resp, body)}
 
 
 def charge_bank_account(bank_id, amount, request_id, invoice_num, customer_name, access_token):
@@ -464,14 +524,14 @@ def charge_bank_account(bank_id, amount, request_id, invoice_num, customer_name,
     classification = _classify_charge_response(resp, "ach")
     base = {"classification": classification, "request_id": request_id, "payment_type": "ach",
             "status_code": resp.status_code, "amount_requested": amount}
+    body = None
     try:
         body = resp.json()
         base["raw_response"] = body
     except Exception:
         base["raw_text"] = resp.text[:500]
-        return base
 
-    if classification == "success":
+    if classification == "success" and body:
         return {**base,
                 "charge_id": body.get("id"),
                 "amount": float(body.get("amount", 0)),
@@ -481,8 +541,7 @@ def charge_bank_account(bank_id, amount, request_id, invoice_num, customer_name,
                 "card_type": "ACH",
                 "created": body.get("created")}
 
-    err = body.get("errors", [{}])[0].get("message") if body.get("errors") else None
-    return {**base, "error": err or f"status={body.get('status')}"}
+    return {**base, "error": extract_charge_error(resp, body)}
 
 
 # =============================================================================
@@ -521,7 +580,29 @@ def record_qbo_payment(customer_id, invoice_id, amount, charge_result, wo_num, i
 
     resp = qbo_post("payment", access_token, realm_id, payment_data)
     if not resp.ok:
-        return {"success": False, "error": resp.text[:400], "status_code": resp.status_code}
+        # QBO uses a different error envelope from Intuit Payments. Try the
+        # standard QBO Fault structure first, then fall back to extract_charge_error.
+        body = None
+        try:
+            body = resp.json()
+        except Exception:
+            pass
+        err_msg = None
+        if body:
+            fault = (body.get("Fault") or {}).get("Error") or []
+            if fault:
+                f = fault[0] if isinstance(fault[0], dict) else {}
+                parts = [
+                    f.get("Message"),
+                    f.get("Detail"),
+                    f"code={f.get('code')}" if f.get("code") else None,
+                ]
+                err_msg = " | ".join(p for p in parts if p)
+        if not err_msg:
+            err_msg = extract_charge_error(resp, body)
+        return {"success": False, "error": err_msg,
+                "status_code": resp.status_code,
+                "raw_response": body or resp.text[:500]}
 
     payment = resp.json().get("Payment", {})
     return {"success": True,
