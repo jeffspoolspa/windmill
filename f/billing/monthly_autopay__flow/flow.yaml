@@ -68,10 +68,9 @@ value:
         input_transforms: {}
         path: f/billing/sync_invoice_balances
     - id: b
-      summary: Apply Unapplied Maint Credits
+      summary: Apply Unapplied Maint Credits + Credit Memos
       value:
-        type: rawscript
-        content: '!inline apply_unapplied_maint_credits.py'
+        type: script
         input_transforms:
           access_token:
             type: javascript
@@ -85,8 +84,7 @@ value:
           realm_id:
             type: javascript
             expr: results.a.realm_id
-        lock: '!inline apply_unapplied_maint_credits.lock'
-        language: python3
+        path: f/billing/apply_maint_credits
     - id: c
       summary: Build Autopay List from Maintenance Invoices
       value:
