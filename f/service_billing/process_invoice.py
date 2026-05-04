@@ -749,6 +749,13 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
                        error=prior.get("error_message"),
                        attempt_id=str(prior["id"]))
 
+    # Reconciler couldn't determine charge state — human investigation required.
+    # Force=True bypasses this (admin override after manual verification).
+    if prior and prior["status"] == "needs_reconcile_review" and not force:
+        return _result(qbo_invoice_id, "needs_human", reason="needs_reconcile_review",
+                       error=prior.get("error_message"),
+                       attempt_id=str(prior["id"]))
+
     # 2. Refresh QBO state — may have been paid/sent externally
     qbo_inv, err = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
     if not qbo_inv:
@@ -763,16 +770,80 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
         mark_invoice_processed(conn, qbo_invoice_id)
         return _result(qbo_invoice_id, "already_paid_and_sent")
 
-    # 3. Reuse existing pending/uncertain attempt (preserves idempotency_key) or create new
-    if prior and prior["status"] in ("pending", "charge_uncertain"):
+    # 3. Reuse existing pending/uncertain attempt (preserves idempotency_key)
+    #    OR create new with a fresh key. Three policies based on prior status:
+    #
+    #    - 'pending'                    → reuse. No external call has fired,
+    #                                     so the same key is safe.
+    #
+    #    - 'charge_uncertain' (<24h old) → reuse. Within Intuit's idempotency
+    #                                     window; reusing the same key returns
+    #                                     the cached response (or processes
+    #                                     fresh if the original timed out
+    #                                     before reaching Intuit). Either way
+    #                                     no double-charge possible.
+    #
+    #    - 'charge_uncertain' (>24h old) → AUTO-PROMOTE to expired + create
+    #                                     fresh attempt. Intuit's cache has
+    #                                     expired so the same key would be
+    #                                     treated as new anyway. But before
+    #                                     we issue a NEW key, we ideally want
+    #                                     reconcile_payments to confirm no
+    #                                     charge landed. If reconciler has
+    #                                     run, status will already be
+    #                                     'charge_uncertain_expired' (see
+    #                                     below). If reconciler hasn't run
+    #                                     yet, fall through with caution —
+    #                                     log + create new attempt anyway.
+    #
+    #    - 'charge_uncertain_expired'   → reconciler verified no charge.
+    #                                     Create fresh attempt with new key.
+    #
+    #    Anything else (succeeded, declined, payment_orphan, etc) was
+    #    handled in earlier branches — fall through to fresh attempt.
+    target_pm_id = invoice.get("target_payment_method_id")
+
+    def _create_fresh():
+        return create_attempt(
+            conn, qbo_invoice_id, wo_number, invoice_number,
+            payment_method, qbo_balance, dry_run,
+            channel=channel,
+            customer_payment_method_id=str(target_pm_id) if target_pm_id else None,
+        )
+
+    if prior and prior["status"] == "pending":
         attempt = prior
+    elif prior and prior["status"] == "charge_uncertain":
+        # Within idempotency window vs expired — make the call here.
+        attempted_at = prior.get("attempted_at")
+        from datetime import datetime, timezone, timedelta
+        if attempted_at and attempted_at.tzinfo is None:
+            attempted_at = attempted_at.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - attempted_at) if attempted_at else timedelta()
+        if age > timedelta(hours=24):
+            # Idempotency window expired. Mark old attempt as expired and
+            # create a fresh one. Note: reconcile_payments would normally
+            # promote this status itself + verify no charge landed; if we're
+            # here it means reconciler hasn't caught up yet, so we proceed
+            # cautiously. The fresh attempt's new key avoids any cached
+            # response and the worst case is a *missing* charge (not double).
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE billing.processing_attempts
+                SET status='charge_uncertain_expired',
+                    error_message=COALESCE(error_message, '')
+                                  || ' | manually expired after 24h by process_invoice'
+                WHERE id = %s
+            """, (prior["id"],))
+            conn.commit(); cur.close()
+            attempt = _create_fresh()
+        else:
+            attempt = prior
+    elif prior and prior["status"] == "charge_uncertain_expired":
+        # Reconciler verified no charge — safe to retry with fresh key.
+        attempt = _create_fresh()
     else:
-        # The PM uuid pre_process picked. NULL for email channel.
-        target_pm_id = invoice.get("target_payment_method_id")
-        attempt = create_attempt(conn, qbo_invoice_id, wo_number, invoice_number,
-                                  payment_method, qbo_balance, dry_run,
-                                  channel=channel,
-                                  customer_payment_method_id=str(target_pm_id) if target_pm_id else None)
+        attempt = _create_fresh()
 
     # 4. DRY-RUN short-circuit
     if dry_run:

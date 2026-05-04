@@ -1,11 +1,10 @@
-summary: Capture useful error messages on charge + record_payment failures
-description: Adds extract_charge_error helper that pulls human-readable error
-  messages from any response shape Intuit returns (standard errors array,
-  top-level status, HTML 5xx, unparseable bodies). Wired into charge_card,
-  charge_bank_account, and record_qbo_payment so
-  processing_attempts.error_message is always populated with something useful
-  instead of NULL on 5xx with non-JSON bodies. Charge_result JSON still captures
-  the full response for forensics.
+summary: '24h-aware retry: reuse key inside Intuit cache window, fresh key after'
+description: 'Refines retry policy for charge_uncertain attempts. Within 24h:
+  reuse the same row + idempotency_key (Intuit dedupes). Beyond 24h:
+  auto-promote prior attempt to charge_uncertain_expired and create a fresh
+  attempt with a new key. Honors charge_uncertain_expired (set by
+  reconcile_payments) the same way. Adds needs_reconcile_review halt for cases
+  where reconciler couldnt determine state.'
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script
