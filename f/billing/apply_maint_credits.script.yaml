@@ -1,0 +1,14 @@
+summary: Apply unapplied maint payments AND maint credit memos to current-month invoices
+description: "Two-pass credit applier. Pass 1: unapplied Payment objects with
+  'maint' in PrivateNote — sparse-updates the Payment with new LinkedTxn entries
+  pointing at the customer's open maintenance invoices for the billing month.
+  Pass 2: open CreditMemo objects with 'maint' in PrivateNote — creates a
+  zero-dollar Payment whose Line.LinkedTxn references both the target Invoice
+  and the source CreditMemo so QBO records the credit application. Both passes
+  target invoices dated the last day of billing_month. Idempotent (skips memos
+  already at zero remaining). dry_run=True simulates without QBO writes. Used as
+  module b of f/billing/monthly_autopay."
+lock: '!inline f/billing/apply_maint_credits.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
