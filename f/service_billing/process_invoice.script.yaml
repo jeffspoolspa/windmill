@@ -1,12 +1,11 @@
-summary: Flip invoice to needs_review on every halt path so it surfaces in queue
-description: 'Adds mark_invoice_needs_review helper + calls it from every halt
-  path: charge_declined, payment_orphan, no_payment_method, email_failed
-  (post-charge AND pre-flight). Without this, an invoice with a failed attempt
-  stays at billing_status=ready_to_process (visible in process queue, not in
-  needs-review queue) — only the WO detail page processing-card showed the
-  problem. Now the invoice flips back to needs_review with a human-readable
-  reason like charge_declined (HTTP 201: status=DECLINED) so it appears in the
-  needs-review queue for follow-up.'
+summary: Fix Decimal JSON serialization crash on credit re-check halt
+description: Adds _json_default + _dumps helpers (Decimal/date/datetime/UUID
+  safe) and routes every json.dumps call site through them. Was crashing in
+  _process_charge_path credit re-check when invoice had unmatched credits —
+  load_applicable_credits returns NUMERIC unapplied_amt (Decimal) and DATE
+  txn_date which json.dumps cant serialize. The new safety net caught it cleanly
+  (great) but no money moved (the crash was BEFORE the charge call). Same
+  pattern was latent in 9 other json.dumps call sites — all fixed.
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

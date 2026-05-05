@@ -28,6 +28,34 @@ import json
 import time
 import uuid
 from datetime import datetime, date
+from decimal import Decimal
+
+
+def _json_default(o):
+    """JSON encoder for types psycopg2/QBO hand back that json.dumps can't
+    serialize natively. Use as `json.dumps(obj, default=_json_default)`.
+
+    Handles:
+      - Decimal (psycopg2 NUMERIC)         → float
+      - date / datetime (psycopg2 DATE/TS) → ISO string
+      - UUID                                → str
+    Anything else → raises TypeError (caught by the safety net in
+    process_one and surfaced via attempt.error_message).
+    """
+    if isinstance(o, Decimal):
+        return float(o)
+    if isinstance(o, (date, datetime)):
+        return o.isoformat()
+    if isinstance(o, uuid.UUID):
+        return str(o)
+    raise TypeError(f"not JSON serializable: {type(o).__name__}")
+
+
+def _dumps(obj):
+    """Drop-in for json.dumps that handles Decimal/date/datetime/UUID.
+    Use this everywhere we json.dumps a value that may contain DB-row
+    fields — particularly anything pulled from billing.* tables."""
+    return json.dumps(obj, default=_json_default)
 
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
@@ -264,7 +292,7 @@ def refresh_invoice_cache(conn, qbo_invoice_id, qbo_invoice):
         float(qbo_invoice.get("Balance", 0) or 0),
         float(qbo_invoice.get("TotalAmt", 0) or 0),
         qbo_invoice.get("EmailStatus"),
-        json.dumps(qbo_invoice),
+        _dumps(qbo_invoice),
         qbo_invoice_id,
     ))
     conn.commit(); cur.close()
@@ -951,7 +979,7 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
         pm_on_file = plan.get("payment_method_on_file") or {}
         cpm_id = pm_on_file.get("cpm_id")
         update_attempt(conn, attempt["id"], status="succeeded",
-                        raw_result=json.dumps(plan),
+                        raw_result=_dumps(plan),
                         customer_payment_method_id=cpm_id)
         return _result(qbo_invoice_id, "dry_run_complete",
                        attempt_id=str(attempt["id"]),
@@ -1047,7 +1075,7 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
     if balance == 0:
         email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id)
         update_attempt(conn, attempt["id"], email_sent=email["success"],
-                        raw_result=json.dumps({"email": email, "skipped_charge_zero_balance": True}))
+                        raw_result=_dumps({"email": email, "skipped_charge_zero_balance": True}))
         if not email["success"] and not email.get("skipped"):
             update_attempt(conn, attempt["id"], status="email_failed",
                             error_message=email.get("error"))
@@ -1071,7 +1099,7 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
         reason = f"credits_available ({len(remaining_credits)} credit(s), ${total_unapplied:.2f} unapplied)"
         update_attempt(conn, attempt["id"], status="charge_declined",
                         error_message=reason,
-                        charge_result=json.dumps({"credits_found": remaining_credits}))
+                        charge_result=_dumps({"credits_found": remaining_credits}))
         rb_cur = conn.cursor()
         rb_cur.execute("""
             UPDATE billing.invoices
@@ -1107,7 +1135,7 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
     if not pm.get("has_method"):
         update_attempt(conn, attempt["id"], status="charge_declined",
                         error_message=pm.get("error", "no payment method"),
-                        charge_result=json.dumps(pm))
+                        charge_result=_dumps(pm))
         mark_invoice_needs_review(
             conn, qbo_invoice_id,
             f"no_payment_method ({pm.get('error', 'no PM on file')[:120]})",
@@ -1138,7 +1166,7 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
         # Money state genuinely unknown. Persist + halt; will be resolved by reconcile_payments
         # or by a manual re-run (which will reuse the same idempotency_key).
         update_attempt(conn, attempt["id"], status="charge_uncertain",
-                        charge_result=json.dumps(cr),
+                        charge_result=_dumps(cr),
                         error_message=cr.get("error"))
         return _result(qbo_invoice_id, "uncertain",
                        attempt_id=str(attempt["id"]),
@@ -1147,7 +1175,7 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
 
     if classification == "declined":
         update_attempt(conn, attempt["id"], status="charge_declined",
-                        charge_result=json.dumps(cr),
+                        charge_result=_dumps(cr),
                         error_message=cr.get("error"))
         mark_invoice_needs_review(
             conn, qbo_invoice_id,
@@ -1160,7 +1188,7 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
     # CHARGE SUCCEEDED — persist charge_id IMMEDIATELY before attempting record_payment
     update_attempt(conn, attempt["id"], status="charge_succeeded",
                     charge_id=cr["charge_id"],
-                    charge_result=json.dumps(cr))
+                    charge_result=_dumps(cr))
 
     # Record payment in QBO
     pay = record_qbo_payment(customer_id, qbo_invoice_id, balance, cr,
@@ -1209,7 +1237,7 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
         refresh_invoice_cache(conn, qbo_invoice_id, fresh)
 
     update_attempt(conn, attempt["id"], status="succeeded",
-                    raw_result=json.dumps({"payment": pay, "receipt": receipt}))
+                    raw_result=_dumps({"payment": pay, "receipt": receipt}))
     mark_invoice_processed(conn, qbo_invoice_id)
     return _result(qbo_invoice_id, "succeeded",
                    attempt_id=str(attempt["id"]),
@@ -1265,7 +1293,7 @@ def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer
         refresh_invoice_cache(conn, qbo_invoice_id, fresh)
 
     update_attempt(conn, prior["id"], status="succeeded",
-                    raw_result=json.dumps({"orphan_recovery": True, "payment": pay,
+                    raw_result=_dumps({"orphan_recovery": True, "payment": pay,
                                             "receipt": receipt}))
     mark_invoice_processed(conn, qbo_invoice_id)
     return _result(qbo_invoice_id, "succeeded",
@@ -1283,7 +1311,7 @@ def _process_invoice_only(conn, attempt, invoice, qbo_inv, customer_id, access_t
         email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id)
         if email["success"]:
             update_attempt(conn, attempt["id"], status="succeeded", email_sent=True,
-                            raw_result=json.dumps({"email": email, "attempts": i + 1}))
+                            raw_result=_dumps({"email": email, "attempts": i + 1}))
             # Webhook confirmation: QBO fires Invoice.Emailed when send succeeds.
             # If 'skipped' (EmailStatus was already EmailSent), the webhook
             # already happened — no need to expect another.
@@ -1303,7 +1331,7 @@ def _process_invoice_only(conn, attempt, invoice, qbo_inv, customer_id, access_t
 
     update_attempt(conn, attempt["id"], status="email_failed",
                     error_message=last_err,
-                    raw_result=json.dumps({"attempts": EMAIL_RETRY_MAX, "last_error": last_err}))
+                    raw_result=_dumps({"attempts": EMAIL_RETRY_MAX, "last_error": last_err}))
     mark_invoice_needs_review(
         conn, qbo_invoice_id,
         f"email_failed (after {EMAIL_RETRY_MAX} retries: {(last_err or 'unknown')[:120]})",
