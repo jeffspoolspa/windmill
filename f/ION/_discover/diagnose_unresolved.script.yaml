@@ -1,0 +1,8 @@
+summary: Diagnose every unresolved ION row with nearest-neighbor matches
+description: For each row that fails to resolve to a service_location_id, run
+  name + address fuzzy lookups against Customers/service_locations and classify
+  why.
+lock: '!inline f/ION/_discover/diagnose_unresolved.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
