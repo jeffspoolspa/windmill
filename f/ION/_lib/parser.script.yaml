@@ -1,0 +1,9 @@
+summary: ION HTML report parser (service_log + recurring_tasks)
+description: Layer 1 of the ION ingest pipeline. Parses .xls files (HTML tables)
+  from ION Pool Care into raw dicts with ION's original field names. Ported from
+  pool-intelligence/src/adapters/ion/parser.py. Output flows into
+  f/ION/_lib/normalize.
+lock: '!inline f/ION/_lib/parser.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
