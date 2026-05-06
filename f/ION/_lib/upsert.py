@@ -379,11 +379,11 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
         # DELETE existing chem + consumables for these visits, then INSERT
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM maintenance.chem_readings WHERE visit_id = ANY(%s)",
+                "DELETE FROM maintenance.chem_readings WHERE visit_id = ANY(%s::uuid[])",
                 (visit_ids,),
             )
             cur.execute(
-                "DELETE FROM maintenance.consumables_usage WHERE visit_id = ANY(%s)",
+                "DELETE FROM maintenance.consumables_usage WHERE visit_id = ANY(%s::uuid[])",
                 (visit_ids,),
             )
 

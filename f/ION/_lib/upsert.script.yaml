@@ -1,5 +1,5 @@
-summary: ION canonical upsert (visits + chem_readings + consumables_usage + pools)
-description: 'v2: try Address2 first, fall back to Address1 (ION quirk).'
+summary: ION canonical upsert
+description: 'v3: uuid[] cast'
 lock: '!inline f/ION/_lib/upsert.script.lock'
 has_on_behalf_of: false
 kind: script
