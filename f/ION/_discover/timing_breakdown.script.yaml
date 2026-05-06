@@ -1,0 +1,10 @@
+summary: Stage-by-stage timing for ION report fetches (7-day vs 30-day)
+description: Times each stage of the picker-prime + bare-data fetch pattern,
+  runs the same fetch with two different lookback windows in the same session so
+  login+chromium costs are paid once. Confirms whether data-transfer scales
+  linearly with window size.
+lock: '!inline f/ION/_discover/timing_breakdown.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
