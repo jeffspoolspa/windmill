@@ -1,28 +1,16 @@
 //bun-extra-requirements:
 //playwright@1.40.0
+//node-html-parser@7.0.2
 
-// Force playwright to resolve at the version session.ts uses. Without this
-// import, Bun would resolve the transitive playwright dep (via _lib/session)
-// at the latest 1.59.x, which needs chromium-bidi peer deps that aren't
-// installed → bun build fails. Importing with the @version pin forces 1.40.0.
+// Force playwright to resolve at the version session.ts uses. Without an
+// explicit version-pinned import in THIS file, Bun resolves the transitive
+// playwright dep (via _lib/session) at the latest 1.59.x, which needs
+// chromium-bidi peer deps that aren't installed -> bun build fails. The
+// `@version` syntax in import strings is the only thing that pins reliably.
 import "playwright@1.40.0"
 
 import { loginToIon, ionFetchText, type IonResource } from "/f/ION/_lib/session"
-
-/** Minimal regex-based HTML table extractor — good enough for ION's flat tables. */
-function extractTableRows(html: string): string[][] {
-  const rows: string[][] = []
-  const trMatches = html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)
-  for (const trMatch of trMatches) {
-    const cells: string[] = []
-    const cellMatches = trMatch[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)
-    for (const cellMatch of cellMatches) {
-      cells.push(cellMatch[1].replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim().replace(/\s+/g, " "))
-    }
-    rows.push(cells)
-  }
-  return rows
-}
+import { parse } from "node-html-parser@7.0.2"
 
 export async function main(ion: IonResource, lookback_days = 30) {
   const session = await loginToIon(ion)
@@ -38,23 +26,32 @@ export async function main(ion: IonResource, lookback_days = 30) {
   const pickerHtml = await ionFetchText(session, pickerUrl)
   console.log(`  picker OK (${pickerHtml.length} bytes)`)
 
-  // STEP 2: bare data URL — should read filters from session state
+  // STEP 2: bare data URL - should read filters from session state
   const dataUrl = `${session.ionOrigin}/reports/_xls/CompletedLogDetail.cfm`
   console.log(`STEP 2 (fetch data): ${dataUrl}`)
   const dataHtml = await ionFetchText(session, dataUrl)
   console.log(`  data OK (${dataHtml.length} bytes)`)
 
-  const rows = extractTableRows(dataHtml)
-  if (rows.length === 0) {
+  const root = parse(dataHtml)
+  const tables = root.querySelectorAll("table")
+  let dataTable: any = null
+  let maxRows = 0
+  for (const t of tables) {
+    const c = t.querySelectorAll("tr").length
+    if (c > maxRows) { maxRows = c; dataTable = t }
+  }
+  if (!dataTable) {
     return {
       ok: false,
-      reason: "no <tr> rows extracted",
+      reason: "no data table",
       pickerLen: pickerHtml.length,
       dataLen: dataHtml.length,
       preview: dataHtml.slice(0, 1000),
     }
   }
-
+  const rows = dataTable.querySelectorAll("tr").map((tr: any) =>
+    tr.querySelectorAll("td, th").map((c: any) => c.text.trim().replace(/\s+/g, " "))
+  )
   return {
     ok: true,
     startUsed: start,
