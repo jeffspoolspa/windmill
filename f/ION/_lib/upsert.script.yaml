@@ -1,8 +1,5 @@
 summary: ION canonical upsert (visits + chem_readings + consumables_usage + pools)
-description: Layer 3 of the ingest pipeline. Takes canonical-shaped dicts from
-  normalize, resolves FKs (service_location_id, actual_tech_id, pool_id,
-  item_id), upserts into maintenance.* via UNIQUE(service_location_id,
-  scheduled_date), DELETE-then-INSERT for chem + consumables.
+description: 'v2: try Address2 first, fall back to Address1 (ION quirk).'
 lock: '!inline f/ION/_lib/upsert.script.lock'
 has_on_behalf_of: false
 kind: script

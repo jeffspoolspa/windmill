@@ -276,15 +276,26 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             pool_meta = row.get("pools", {}) or {}
             consumables = row.get("consumables_usage_rows", []) or []
 
+            # ION's "Address1" is the customer name as a ship-to label;
+            # "Address2" is the actual street. Try Address2 first; fall back
+            # to Address1 if Address2 is empty.
+            primary_addr = v.get("_address2") or v.get("_address1")
+            secondary_addr = v.get("_address1") if primary_addr == v.get("_address2") else None
+
             sl_id = resolve_service_location_id(
-                resolvers, v.get("_address1"), v.get("_customer_name")
+                resolvers, primary_addr, v.get("_customer_name")
             )
+            if sl_id is None and secondary_addr:
+                sl_id = resolve_service_location_id(
+                    resolvers, secondary_addr, v.get("_customer_name")
+                )
             if sl_id is None:
                 stats["rows_unresolved_sl"] += 1
                 if len(stats["rows_unresolved_examples"]) < 10:
                     stats["rows_unresolved_examples"].append({
                         "customer": v.get("_customer_name"),
-                        "address": v.get("_address1"),
+                        "address1": v.get("_address1"),
+                        "address2": v.get("_address2"),
                         "city": v.get("_city"),
                     })
                 continue
