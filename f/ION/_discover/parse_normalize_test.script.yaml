@@ -1,0 +1,10 @@
+summary: End-to-end fetch + parse + normalize smoke test (uses captured
+  IonSession, no Chromium)
+description: Takes an IonSession bundle and supabase connection, fetches
+  CompletedLogDetail via picker-prime pattern (cookie-only HTTP), parses with
+  f/ION/_lib/parser, normalizes with f/ION/_lib/normalize, returns summary
+  including unmapped fields.
+lock: '!inline f/ION/_discover/parse_normalize_test.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
