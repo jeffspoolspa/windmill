@@ -152,12 +152,71 @@ def build_resolvers(conn):
         for item_id, item_name in cur.fetchall():
             items_by_name[item_name.upper().strip()] = item_id
 
+    # Active task per service_location + their schedule slots.
+    # Pre-loading these avoids a per-row query.
+    task_by_sl = {}  # service_location_id -> task_uuid
+    schedules_by_task = defaultdict(list)  # task_uuid -> [(task_schedule_id, dow, tech_id)]
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT t.id, t.service_location_id, ts.id, ts.day_of_week, ts.tech_employee_id
+            FROM maintenance.tasks t
+            LEFT JOIN maintenance.task_schedules ts ON ts.task_id = t.id AND ts.active = true
+            WHERE t.status IN ('active','paused')
+        """)
+        for task_id, sl_id, sched_id, dow, tech_id in cur.fetchall():
+            # Multiple tasks per sl shouldn't happen given the partial unique
+            # index, but we're defensive — first wins.
+            if sl_id not in task_by_sl:
+                task_by_sl[sl_id] = task_id
+            if sched_id is not None:
+                schedules_by_task[task_id].append((sched_id, dow, tech_id))
+
     return {
         "sl_by_addr_name": sl_by_addr_name,
         "sl_by_addr_only": sl_by_addr_only,
         "tech_by_username": tech_by_username,
         "items_by_name": items_by_name,
+        "task_by_sl": task_by_sl,
+        "schedules_by_task": dict(schedules_by_task),
     }
+
+
+def resolve_task_and_schedule(resolvers, service_location_id, visit_date, actual_tech_id):
+    """Returns (task_id, task_schedule_id, scheduled_tech_id) or all None if no task.
+
+    Match strategy for schedule slot:
+      1. task_schedules with matching day_of_week AND tech_employee_id == actual_tech
+         (the tech actually did their normally-scheduled visit)
+      2. task_schedules with matching day_of_week (any tech) — when there was a
+         reassignment, this still surfaces the slot the visit "belonged to"
+      3. None — visit happened but doesn't map to any active schedule slot
+         (could be a make-up visit, QC, etc.)
+    """
+    task_id = resolvers["task_by_sl"].get(service_location_id)
+    if task_id is None:
+        return None, None, None
+
+    schedules = resolvers["schedules_by_task"].get(task_id, [])
+    if not schedules:
+        return task_id, None, None
+
+    # Compute day_of_week (Postgres convention: 0=Sunday, 6=Saturday)
+    if hasattr(visit_date, "weekday"):
+        # Python's weekday: 0=Monday, 6=Sunday — convert
+        py_dow = visit_date.weekday()
+        pg_dow = (py_dow + 1) % 7
+    else:
+        return task_id, None, None
+
+    # Tier 1: same day AND same tech
+    for sched_id, dow, tech_id in schedules:
+        if dow == pg_dow and tech_id == actual_tech_id:
+            return task_id, sched_id, tech_id
+    # Tier 2: same day, any tech (reassignment case)
+    for sched_id, dow, tech_id in schedules:
+        if dow == pg_dow:
+            return task_id, sched_id, tech_id
+    return task_id, None, None
 
 
 def resolve_service_location_id(resolvers, addr, name):
@@ -317,11 +376,31 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             if was_created:
                 stats["pools_created"] += 1
 
+            # Task + schedule resolution. Determines:
+            #   task_id          — which recurring contract this visit belongs to
+            #   task_schedule_id — which (day, tech) slot it fills
+            #   scheduled_tech_id — who SHOULD have done it per the schedule
+            # If actual_tech_id != scheduled_tech_id, it's a reassignment.
+            task_id, task_schedule_id, scheduled_tech = resolve_task_and_schedule(
+                resolvers, sl_id, visit_date, tech_id
+            )
+            if task_id is not None:
+                stats.setdefault("tasks_linked", 0)
+                stats["tasks_linked"] += 1
+            if task_schedule_id is not None:
+                stats.setdefault("schedules_linked", 0)
+                stats["schedules_linked"] += 1
+            if scheduled_tech and tech_id and scheduled_tech != tech_id:
+                stats.setdefault("reassignments_detected", 0)
+                stats["reassignments_detected"] += 1
+
             visit_buffer.append({
                 "service_location_id": sl_id,
+                "task_id": task_id,
+                "task_schedule_id": task_schedule_id,
                 "scheduled_date": visit_date,
                 "visit_date": visit_date,
-                "scheduled_tech_id": tech_id,
+                "scheduled_tech_id": scheduled_tech,
                 "actual_tech_id": tech_id,
                 "started_at": started_at,
                 "ended_at": ended_at,
@@ -347,16 +426,20 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                 cur.execute(
                     """
                     INSERT INTO maintenance.visits
-                      (service_location_id, scheduled_date, visit_date,
+                      (service_location_id, task_id, task_schedule_id,
+                       scheduled_date, visit_date,
                        scheduled_tech_id, actual_tech_id, started_at, ended_at,
                        status, visit_type, price_cents, billing_method,
                        office, notes, external_source)
                     VALUES
-                      (%(service_location_id)s, %(scheduled_date)s, %(visit_date)s,
+                      (%(service_location_id)s, %(task_id)s, %(task_schedule_id)s,
+                       %(scheduled_date)s, %(visit_date)s,
                        %(scheduled_tech_id)s, %(actual_tech_id)s, %(started_at)s, %(ended_at)s,
                        %(status)s, %(visit_type)s, %(price_cents)s, %(billing_method)s,
                        %(office)s, %(notes)s, %(external_source)s)
                     ON CONFLICT (service_location_id, scheduled_date) DO UPDATE SET
+                      task_id             = COALESCE(EXCLUDED.task_id, maintenance.visits.task_id),
+                      task_schedule_id    = COALESCE(EXCLUDED.task_schedule_id, maintenance.visits.task_schedule_id),
                       visit_date          = EXCLUDED.visit_date,
                       scheduled_tech_id   = EXCLUDED.scheduled_tech_id,
                       actual_tech_id      = EXCLUDED.actual_tech_id,
