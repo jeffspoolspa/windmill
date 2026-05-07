@@ -1,10 +1,10 @@
-summary: Send paid-invoice email after every successful charge (in addition to receipt)
-description: Adds send_invoice_email + Invoice webhook expectation in both the
-  primary charge-success path and the orphan-recovery path. Customer now
-  receives a paid copy of the invoice alongside the payment receipt — matches
-  the email-only path which already sends the invoice as the deliverable.
-  send_invoice_email is idempotent (skips if EmailStatus=EmailSent) so re-runs
-  are safe.
+summary: send_invoice_email gains force=True; charge-success + zero-balance
+  paths force-resend the paid copy
+description: Adds force flag to send_invoice_email so the EmailStatus=EmailSent
+  skip can be bypassed when the post-charge use case needs a fresh paid copy
+  delivered. Charge-success path (primary + orphan recovery) and zero-balance
+  credits-applied path now both call with force=True. Email-only path keeps the
+  default skip behavior.
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

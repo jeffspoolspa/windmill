@@ -697,13 +697,23 @@ def record_qbo_payment(customer_id, invoice_id, amount, charge_result, wo_num, i
             "total_amt": payment.get("TotalAmt")}
 
 
-def send_invoice_email(invoice_id, customer_id, access_token, realm_id):
-    """POST /invoice/{id}/send. If EmailStatus already EmailSent, skip."""
-    inv_resp = qbo_get(f"invoice/{invoice_id}", access_token, realm_id)
-    if inv_resp.ok:
-        inv = inv_resp.json().get("Invoice", {})
-        if inv.get("EmailStatus") == "EmailSent":
-            return {"success": True, "skipped": True, "reason": "Already sent"}
+def send_invoice_email(invoice_id, customer_id, access_token, realm_id, force=False):
+    """POST /invoice/{id}/send.
+
+    By default skips when QBO already shows EmailStatus=EmailSent — the
+    skip protects the email-only path from spamming the customer on retry.
+
+    When force=True, the EmailStatus check is bypassed. Used by the
+    charge-success path so the customer always receives a fresh paid copy
+    of the invoice after their card is charged, even if they already got
+    an unpaid copy pre-charge.
+    """
+    if not force:
+        inv_resp = qbo_get(f"invoice/{invoice_id}", access_token, realm_id)
+        if inv_resp.ok:
+            inv = inv_resp.json().get("Invoice", {})
+            if inv.get("EmailStatus") == "EmailSent":
+                return {"success": True, "skipped": True, "reason": "Already sent"}
 
     email = fetch_qbo_customer_email(customer_id, access_token, realm_id)
     send_url = f"invoice/{invoice_id}/send"
@@ -718,7 +728,7 @@ def send_invoice_email(invoice_id, customer_id, access_token, realm_id):
     )
     if not resp.ok:
         return {"success": False, "error": resp.text[:300], "email_attempted": email}
-    return {"success": True, "sent_to": email}
+    return {"success": True, "sent_to": email, "forced": force}
 
 
 def send_payment_receipt(payment_id, customer_id, access_token, realm_id):
@@ -1071,9 +1081,11 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
                           wo_number, invoice_number, balance, access_token, realm_id):
     qbo_invoice_id = invoice["qbo_invoice_id"]
 
-    # If balance is 0 (covered by credits in pre_process), skip charge — just send invoice email + mark done
+    # If balance is 0 (covered by credits in pre_process), skip charge — just send invoice email + mark done.
+    # force=True so the customer gets a fresh copy showing the $0 balance with
+    # credits applied, even if they already received an unpaid copy earlier.
     if balance == 0:
-        email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id)
+        email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id, force=True)
         update_attempt(conn, attempt["id"], email_sent=email["success"],
                         raw_result=_dumps({"email": email, "skipped_charge_zero_balance": True}))
         if not email["success"] and not email.get("skipped"):
@@ -1234,9 +1246,9 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
     # guaranteed (e.g. fresh invoice → immediate charge in same pre-process
     # run). send_invoice_email is idempotent: if QBO already shows
     # EmailStatus=EmailSent it returns {success: True, skipped: True}.
-    inv_email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id)
-    if inv_email.get("success") and not inv_email.get("skipped"):
-        # QBO fires Invoice.Emailed when send succeeds; expect that webhook.
+    inv_email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id, force=True)
+    if inv_email.get("success"):
+        # QBO fires Invoice.Emailed on send; expect that webhook.
         insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
     receipt = send_payment_receipt(pay["payment_id"], customer_id, access_token, realm_id)
     # email_sent on the attempt tracks the receipt (the financial document);
@@ -1301,8 +1313,8 @@ def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer
     insert_webhook_expectation(conn, "Payment", pay["payment_id"])
 
     # Same dual-send as the primary charge path: now-paid invoice + receipt.
-    inv_email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id)
-    if inv_email.get("success") and not inv_email.get("skipped"):
+    inv_email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id, force=True)
+    if inv_email.get("success"):
         insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
     receipt = send_payment_receipt(pay["payment_id"], customer_id, access_token, realm_id)
     update_attempt(conn, prior["id"], email_sent=receipt["success"])
