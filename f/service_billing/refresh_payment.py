@@ -1,22 +1,22 @@
 # f/service_billing/refresh_payment
 #
-# Single-payment QBO → Supabase refresh. Triggered by the QBO webhook handler
-# when a Payment is created / updated / deleted in QBO. Fetches the current
-# state from QBO, upserts into billing.customer_payments, and rechecks any
-# invoices the payment is linked to (since balance/billing_status may have
-# flipped as a result).
+# Single-payment QBO -> Supabase refresh.
 #
-# Mirrors the shape of refresh_invoice:
-#   1. Fetch QBO payment
-#   2. Upsert into billing.customer_payments (volatile fields only)
-#   3. Verify CCTransId on QBO Payment matches our processing_attempts.charge_id
-#      (catches the rare case where QBO commits the Payment but drops our
-#      CCTransId, which would break Intuit↔QBO reconciliation later)
-#   4. Recheck linked invoices' billing_status via billing.recheck_invoice_status
-#   5. Return the updated row + recheck summary + any verification warnings
+# Callers:
+#   - QBO webhook handler:   main(qbo_payment_id)
+#                            — fetches the payment from QBO and refreshes
+#   - cdc_reconciler:        main(qbo_payment_id, qbo_body=<cdc_entity>)
+#                            — passes the body it already has from CDC,
+#                              skipping the QBO GET. Single source of truth
+#                              for the upsert + side effects.
 #
-# Idempotent: re-runs upsert with same data are no-ops at the DB level.
-# Designed to be called repeatedly via webhook re-deliveries.
+# Concurrency: the upsert uses an OCC guard on qbo_last_updated_time.
+# Two concurrent callers writing the same payment never clobber each other —
+# whichever has the newer QBO timestamp wins, the other's UPDATE is a no-op.
+#
+# Side effects (CCTransId verification, linked-invoice rechecks) run even
+# when did_write is false — they read current state, not "what we just wrote",
+# so they're safe and useful regardless.
 
 import json
 from datetime import date, datetime
@@ -63,12 +63,9 @@ def refresh_qbo_token():
 def get_db_conn():
     sb = wmill.get_resource(SUPABASE_RESOURCE)
     return psycopg2.connect(
-        host=sb["host"],
-        port=sb.get("port", 6543),
-        dbname=sb.get("dbname", "postgres"),
-        user=sb["user"],
-        password=sb["password"],
-        sslmode=sb.get("sslmode", "require"),
+        host=sb["host"], port=sb.get("port", 6543),
+        dbname=sb.get("dbname", "postgres"), user=sb["user"],
+        password=sb["password"], sslmode=sb.get("sslmode", "require"),
     )
 
 
@@ -89,31 +86,84 @@ def parse_qbo_timestamp(ts):
         return None
 
 
+def upsert_payment(conn, qbo_pmt):
+    """Upsert with OCC guard. Returns (qbo_payment_id, did_write, payment_row).
+
+    OCC: only updates when EXCLUDED.qbo_last_updated_time is strictly newer
+    than the existing row's. New inserts (no conflict) always land.
+    Race-loser's UPDATE matches zero rows; no harm because their data was
+    older anyway.
+    """
+    customer_ref = qbo_pmt.get("CustomerRef") or {}
+    payment_method_ref = qbo_pmt.get("PaymentMethodRef") or {}
+    cc_info = qbo_pmt.get("CreditCardPayment") or {}
+    cc_response = cc_info.get("CreditChargeResponse") or {}
+
+    qbo_payment_id      = qbo_pmt.get("Id")
+    qbo_customer_id     = customer_ref.get("value")
+    total_amt           = float(qbo_pmt.get("TotalAmt") or 0)
+    unapplied_amt       = float(qbo_pmt.get("UnappliedAmt") or 0)
+    txn_date            = qbo_pmt.get("TxnDate")
+    ref_num             = qbo_pmt.get("PaymentRefNum")
+    memo                = qbo_pmt.get("PrivateNote")
+    payment_method_id   = payment_method_ref.get("value")
+    payment_method_name = payment_method_ref.get("name")
+    cc_trans_id         = cc_response.get("CCTransId")
+    cc_status           = cc_response.get("Status")
+    qbo_last_updated    = parse_qbo_timestamp(
+        (qbo_pmt.get("MetaData") or {}).get("LastUpdatedTime")
+    )
+
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        INSERT INTO billing.customer_payments
+          (qbo_payment_id, qbo_customer_id, type, total_amt, unapplied_amt,
+           txn_date, ref_num, memo, payment_method_id, payment_method_name,
+           cc_trans_id, cc_status, raw, fetched_at,
+           qbo_last_updated_time, sync_state, sync_state_changed_at)
+        VALUES (%s, %s, 'payment', %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s::jsonb, now(), %s, 'synced', now())
+        ON CONFLICT (qbo_payment_id) DO UPDATE SET
+          qbo_customer_id       = EXCLUDED.qbo_customer_id,
+          total_amt             = EXCLUDED.total_amt,
+          unapplied_amt         = EXCLUDED.unapplied_amt,
+          txn_date              = EXCLUDED.txn_date,
+          ref_num               = EXCLUDED.ref_num,
+          memo                  = EXCLUDED.memo,
+          payment_method_id     = EXCLUDED.payment_method_id,
+          payment_method_name   = EXCLUDED.payment_method_name,
+          cc_trans_id           = COALESCE(EXCLUDED.cc_trans_id, billing.customer_payments.cc_trans_id),
+          cc_status             = COALESCE(EXCLUDED.cc_status, billing.customer_payments.cc_status),
+          raw                   = EXCLUDED.raw,
+          fetched_at            = now(),
+          qbo_last_updated_time = EXCLUDED.qbo_last_updated_time,
+          sync_state            = 'synced',
+          sync_state_changed_at = now(),
+          sync_error            = NULL
+        WHERE billing.customer_payments.qbo_last_updated_time IS NULL
+           OR EXCLUDED.qbo_last_updated_time IS NULL
+           OR billing.customer_payments.qbo_last_updated_time < EXCLUDED.qbo_last_updated_time
+        RETURNING *
+    """, (
+        qbo_payment_id, qbo_customer_id, total_amt, unapplied_amt,
+        txn_date, ref_num, memo, payment_method_id, payment_method_name,
+        cc_trans_id, cc_status, _dumps(qbo_pmt), qbo_last_updated,
+    ))
+    row = cur.fetchone()
+    cur.close()
+    return qbo_payment_id, (row is not None), (dict(row) if row else None)
+
+
 def verify_cc_trans_id(conn, qbo_payment_id, cc_trans_id_from_qbo):
-    """Cross-check the CCTransId on the QBO Payment against our recorded
-    charge_id from the original processing_attempts row.
+    """Cross-check QBO's CCTransId against our processing_attempts.charge_id.
 
-    Three outcomes:
-      - 'no_attempt': no processing_attempts row links to this payment.
-        It's a customer-initiated payment (or a credit-memo application,
-        or refresh fired before our process_invoice script committed
-        the qbo_payment_id back). No verification possible — return None.
-      - 'verified': attempt.charge_id matches QBO's CCTransId. Happy path.
-      - 'cc_trans_id_missing': we expected a CCTransId (we have a charge_id
-        on the attempt) but QBO doesn't have one on the Payment. Means our
-        record_payment call didn't preserve it — Intuit↔QBO reconciliation
-        will be broken. Log warning + stamp the attempt's error_message.
-      - 'cc_trans_id_mismatch': QBO has a CCTransId but it's not our
-        charge_id. Very serious — money is linked to wrong charge.
-        Flag attempt as needs_reconcile_review.
-
-    Returns: {"outcome": str, "expected": str|None, "actual": str|None,
-              "attempt_id": str|None}
+    Outcomes:
+      no_attempt           — payment wasn't created by us (customer-initiated, etc.)
+      verified             — match; happy path
+      cc_trans_id_missing  — we expected one (we have charge_id) but QBO has none
+      cc_trans_id_mismatch — money linked to wrong charge; flag for review
     """
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    # Find our own processing_attempts row for this Payment. There can only
-    # be one with qbo_payment_id set to this value (we set it once after
-    # record_payment succeeds; it's never re-used).
     cur.execute("""
         SELECT id, charge_id, status, attempted_at
           FROM billing.processing_attempts
@@ -124,7 +174,6 @@ def verify_cc_trans_id(conn, qbo_payment_id, cc_trans_id_from_qbo):
     """, (qbo_payment_id,))
     attempt = cur.fetchone()
 
-    # No matching attempt — this Payment wasn't created by us. Skip silently.
     if not attempt:
         cur.close()
         return {"outcome": "no_attempt", "expected": None,
@@ -134,18 +183,14 @@ def verify_cc_trans_id(conn, qbo_payment_id, cc_trans_id_from_qbo):
     expected = attempt_dict.get("charge_id")
     attempt_id = str(attempt_dict["id"])
 
-    # Our attempt has no charge_id either (e.g. an email-only attempt that
-    # somehow ended up linked to a Payment row, or pre-charge_succeeded
-    # state). Nothing to verify.
     if not expected:
         cur.close()
         return {"outcome": "no_attempt", "expected": None,
                 "actual": cc_trans_id_from_qbo, "attempt_id": attempt_id}
 
-    # CCTransId missing on QBO Payment but we expected one
     if not cc_trans_id_from_qbo:
         msg = (f"verify_cc_trans_id: missing on QBO Payment {qbo_payment_id}; "
-               f"expected charge_id={expected}. Intuit↔QBO reconciliation broken.")
+               f"expected charge_id={expected}.")
         print(f"  WARN  {msg}")
         cur.execute("""
             UPDATE billing.processing_attempts
@@ -159,7 +204,6 @@ def verify_cc_trans_id(conn, qbo_payment_id, cc_trans_id_from_qbo):
         return {"outcome": "cc_trans_id_missing", "expected": expected,
                 "actual": None, "attempt_id": attempt_id}
 
-    # CCTransId mismatch — money linked to a different charge than ours
     if cc_trans_id_from_qbo != expected:
         msg = (f"verify_cc_trans_id: MISMATCH on Payment {qbo_payment_id}: "
                f"expected charge_id={expected}, got CCTransId={cc_trans_id_from_qbo}")
@@ -183,77 +227,54 @@ def verify_cc_trans_id(conn, qbo_payment_id, cc_trans_id_from_qbo):
             "actual": cc_trans_id_from_qbo, "attempt_id": attempt_id}
 
 
-def main(qbo_payment_id: str):
+def main(qbo_payment_id: str, qbo_body: dict | None = None):
     """
-    Returns:
-      {"status": "ok", "payment": {...}, "linked_invoices_rechecked": [...],
-       "verification": {"outcome": "...", ...}}
-      {"status": "deleted", ...} if QBO returns 404 (payment voided/deleted)
-      {"status": "error", "error": "..."}
+    Args:
+      qbo_payment_id: Required. QBO Id of the payment.
+      qbo_body:       Optional. Pre-fetched QBO Payment body (e.g. from CDC).
+                      When provided, skips the QBO GET.
     """
     if not qbo_payment_id:
         return {"status": "error", "error": "qbo_payment_id required"}
 
-    print(f"=== refresh_payment {qbo_payment_id} ===")
-    access_token, realm_id = refresh_qbo_token()
+    print(f"=== refresh_payment {qbo_payment_id} (body_provided={qbo_body is not None}) ===")
 
-    # Fetch from QBO
-    resp = qbo_get(f"payment/{qbo_payment_id}", access_token, realm_id)
+    qbo_pmt = qbo_body
+    if qbo_pmt is None:
+        access_token, realm_id = refresh_qbo_token()
+        resp = qbo_get(f"payment/{qbo_payment_id}", access_token, realm_id)
 
-    # Payment was voided/deleted in QBO. Mark it as such locally so the
-    # cache reflects the absence; don't attempt to upsert.
-    if resp.status_code == 404:
-        conn = get_db_conn()
-        try:
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE billing.customer_payments
-                SET sync_state = 'synced',
-                    sync_state_changed_at = now(),
-                    sync_error = 'deleted in QBO',
-                    fetched_at = now()
-                WHERE qbo_payment_id = %s
-            """, (qbo_payment_id,))
-            conn.commit()
-            cur.close()
-        finally:
-            conn.close()
-        return {"status": "deleted", "qbo_payment_id": qbo_payment_id}
+        if resp.status_code == 404:
+            conn = get_db_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    UPDATE billing.customer_payments
+                    SET sync_state = 'synced',
+                        sync_state_changed_at = now(),
+                        sync_error = 'deleted in QBO',
+                        fetched_at = now()
+                    WHERE qbo_payment_id = %s
+                """, (qbo_payment_id,))
+                conn.commit()
+                cur.close()
+            finally:
+                conn.close()
+            return {"status": "deleted", "qbo_payment_id": qbo_payment_id}
 
-    if not resp.ok:
-        return {
-            "status": "error",
-            "error": f"QBO fetch failed: {resp.status_code}",
-            "detail": resp.text[:200],
-        }
+        if not resp.ok:
+            return {"status": "error",
+                    "error": f"QBO fetch failed: {resp.status_code}",
+                    "detail": resp.text[:200]}
 
-    qbo_pmt = (resp.json() or {}).get("Payment")
-    if not qbo_pmt:
-        return {"status": "error", "error": "QBO returned no Payment"}
+        qbo_pmt = (resp.json() or {}).get("Payment")
+        if not qbo_pmt:
+            return {"status": "error", "error": "QBO returned no Payment"}
 
-    # Extract volatile fields
-    customer_ref = qbo_pmt.get("CustomerRef") or {}
-    qbo_customer_id = customer_ref.get("value")
-    total_amt = float(qbo_pmt.get("TotalAmt") or 0)
-    unapplied_amt = float(qbo_pmt.get("UnappliedAmt") or 0)
-    txn_date = qbo_pmt.get("TxnDate")
-    ref_num = qbo_pmt.get("PaymentRefNum")
-    memo = qbo_pmt.get("PrivateNote")
-    payment_method_ref = qbo_pmt.get("PaymentMethodRef") or {}
-    payment_method_id = payment_method_ref.get("value")
-    payment_method_name = payment_method_ref.get("name")
-
-    qbo_last_updated = parse_qbo_timestamp(
-        (qbo_pmt.get("MetaData") or {}).get("LastUpdatedTime")
-    )
-
-    # Pull credit-card info if present (for charged payments)
     cc_info = qbo_pmt.get("CreditCardPayment") or {}
-    cc_trans_id = cc_info.get("CreditChargeResponse", {}).get("CCTransId")
-    cc_status = cc_info.get("CreditChargeResponse", {}).get("Status")
+    cc_trans_id = (cc_info.get("CreditChargeResponse") or {}).get("CCTransId")
 
-    # Linked invoices — need to recheck their status since this payment
-    # may have applied to one of them.
+    # Linked invoices need rechecks since this payment may have applied to them.
     linked_invoice_ids = []
     for line in qbo_pmt.get("Line") or []:
         for linked_txn in line.get("LinkedTxn") or []:
@@ -264,86 +285,48 @@ def main(qbo_payment_id: str):
 
     conn = get_db_conn()
     try:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        qbo_payment_id, did_write, upserted = upsert_payment(conn, qbo_pmt)
+        conn.commit()
 
-        # Upsert. The puller (pull_qbo_credits) inserts the row originally;
-        # we update volatile fields here. If the row doesn't exist (rare —
-        # webhook arrived before initial pull), we INSERT it as a fresh row.
-        cur.execute("""
-            INSERT INTO billing.customer_payments
-              (qbo_payment_id, qbo_customer_id, type, total_amt, unapplied_amt,
-               txn_date, ref_num, memo, payment_method_id, payment_method_name,
-               cc_trans_id, cc_status, raw, fetched_at,
-               qbo_last_updated_time, sync_state, sync_state_changed_at)
-            VALUES (%s, %s, 'payment', %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s::jsonb, now(), %s, 'synced', now())
-            ON CONFLICT (qbo_payment_id) DO UPDATE SET
-              qbo_customer_id       = EXCLUDED.qbo_customer_id,
-              total_amt             = EXCLUDED.total_amt,
-              unapplied_amt         = EXCLUDED.unapplied_amt,
-              txn_date              = EXCLUDED.txn_date,
-              ref_num               = EXCLUDED.ref_num,
-              memo                  = EXCLUDED.memo,
-              payment_method_id     = EXCLUDED.payment_method_id,
-              payment_method_name   = EXCLUDED.payment_method_name,
-              cc_trans_id           = COALESCE(EXCLUDED.cc_trans_id, billing.customer_payments.cc_trans_id),
-              cc_status             = COALESCE(EXCLUDED.cc_status, billing.customer_payments.cc_status),
-              raw                   = EXCLUDED.raw,
-              fetched_at            = now(),
-              qbo_last_updated_time = EXCLUDED.qbo_last_updated_time,
-              sync_state            = 'synced',
-              sync_state_changed_at = now(),
-              sync_error            = NULL
-            RETURNING *
-        """, (
-            qbo_payment_id, qbo_customer_id, total_amt, unapplied_amt,
-            txn_date, ref_num, memo, payment_method_id, payment_method_name,
-            cc_trans_id, cc_status, _dumps(qbo_pmt), qbo_last_updated,
-        ))
-        upserted = cur.fetchone()
-        cur.close()
-
-        # Verify CCTransId matches our recorded charge_id (if this Payment
-        # was one we created via process_invoice). Catches the rare case
-        # where QBO commits the Payment but drops our CCTransId — which
-        # would silently break Intuit↔QBO reconciliation later.
+        # CC verify reads QBO body + our processing_attempts; safe regardless.
         verification = verify_cc_trans_id(conn, qbo_payment_id, cc_trans_id)
 
-        # Recheck linked invoices — their billing_status may have flipped
-        # to 'processed' if this payment zeroed them out.
+        # Recheck linked invoices' billing_status — also safe regardless of
+        # did_write (reads current state).
         recheck_results = []
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         for inv_id in linked_invoice_ids:
             try:
-                cur.execute(
-                    "SELECT billing.recheck_invoice_status(%s) AS r",
-                    (inv_id,),
-                )
+                cur.execute("SELECT billing.recheck_invoice_status(%s) AS r", (inv_id,))
                 r = cur.fetchone()["r"]
                 recheck_results.append({
-                    "qbo_invoice_id": inv_id,
-                    "changed": r.get("changed"),
+                    "qbo_invoice_id":      inv_id,
+                    "changed":             r.get("changed"),
                     "prev_billing_status": r.get("prev_billing_status"),
-                    "new_billing_status": r.get("new_billing_status"),
+                    "new_billing_status":  r.get("new_billing_status"),
                 })
             except Exception as e:
                 recheck_results.append({
                     "qbo_invoice_id": inv_id,
-                    "error": str(e)[:200],
+                    "error":          str(e)[:200],
                 })
 
         conn.commit()
         cur.close()
 
+        if not did_write:
+            print(f"  upsert no-op (OCC blocked — newer state already in cache)")
+
         return {
-            "status": "ok",
-            "qbo_payment_id": qbo_payment_id,
-            "qbo_customer_id": qbo_customer_id,
-            "total_amt": total_amt,
-            "unapplied_amt": unapplied_amt,
+            "status":                    "ok",
+            "qbo_payment_id":            qbo_payment_id,
+            "qbo_customer_id":           (qbo_pmt.get("CustomerRef") or {}).get("value"),
+            "total_amt":                 float(qbo_pmt.get("TotalAmt") or 0),
+            "unapplied_amt":             float(qbo_pmt.get("UnappliedAmt") or 0),
+            "did_write":                 did_write,
             "linked_invoices_rechecked": recheck_results,
-            "verification": verification,
-            "payment_id": str(upserted["id"]) if upserted else None,
+            "verification":              verification,
+            "payment_id":                str(upserted["id"]) if upserted else None,
         }
     finally:
         conn.close()

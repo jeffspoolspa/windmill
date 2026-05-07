@@ -1,12 +1,7 @@
-summary: Verify CCTransId on QBO Payment matches our recorded charge_id
-description: 'After upserting the QBO Payment cache, cross-check that the
-  CCTransId on the Payment matches the charge_id from our processing_attempts
-  row. Three outcomes: verified (no-op), cc_trans_id_missing (warn + stamp
-  attempts.error_message — Intuit↔QBO reconciliation broken),
-  cc_trans_id_mismatch (flip attempt to needs_reconcile_review — money linked to
-  wrong charge). Skips silently for Payments not created by our process_invoice
-  (customer-initiated, credit memo applications). Adds verification result to
-  the script return for the webhook handler to log.'
+summary: Optional qbo_body + OCC guard + did_write return
+description: Adds qbo_body=None so cdc_reconciler can call in-process. OCC guard
+  prevents stale writes from clobbering newer cache. CCTransId verification +
+  linked-invoice rechecks still run regardless of did_write.
 lock: '!inline f/service_billing/refresh_payment.script.lock'
 has_on_behalf_of: false
 kind: script
