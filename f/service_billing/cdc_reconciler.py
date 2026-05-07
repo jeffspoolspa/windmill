@@ -6,20 +6,37 @@
 #   - Uses QBO's CDC endpoint (incremental) so we only check what actually
 #     changed since our last cursor, not the whole table.
 #
-# What it does, every 15 minutes (Windmill cron):
+# CACHE WRITES — single source of truth:
+# The CDC response includes the FULL entity body for each changed record.
+# Rather than firing async refresh_* scripts (which would re-fetch the same
+# record from QBO), we import refresh_invoice / refresh_payment / refresh_customer
+# directly and call their main() with qbo_body=<cdc_entity>. The refresh
+# scripts skip the QBO GET when given a body, then run their full upsert
+# + side-effect logic (memo-edit detection, WO link, CCTransId verification,
+# display_name propagation, etc.) under one shared schema map. Concurrency
+# is handled by an OCC guard inside each upsert: WHERE existing.qbo_last_updated_*
+# < EXCLUDED — so simultaneous writers can't clobber each other.
+#
+# Field-level diffs: we compute a per-field {before, after} dict using the
+# cache row + CDC body and store it on drift_log.field_diff. Lets us answer
+# "what specifically changed in QBO that we hadn't mirrored yet?" without
+# replaying the entity.
+#
+# What runs every 15 minutes (Windmill cron):
 #   1. Read last cursor from billing.cdc_cursors WHERE source='qbo'
 #   2. Call QBO /cdc?entities=Invoice,Payment,Customer&changedSince=<cursor>
 #   3. For each returned entity (sorted by qbo_updated ascending so the cursor
 #      can advance incrementally):
 #        - If our cache is older than QBO's MetaData.LastUpdatedTime → drift
-#        - Auto-heal soft drift via refresh_invoice/refresh_payment/customer_sync
+#        - Compute per-field diff (cache value → QBO value) for the canonical set
+#        - Call refresh_*.main(qbo_body=...) inline to upsert + side effects
 #        - Critical drift (cache_ahead) flagged for human review
 #        - Per-entity try/except: a bad row is logged + skipped, never fatal
 #        - Cursor advances after every successful entity, so a mid-loop failure
 #          only loses the in-flight ones, not the whole 15-min window
 #   4. Sweep stale cache_ahead drift entries whose invoices have caught up.
-#   5. Flag webhook expectations whose grace window has expired without
-#      confirmation as 'missing' (separate from the CDC pass).
+#   5. Flag webhook expectations whose grace window has expired.
+#   6. Prune auto_healed drift_log rows older than 30 days.
 #
 # Severity tiers:
 #   soft     — cache stale relative to QBO (most common; auto-heal silently)
@@ -27,13 +44,13 @@
 #              error (auto-heal where possible, flag in drift_log)
 #   critical — cache appears NEWER than QBO (rare; halt + alert)
 #
-# Identifier handling: table names are interpolated via psycopg2.sql.Identifier
-# so quoted/PascalCase names like public."Customers" work alongside lowercase
-# ones like billing.invoices. f-string interpolation would silently lowercase
-# them and the lookup would fail with relation-does-not-exist.
+# Identifier handling: table names use psycopg2.sql.Identifier so quoted/
+# PascalCase names like public."Customers" work alongside lowercase ones.
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from uuid import UUID
 
 import psycopg2
 import psycopg2.extras
@@ -41,10 +58,19 @@ from psycopg2 import sql as psql
 import requests
 import wmill
 
+# Refresh scripts imported in-process so we don't pay for an async script
+# dispatch per drifted entity (1500+ entities/run otherwise = 1500+ jobs).
+# These also run the upsert+side-effect pipeline that the webhook handler
+# relies on, keeping a single source of truth for the schema mapping.
+import f.service_billing.refresh_invoice as refresh_invoice
+import f.service_billing.refresh_payment as refresh_payment
+import f.service_billing.refresh_customer as refresh_customer
+
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
 
 ENTITIES_TO_RECONCILE = ["Invoice", "Payment", "Customer"]
+DRIFT_LOG_RETENTION_DAYS = 30
 
 # (schema, table, id_col). Table names are CASE-SENSITIVE — Customers in
 # public is created as the quoted identifier "Customers".
@@ -54,12 +80,132 @@ ENTITY_TO_TABLE = {
     "Customer": ("public",  "Customers",         "qbo_customer_id"),
 }
 
-REFRESH_SCRIPT_MAP = {
-    "Invoice":  ("f/service_billing/refresh_invoice",  "qbo_invoice_id"),
-    "Payment":  ("f/service_billing/refresh_payment",  "qbo_payment_id"),
-    "Customer": ("f/service_billing/qbo_customer_sync", "qbo_customer_id"),
+# Maps entity_type → (refresh_module, id_kwarg_name). Each refresh module
+# exposes a main() that accepts the id and an optional qbo_body=.
+INLINE_REFRESH_BY_ENTITY = {
+    "Invoice":  (refresh_invoice,  "qbo_invoice_id"),
+    "Payment":  (refresh_payment,  "qbo_payment_id"),
+    "Customer": (refresh_customer, "qbo_customer_id"),
 }
 
+
+# ---------------------------------------------------------------------------
+# Field diff schemas
+# ---------------------------------------------------------------------------
+
+def _ref_value(d, key):
+    if not isinstance(d, dict):
+        return None
+    inner = d.get(key)
+    if isinstance(inner, dict):
+        return inner.get("value")
+    return None
+
+
+def _bill_addr(qbo, field):
+    return ((qbo.get("BillAddr") or {}).get(field)) if qbo.get("BillAddr") else None
+
+
+INVOICE_DIFF_FIELDS = {
+    "doc_number":      lambda q: q.get("DocNumber"),
+    "qbo_customer_id": lambda q: _ref_value(q, "CustomerRef"),
+    "customer_name":   lambda q: (q.get("CustomerRef") or {}).get("name"),
+    "txn_date":        lambda q: q.get("TxnDate"),
+    "due_date":        lambda q: q.get("DueDate"),
+    "total_amt":       lambda q: q.get("TotalAmt"),
+    "balance":         lambda q: q.get("Balance"),
+    "email_status":    lambda q: q.get("EmailStatus"),
+}
+
+PAYMENT_DIFF_FIELDS = {
+    "qbo_customer_id": lambda q: _ref_value(q, "CustomerRef"),
+    "type":            lambda q: (q.get("PaymentMethodRef") or {}).get("name"),
+    "total_amt":       lambda q: q.get("TotalAmt"),
+    "unapplied_amt":   lambda q: q.get("UnappliedAmt"),
+    "txn_date":        lambda q: q.get("TxnDate"),
+    "ref_num":         lambda q: q.get("PaymentRefNum"),
+}
+
+CUSTOMER_DIFF_FIELDS = {
+    "display_name": lambda q: q.get("DisplayName"),
+    "first_name":   lambda q: q.get("GivenName"),
+    "last_name":    lambda q: q.get("FamilyName"),
+    "company":      lambda q: q.get("CompanyName"),
+    "email":        lambda q: (q.get("PrimaryEmailAddr") or {}).get("Address"),
+    "phone":        lambda q: (q.get("PrimaryPhone") or {}).get("FreeFormNumber"),
+    "city":         lambda q: _bill_addr(q, "City"),
+    "state":        lambda q: _bill_addr(q, "CountrySubDivisionCode"),
+    "zip":          lambda q: _bill_addr(q, "PostalCode"),
+    "balance":      lambda q: q.get("Balance"),
+    "is_active":    lambda q: q.get("Active"),
+}
+
+DIFF_FIELDS_BY_ENTITY = {
+    "Invoice":  INVOICE_DIFF_FIELDS,
+    "Payment":  PAYMENT_DIFF_FIELDS,
+    "Customer": CUSTOMER_DIFF_FIELDS,
+}
+
+
+def _normalize_for_compare(v):
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, (date, datetime)):
+        return v.isoformat()[:10]
+    if isinstance(v, str):
+        s = v.strip()
+        if s and s.lstrip("-").replace(".", "", 1).isdigit():
+            try:
+                return float(s)
+            except ValueError:
+                pass
+        return s if s != "" else None
+    if isinstance(v, bool):
+        return v
+    return v
+
+
+def _values_equal(a, b):
+    na, nb = _normalize_for_compare(a), _normalize_for_compare(b)
+    if isinstance(na, float) and isinstance(nb, float):
+        return abs(na - nb) < 0.005
+    return na == nb
+
+
+def _serialize_for_json(v):
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, (date, datetime)):
+        return v.isoformat()
+    if isinstance(v, UUID):
+        return str(v)
+    return str(v)
+
+
+def compute_field_diff(entity_type, cached_row, qbo_entity):
+    """{field: {"before": cache, "after": qbo}} for every disagreement."""
+    fields = DIFF_FIELDS_BY_ENTITY.get(entity_type, {})
+    diff = {}
+    for col, extract in fields.items():
+        cache_val = (cached_row or {}).get(col)
+        qbo_val = extract(qbo_entity)
+        if not _values_equal(cache_val, qbo_val):
+            diff[col] = {
+                "before": _serialize_for_json(cache_val),
+                "after":  _serialize_for_json(qbo_val),
+            }
+    return diff
+
+
+# ---------------------------------------------------------------------------
+# QBO + DB helpers
+# ---------------------------------------------------------------------------
 
 def refresh_qbo_token():
     resource = wmill.get_resource(QBO_RESOURCE)
@@ -88,7 +234,6 @@ def get_db_conn():
 
 
 def qbo_cdc(access_token, realm_id, entities, changed_since):
-    """Calls QBO Change Data Capture. Returns map of entity_type → list of entities."""
     url = f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/cdc"
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     params = {
@@ -131,7 +276,6 @@ def get_cursor(conn, source="qbo"):
 
 
 def save_cursor(conn, new_cursor, status, entities_processed, drift_count, notes=None):
-    """Persist cursor + run stats. Idempotent — safe to call repeatedly."""
     cur = conn.cursor()
     cur.execute(
         """
@@ -151,7 +295,6 @@ def save_cursor(conn, new_cursor, status, entities_processed, drift_count, notes
 
 
 def parse_qbo_timestamp(ts):
-    """Parse QBO ISO timestamp to UTC datetime."""
     if not ts:
         return None
     try:
@@ -161,7 +304,6 @@ def parse_qbo_timestamp(ts):
 
 
 def load_cached(conn, schema, table, id_col, entity_id):
-    """Load a single cache row using safely-quoted identifiers."""
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     query = psql.SQL("SELECT * FROM {schema}.{table} WHERE {id_col} = %s").format(
         schema=psql.Identifier(schema),
@@ -174,19 +316,24 @@ def load_cached(conn, schema, table, id_col, entity_id):
     return dict(row) if row else None
 
 
-def log_drift(conn, entity_type, entity_id, kind, severity, cache_state, qbo_state, resolution):
+def log_drift(conn, entity_type, entity_id, kind, severity,
+              cache_state, qbo_state, resolution, field_diff=None):
     cur = conn.cursor()
     cur.execute(
         """
         INSERT INTO billing.drift_log
-          (entity_type, entity_id, kind, severity, cache_state, qbo_state, resolution, resolution_at)
-        VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s,
-                CASE WHEN %s = 'auto_healed' THEN now() ELSE NULL END)
+          (entity_type, entity_id, kind, severity,
+           cache_state, qbo_state, field_diff,
+           resolution, resolution_at)
+        VALUES (%s, %s, %s, %s,
+                %s::jsonb, %s::jsonb, %s::jsonb,
+                %s, CASE WHEN %s = 'auto_healed' THEN now() ELSE NULL END)
         """,
         (
             entity_type, entity_id, kind, severity,
             psycopg2.extras.Json(cache_state) if cache_state else None,
             psycopg2.extras.Json(qbo_state) if qbo_state else None,
+            psycopg2.extras.Json(field_diff) if field_diff else None,
             resolution, resolution,
         ),
     )
@@ -194,20 +341,27 @@ def log_drift(conn, entity_type, entity_id, kind, severity, cache_state, qbo_sta
     cur.close()
 
 
-def trigger_refresh(entity_type, entity_id):
-    """Fire-and-forget refresh of a single entity via the existing scripts."""
-    script, arg_name = REFRESH_SCRIPT_MAP.get(entity_type, (None, None))
-    if not script:
-        return
+def trigger_inline_refresh(entity_type, entity_id, qbo_body):
+    """Run the refresh_* main() in-process with the body in hand.
+
+    No QBO GET, no async script dispatch, no extra DB connection from a
+    new job — just calls the refresh module directly. The refresh modules
+    open their own conns (they do their own commit lifecycle), which is
+    fine: they're idempotent and the OCC guard prevents clobbering.
+
+    Errors are caught + logged; per-entity errors are surfaced via the
+    caller's processing_errors list.
+    """
+    refresh_mod, id_kwarg = INLINE_REFRESH_BY_ENTITY.get(entity_type, (None, None))
+    if not refresh_mod:
+        return {"skipped": True, "reason": f"no refresh module for {entity_type}"}
     try:
-        # Correct SDK function: run_script_by_path_async(path, args)
-        wmill.run_script_by_path_async(path=script, args={arg_name: entity_id})
+        return refresh_mod.main(**{id_kwarg: entity_id, "qbo_body": qbo_body})
     except Exception as e:
-        print(f"  refresh trigger failed for {entity_type}:{entity_id}: {e}")
+        return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
 def mark_cache_drift(conn, schema, table, id_col, entity_id):
-    """Set sync_state='drift_detected' so the row surfaces in queue views."""
     cur = conn.cursor()
     try:
         query = psql.SQL(
@@ -225,8 +379,6 @@ def mark_cache_drift(conn, schema, table, id_col, entity_id):
         cur.execute(query, (entity_id,))
         conn.commit()
     except Exception as e:
-        # Some tables don't have sync_state columns. Don't let that abort the
-        # run — we still have the drift_log row.
         conn.rollback()
         print(f"  could not mark drift on {schema}.{table}:{entity_id}: {e}")
     finally:
@@ -234,7 +386,6 @@ def mark_cache_drift(conn, schema, table, id_col, entity_id):
 
 
 def flag_missing_webhooks(conn):
-    """Flip pending expectations past their grace window to 'missing'."""
     cur = conn.cursor()
     cur.execute(
         """
@@ -251,12 +402,6 @@ def flag_missing_webhooks(conn):
 
 
 def auto_resolve_caught_up_drift(conn):
-    """
-    Sweep cache_ahead drift entries whose underlying invoice has caught up to
-    or passed the flagged QBO timestamp. The CDC pass is forward-only and
-    never revisits old drift_log rows, so without this they accumulate as
-    stale alerts (the source of the 5 May 1 entries).
-    """
     cur = conn.cursor()
     cur.execute(
         """
@@ -286,64 +431,85 @@ def auto_resolve_caught_up_drift(conn):
     return len(rows)
 
 
+def prune_drift_log(conn, days=DRIFT_LOG_RETENTION_DAYS):
+    cur = conn.cursor()
+    cur.execute("SELECT public.prune_drift_log(%s)", (days,))
+    deleted = cur.fetchone()[0] or 0
+    conn.commit()
+    cur.close()
+    return deleted
+
+
+# ---------------------------------------------------------------------------
+# Per-entity processing
+# ---------------------------------------------------------------------------
+
 def process_entity(conn, entity_type, qbo_entity, schema, table, id_col):
-    """
-    Classify + log drift for a single entity. Wrapped in try/except by caller
-    so a single bad entity can't poison the whole pass.
-    """
+    """Classify drift + log it + heal via inline refresh. Returns
+    (qbo_updated, drift_kind, refresh_result)."""
     entity_id = qbo_entity["Id"]
     qbo_updated = parse_qbo_timestamp(
         qbo_entity.get("MetaData", {}).get("LastUpdatedTime")
     )
     if not qbo_updated:
-        return None, None
+        return None, None, None
 
     cached = load_cached(conn, schema, table, id_col, entity_id)
 
     if cached is None:
+        # Brand-new entity — capture an initial snapshot diff for the log.
+        snapshot_diff = compute_field_diff(entity_type, {}, qbo_entity)
         log_drift(
             conn, entity_type, entity_id,
             kind="missing_in_cache", severity="soft",
             cache_state=None,
             qbo_state={"id": entity_id, "qbo_updated": qbo_updated.isoformat()},
             resolution="auto_healed",
+            field_diff=snapshot_diff or None,
         )
-        trigger_refresh(entity_type, entity_id)
-        return qbo_updated, "missing_in_cache"
+        refresh_result = trigger_inline_refresh(entity_type, entity_id, qbo_entity)
+        return qbo_updated, "missing_in_cache", refresh_result
 
-    cached_updated = cached.get("qbo_last_updated_time")
+    cached_updated = cached.get("qbo_last_updated_time") or cached.get("qbo_last_updated")
 
     if cached_updated is None or qbo_updated > cached_updated:
+        diff = compute_field_diff(entity_type, cached, qbo_entity)
         log_drift(
             conn, entity_type, entity_id,
             kind="cache_stale", severity="soft",
             cache_state={"qbo_last_updated_time": cached_updated.isoformat() if cached_updated else None},
             qbo_state={"qbo_updated": qbo_updated.isoformat()},
             resolution="auto_healed",
+            field_diff=diff or None,
         )
-        trigger_refresh(entity_type, entity_id)
-        return qbo_updated, "cache_stale"
+        refresh_result = trigger_inline_refresh(entity_type, entity_id, qbo_entity)
+        return qbo_updated, "cache_stale", refresh_result
 
     if qbo_updated < cached_updated:
+        # Cache claims newer than QBO — DO NOT call refresh (would replace
+        # newer cache with older QBO data; OCC would block but we don't even
+        # want to attempt). Log + flag for human.
+        diff = compute_field_diff(entity_type, cached, qbo_entity)
         log_drift(
             conn, entity_type, entity_id,
             kind="cache_ahead", severity="critical",
             cache_state={"qbo_last_updated_time": cached_updated.isoformat()},
             qbo_state={"qbo_updated": qbo_updated.isoformat()},
             resolution="flagged_for_review",
+            field_diff=diff or None,
         )
         mark_cache_drift(conn, schema, table, id_col, entity_id)
-        return qbo_updated, "cache_ahead"
+        return qbo_updated, "cache_ahead", None
 
-    # cached_updated == qbo_updated → no drift
-    return qbo_updated, None
+    return qbo_updated, None, None
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    """
-    Run the reconciler. Returns a summary dict with counts and durations.
-    Schedule: every 15 minutes (f/service_billing/cdc_reconciler_15min).
-    """
+    """Run the reconciler. Schedule: every 15 minutes."""
     started = time.time()
     conn = get_db_conn()
 
@@ -361,9 +527,7 @@ def main():
             save_cursor(conn, cursor, "failed", 0, 0, f"cdc_fetch: {str(e)[:300]}")
             raise
 
-        # Flatten + sort by qbo_updated ascending so we can advance the cursor
-        # as we go. Mixed entity types is fine — we only use the cursor as a
-        # "process anything newer than this" filter, not per-type.
+        # Sort by qbo_updated ascending so cursor advances incrementally.
         flat = []
         for entity_type, entities in cdc_response.items():
             for ent in entities:
@@ -374,6 +538,7 @@ def main():
         entities_processed = 0
         drift_records = []
         processing_errors = []
+        refresh_failures = []
         progress_cursor = cursor
 
         for qbo_updated, entity_type, qbo_entity in flat:
@@ -385,25 +550,24 @@ def main():
 
             entity_id = qbo_entity.get("Id", "<unknown>")
             try:
-                ts, drift_kind = process_entity(
+                ts, drift_kind, refresh_result = process_entity(
                     conn, entity_type, qbo_entity, schema, table, id_col,
                 )
                 entities_processed += 1
                 if drift_kind:
                     drift_records.append((drift_kind, entity_id))
-                # Advance the cursor whether or not we detected drift — this
-                # entity has been handled (logged + auto-healed or confirmed
-                # in-sync), so the next run shouldn't re-scan it.
+                if refresh_result and refresh_result.get("error"):
+                    refresh_failures.append({
+                        "entity_type": entity_type, "entity_id": entity_id,
+                        "error": refresh_result["error"],
+                    })
                 if ts and ts > progress_cursor:
                     progress_cursor = ts
             except Exception as e:
-                # Per-entity error: log + continue. Do NOT advance cursor past
-                # this entity — next run will retry. If the same entity keeps
-                # failing it surfaces as a recurring drift_log entry.
                 msg = f"{type(e).__name__}: {str(e)[:200]}"
                 print(f"  ERROR processing {entity_type}:{entity_id}: {msg}")
                 try:
-                    conn.rollback()  # in case the transaction is poisoned
+                    conn.rollback()
                 except Exception:
                     pass
                 try:
@@ -416,13 +580,12 @@ def main():
                             if qbo_updated else None
                         ),
                         resolution="flagged_for_review",
+                        field_diff=None,
                     )
                 except Exception as inner:
                     print(f"  could not log drift error: {inner}")
                 processing_errors.append((entity_type, entity_id, msg))
 
-        # Always persist whatever progress we made, even if some entities
-        # failed. progress_cursor is the high-water mark of successful entries.
         save_cursor(
             conn,
             progress_cursor,
@@ -430,36 +593,40 @@ def main():
             entities_processed,
             len(drift_records),
             (
-                f"{len(processing_errors)} per-entity errors"
-                if processing_errors else None
+                f"{len(processing_errors)} per-entity errors, "
+                f"{len(refresh_failures)} refresh failures"
+                if (processing_errors or refresh_failures) else None
             ),
         )
 
-        # End-of-pass housekeeping (runs even if some entities failed).
         cleared = auto_resolve_caught_up_drift(conn)
         missing_webhooks_count = flag_missing_webhooks(conn)
+        pruned = prune_drift_log(conn)
 
         elapsed = time.time() - started
         cursor_advance_s = (progress_cursor - cursor).total_seconds()
         print(
             f"=== reconciler done in {elapsed:.1f}s: "
             f"processed={entities_processed} drift={len(drift_records)} "
-            f"errors={len(processing_errors)} caught_up_resolved={cleared} "
-            f"missing_webhooks={missing_webhooks_count} "
-            f"cursor_advance={cursor_advance_s:.0f}s ==="
+            f"errors={len(processing_errors)} refresh_failures={len(refresh_failures)} "
+            f"caught_up_resolved={cleared} missing_webhooks={missing_webhooks_count} "
+            f"pruned={pruned} cursor_advance={cursor_advance_s:.0f}s ==="
         )
 
         return {
-            "status": "succeeded" if not processing_errors else "partial",
-            "elapsed_s": round(elapsed, 1),
-            "cursor_advance_s": cursor_advance_s,
-            "entities_processed": entities_processed,
-            "drift_count": len(drift_records),
-            "drift_sample": drift_records[:10],
-            "processing_errors": processing_errors[:10],
+            "status":                   "succeeded" if not processing_errors else "partial",
+            "elapsed_s":                round(elapsed, 1),
+            "cursor_advance_s":         cursor_advance_s,
+            "entities_processed":       entities_processed,
+            "drift_count":              len(drift_records),
+            "drift_sample":             drift_records[:10],
+            "processing_errors":        processing_errors[:10],
+            "refresh_failures":         refresh_failures[:10],
+            "refresh_failure_count":    len(refresh_failures),
             "caught_up_drift_resolved": cleared,
             "missing_webhooks_flagged": missing_webhooks_count,
-            "new_cursor": progress_cursor.isoformat(),
+            "drift_log_pruned":         pruned,
+            "new_cursor":               progress_cursor.isoformat(),
         }
 
     finally:

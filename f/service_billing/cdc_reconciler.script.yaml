@@ -1,10 +1,14 @@
-summary: Fix Customer table case + run_script_by_path_async + per-entity
-  try/except + incremental cursor + auto-resolve caught-up drift
-description: Fix mid-loop crash on public."Customers" (case-sensitive
-  identifier), wrong wmill kwarg, and add per-entity error handling so one bad
-  row no longer halts the whole pass. Cursor now advances incrementally so we
-  don't re-scan 5 days every run. Also auto-resolves stale cache_ahead drift
-  entries whose invoices have caught up.
+summary: In-process refresh imports + field_diff + retention + correct
+  refresh_customer path
+description: 'Imports refresh_invoice/refresh_payment/refresh_customer directly
+  and calls them with qbo_body from CDC. Eliminates redundant QBO GET (one per
+  drifted entity) and async script dispatch overhead. Single source of truth for
+  QBO->cache mapping lives in the refresh modules; OCC guards inside each upsert
+  prevent racing writers from clobbering each other. Field-level {before,after}
+  diffs captured to drift_log.field_diff for forensics. End-of-pass:
+  auto-resolve caught-up cache_ahead entries, flag missing webhooks, prune
+  auto_healed drift older than 30 days. Also fixes wrong customer refresh path
+  (was qbo_customer_sync, now refresh_customer).'
 lock: '!inline f/service_billing/cdc_reconciler.script.lock'
 has_on_behalf_of: false
 kind: script
