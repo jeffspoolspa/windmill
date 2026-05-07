@@ -9,29 +9,35 @@
 # What it does, every 15 minutes (Windmill cron):
 #   1. Read last cursor from billing.cdc_cursors WHERE source='qbo'
 #   2. Call QBO /cdc?entities=Invoice,Payment,Customer&changedSince=<cursor>
-#   3. For each returned entity:
+#   3. For each returned entity (sorted by qbo_updated ascending so the cursor
+#      can advance incrementally):
 #        - If our cache is older than QBO's MetaData.LastUpdatedTime → drift
-#        - Auto-heal: fetch full entity + upsert
-#        - Log the drift for trend analysis
-#   4. Flag webhook expectations whose grace window has expired without
+#        - Auto-heal soft drift via refresh_invoice/refresh_payment/customer_sync
+#        - Critical drift (cache_ahead) flagged for human review
+#        - Per-entity try/except: a bad row is logged + skipped, never fatal
+#        - Cursor advances after every successful entity, so a mid-loop failure
+#          only loses the in-flight ones, not the whole 15-min window
+#   4. Sweep stale cache_ahead drift entries whose invoices have caught up.
+#   5. Flag webhook expectations whose grace window has expired without
 #      confirmation as 'missing' (separate from the CDC pass).
-#   5. Update cursor to the latest LastUpdatedTime we saw + persist run stats.
 #
 # Severity tiers:
 #   soft     — cache stale relative to QBO (most common; auto-heal silently)
-#   hard     — webhook missing AND value disagrees (auto-heal but flag UI)
+#   hard     — webhook missing AND value disagrees, or per-entity processing
+#              error (auto-heal where possible, flag in drift_log)
 #   critical — cache appears NEWER than QBO (rare; halt + alert)
 #
-# What it does NOT do:
-#   - Full table scan (use a separate weekly script for that)
-#   - QBO writes (auto-healing is read-only — pull from QBO into cache)
-#   - Resolve drift_detected records (humans do that via the admin UI)
+# Identifier handling: table names are interpolated via psycopg2.sql.Identifier
+# so quoted/PascalCase names like public."Customers" work alongside lowercase
+# ones like billing.invoices. f-string interpolation would silently lowercase
+# them and the lookup would fail with relation-does-not-exist.
 
 import time
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import psycopg2.extras
+from psycopg2 import sql as psql
 import requests
 import wmill
 
@@ -40,10 +46,18 @@ SUPABASE_RESOURCE = "u/carter/supabase"
 
 ENTITIES_TO_RECONCILE = ["Invoice", "Payment", "Customer"]
 
+# (schema, table, id_col). Table names are CASE-SENSITIVE — Customers in
+# public is created as the quoted identifier "Customers".
 ENTITY_TO_TABLE = {
-    "Invoice": ("billing", "invoices", "qbo_invoice_id"),
-    "Payment": ("billing", "customer_payments", "qbo_payment_id"),
-    "Customer": ("public", "customers", "qbo_customer_id"),
+    "Invoice":  ("billing", "invoices",          "qbo_invoice_id"),
+    "Payment":  ("billing", "customer_payments", "qbo_payment_id"),
+    "Customer": ("public",  "Customers",         "qbo_customer_id"),
+}
+
+REFRESH_SCRIPT_MAP = {
+    "Invoice":  ("f/service_billing/refresh_invoice",  "qbo_invoice_id"),
+    "Payment":  ("f/service_billing/refresh_payment",  "qbo_payment_id"),
+    "Customer": ("f/service_billing/qbo_customer_sync", "qbo_customer_id"),
 }
 
 
@@ -86,8 +100,6 @@ def qbo_cdc(access_token, realm_id, entities, changed_since):
         raise Exception(f"QBO CDC failed: {resp.status_code} - {resp.text[:300]}")
 
     body = resp.json()
-    # CDC returns an array of objects, each with one entity_type → list mapping
-    # plus a top-level "time" field that's the response timestamp.
     result = {}
     for item in body.get("CDCResponse", []):
         for query_response in item.get("QueryResponse", []):
@@ -106,7 +118,6 @@ def get_cursor(conn, source="qbo"):
     row = cur.fetchone()
     cur.close()
     if not row:
-        # Initialize cursor if missing
         cur = conn.cursor()
         initial = datetime.now(timezone.utc) - timedelta(hours=1)
         cur.execute(
@@ -120,6 +131,7 @@ def get_cursor(conn, source="qbo"):
 
 
 def save_cursor(conn, new_cursor, status, entities_processed, drift_count, notes=None):
+    """Persist cursor + run stats. Idempotent — safe to call repeatedly."""
     cur = conn.cursor()
     cur.execute(
         """
@@ -142,7 +154,6 @@ def parse_qbo_timestamp(ts):
     """Parse QBO ISO timestamp to UTC datetime."""
     if not ts:
         return None
-    # QBO uses a few variants; standardize.
     try:
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
@@ -150,11 +161,14 @@ def parse_qbo_timestamp(ts):
 
 
 def load_cached(conn, schema, table, id_col, entity_id):
+    """Load a single cache row using safely-quoted identifiers."""
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(
-        f"SELECT * FROM {schema}.{table} WHERE {id_col} = %s",
-        (entity_id,),
+    query = psql.SQL("SELECT * FROM {schema}.{table} WHERE {id_col} = %s").format(
+        schema=psql.Identifier(schema),
+        table=psql.Identifier(table),
+        id_col=psql.Identifier(id_col),
     )
+    cur.execute(query, (entity_id,))
     row = cur.fetchone()
     cur.close()
     return dict(row) if row else None
@@ -166,7 +180,8 @@ def log_drift(conn, entity_type, entity_id, kind, severity, cache_state, qbo_sta
         """
         INSERT INTO billing.drift_log
           (entity_type, entity_id, kind, severity, cache_state, qbo_state, resolution, resolution_at)
-        VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, CASE WHEN %s = 'auto_healed' THEN now() ELSE NULL END)
+        VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s,
+                CASE WHEN %s = 'auto_healed' THEN now() ELSE NULL END)
         """,
         (
             entity_type, entity_id, kind, severity,
@@ -181,18 +196,41 @@ def log_drift(conn, entity_type, entity_id, kind, severity, cache_state, qbo_sta
 
 def trigger_refresh(entity_type, entity_id):
     """Fire-and-forget refresh of a single entity via the existing scripts."""
-    script_map = {
-        "Invoice": ("f/service_billing/refresh_invoice", "qbo_invoice_id"),
-        "Payment": ("f/service_billing/refresh_payment", "qbo_payment_id"),
-        "Customer": ("f/service_billing/qbo_customer_sync", "qbo_customer_id"),
-    }
-    script, arg_name = script_map.get(entity_type, (None, None))
+    script, arg_name = REFRESH_SCRIPT_MAP.get(entity_type, (None, None))
     if not script:
         return
     try:
-        wmill.run_script_async(path=script, args={arg_name: entity_id})
+        # Correct SDK function: run_script_by_path_async(path, args)
+        wmill.run_script_by_path_async(path=script, args={arg_name: entity_id})
     except Exception as e:
         print(f"  refresh trigger failed for {entity_type}:{entity_id}: {e}")
+
+
+def mark_cache_drift(conn, schema, table, id_col, entity_id):
+    """Set sync_state='drift_detected' so the row surfaces in queue views."""
+    cur = conn.cursor()
+    try:
+        query = psql.SQL(
+            """
+            UPDATE {schema}.{table}
+            SET sync_state = 'drift_detected',
+                sync_state_changed_at = now()
+            WHERE {id_col} = %s
+            """
+        ).format(
+            schema=psql.Identifier(schema),
+            table=psql.Identifier(table),
+            id_col=psql.Identifier(id_col),
+        )
+        cur.execute(query, (entity_id,))
+        conn.commit()
+    except Exception as e:
+        # Some tables don't have sync_state columns. Don't let that abort the
+        # run — we still have the drift_log row.
+        conn.rollback()
+        print(f"  could not mark drift on {schema}.{table}:{entity_id}: {e}")
+    finally:
+        cur.close()
 
 
 def flag_missing_webhooks(conn):
@@ -203,7 +241,7 @@ def flag_missing_webhooks(conn):
         UPDATE billing.webhook_expectations
         SET status = 'missing'
         WHERE status = 'pending' AND expected_by < now()
-        RETURNING id, entity_type, entity_id
+        RETURNING id
         """
     )
     flagged = cur.fetchall()
@@ -212,10 +250,99 @@ def flag_missing_webhooks(conn):
     return len(flagged)
 
 
+def auto_resolve_caught_up_drift(conn):
+    """
+    Sweep cache_ahead drift entries whose underlying invoice has caught up to
+    or passed the flagged QBO timestamp. The CDC pass is forward-only and
+    never revisits old drift_log rows, so without this they accumulate as
+    stale alerts (the source of the 5 May 1 entries).
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        WITH caught_up AS (
+          SELECT d.id
+            FROM billing.drift_log d
+            JOIN billing.invoices i ON i.qbo_invoice_id = d.entity_id
+           WHERE d.entity_type = 'Invoice'
+             AND (d.resolution IS NULL OR d.resolution = 'flagged_for_review')
+             AND i.sync_state = 'synced'
+             AND i.qbo_last_updated_time IS NOT NULL
+             AND i.qbo_last_updated_time
+                 >= ((d.cache_state->>'qbo_last_updated_time')::timestamptz)
+        )
+        UPDATE billing.drift_log d
+           SET resolution = 'auto_recovered',
+               resolution_at = now(),
+               resolved_by = 'cdc_reconciler_sweep'
+          FROM caught_up c
+         WHERE d.id = c.id
+         RETURNING d.id
+        """
+    )
+    rows = cur.fetchall()
+    conn.commit()
+    cur.close()
+    return len(rows)
+
+
+def process_entity(conn, entity_type, qbo_entity, schema, table, id_col):
+    """
+    Classify + log drift for a single entity. Wrapped in try/except by caller
+    so a single bad entity can't poison the whole pass.
+    """
+    entity_id = qbo_entity["Id"]
+    qbo_updated = parse_qbo_timestamp(
+        qbo_entity.get("MetaData", {}).get("LastUpdatedTime")
+    )
+    if not qbo_updated:
+        return None, None
+
+    cached = load_cached(conn, schema, table, id_col, entity_id)
+
+    if cached is None:
+        log_drift(
+            conn, entity_type, entity_id,
+            kind="missing_in_cache", severity="soft",
+            cache_state=None,
+            qbo_state={"id": entity_id, "qbo_updated": qbo_updated.isoformat()},
+            resolution="auto_healed",
+        )
+        trigger_refresh(entity_type, entity_id)
+        return qbo_updated, "missing_in_cache"
+
+    cached_updated = cached.get("qbo_last_updated_time")
+
+    if cached_updated is None or qbo_updated > cached_updated:
+        log_drift(
+            conn, entity_type, entity_id,
+            kind="cache_stale", severity="soft",
+            cache_state={"qbo_last_updated_time": cached_updated.isoformat() if cached_updated else None},
+            qbo_state={"qbo_updated": qbo_updated.isoformat()},
+            resolution="auto_healed",
+        )
+        trigger_refresh(entity_type, entity_id)
+        return qbo_updated, "cache_stale"
+
+    if qbo_updated < cached_updated:
+        log_drift(
+            conn, entity_type, entity_id,
+            kind="cache_ahead", severity="critical",
+            cache_state={"qbo_last_updated_time": cached_updated.isoformat()},
+            qbo_state={"qbo_updated": qbo_updated.isoformat()},
+            resolution="flagged_for_review",
+        )
+        mark_cache_drift(conn, schema, table, id_col, entity_id)
+        return qbo_updated, "cache_ahead"
+
+    # cached_updated == qbo_updated → no drift
+    return qbo_updated, None
+
+
 def main():
     """
     Run the reconciler. Returns a summary dict with counts and durations.
-    Set as a Windmill schedule: every 15 minutes is the recommended cadence.
+    Schedule: every 15 minutes (f/service_billing/cdc_reconciler_15min).
     """
     started = time.time()
     conn = get_db_conn()
@@ -226,128 +353,114 @@ def main():
 
         access_token, realm_id = refresh_qbo_token()
 
-        # Fetch everything that changed since cursor.
         try:
             cdc_response = qbo_cdc(
                 access_token, realm_id, ENTITIES_TO_RECONCILE, cursor,
             )
         except Exception as e:
-            save_cursor(conn, cursor, "failed", 0, 0, str(e)[:300])
+            save_cursor(conn, cursor, "failed", 0, 0, f"cdc_fetch: {str(e)[:300]}")
             raise
+
+        # Flatten + sort by qbo_updated ascending so we can advance the cursor
+        # as we go. Mixed entity types is fine — we only use the cursor as a
+        # "process anything newer than this" filter, not per-type.
+        flat = []
+        for entity_type, entities in cdc_response.items():
+            for ent in entities:
+                ts = parse_qbo_timestamp(ent.get("MetaData", {}).get("LastUpdatedTime"))
+                flat.append((ts, entity_type, ent))
+        flat.sort(key=lambda r: r[0] or datetime.min.replace(tzinfo=timezone.utc))
 
         entities_processed = 0
         drift_records = []
-        new_max_timestamp = cursor
+        processing_errors = []
+        progress_cursor = cursor
 
-        for entity_type, entities in cdc_response.items():
-            schema, table, id_col = ENTITY_TO_TABLE.get(entity_type, (None, None, None))
+        for qbo_updated, entity_type, qbo_entity in flat:
+            schema, table, id_col = ENTITY_TO_TABLE.get(
+                entity_type, (None, None, None),
+            )
             if not schema:
                 continue
 
-            for qbo_entity in entities:
-                entities_processed += 1
-                entity_id = qbo_entity["Id"]
-                qbo_updated = parse_qbo_timestamp(
-                    qbo_entity.get("MetaData", {}).get("LastUpdatedTime")
+            entity_id = qbo_entity.get("Id", "<unknown>")
+            try:
+                ts, drift_kind = process_entity(
+                    conn, entity_type, qbo_entity, schema, table, id_col,
                 )
-                if not qbo_updated:
-                    continue
-                if qbo_updated > new_max_timestamp:
-                    new_max_timestamp = qbo_updated
-
-                cached = load_cached(conn, schema, table, id_col, entity_id)
-
-                if cached is None:
-                    # Entity exists in QBO but not in cache — backfill it.
+                entities_processed += 1
+                if drift_kind:
+                    drift_records.append((drift_kind, entity_id))
+                # Advance the cursor whether or not we detected drift — this
+                # entity has been handled (logged + auto-healed or confirmed
+                # in-sync), so the next run shouldn't re-scan it.
+                if ts and ts > progress_cursor:
+                    progress_cursor = ts
+            except Exception as e:
+                # Per-entity error: log + continue. Do NOT advance cursor past
+                # this entity — next run will retry. If the same entity keeps
+                # failing it surfaces as a recurring drift_log entry.
+                msg = f"{type(e).__name__}: {str(e)[:200]}"
+                print(f"  ERROR processing {entity_type}:{entity_id}: {msg}")
+                try:
+                    conn.rollback()  # in case the transaction is poisoned
+                except Exception:
+                    pass
+                try:
                     log_drift(
                         conn, entity_type, entity_id,
-                        kind="missing_in_cache", severity="soft",
-                        cache_state=None, qbo_state={"id": entity_id, "qbo_updated": qbo_updated.isoformat()},
-                        resolution="auto_healed",
-                    )
-                    trigger_refresh(entity_type, entity_id)
-                    drift_records.append(("missing_in_cache", entity_id))
-                    continue
-
-                cached_updated = cached.get("qbo_last_updated_time")
-
-                if cached_updated is None or qbo_updated > cached_updated:
-                    # Cache is stale — soft drift. Auto-heal by triggering refresh.
-                    log_drift(
-                        conn, entity_type, entity_id,
-                        kind="cache_stale", severity="soft",
-                        cache_state={"qbo_last_updated_time": cached_updated.isoformat() if cached_updated else None},
-                        qbo_state={"qbo_updated": qbo_updated.isoformat()},
-                        resolution="auto_healed",
-                    )
-                    trigger_refresh(entity_type, entity_id)
-                    drift_records.append(("cache_stale", entity_id))
-
-                elif qbo_updated < cached_updated:
-                    # Cache appears NEWER than QBO — should be impossible if our
-                    # 200-trust model is correct. CRITICAL: our write didn't land,
-                    # or QBO rolled back, or cdc is showing a stale read replica.
-                    log_drift(
-                        conn, entity_type, entity_id,
-                        kind="cache_ahead", severity="critical",
-                        cache_state={"qbo_last_updated_time": cached_updated.isoformat()},
-                        qbo_state={"qbo_updated": qbo_updated.isoformat()},
+                        kind="processing_error", severity="hard",
+                        cache_state={"error": msg},
+                        qbo_state=(
+                            {"qbo_updated": qbo_updated.isoformat()}
+                            if qbo_updated else None
+                        ),
                         resolution="flagged_for_review",
                     )
-                    # Mark the cache row as drift_detected so it surfaces in UI.
-                    mark_cache_drift(conn, schema, table, id_col, entity_id)
-                    drift_records.append(("cache_ahead", entity_id))
-                # else: cached_updated == qbo_updated — cache is current, no drift.
+                except Exception as inner:
+                    print(f"  could not log drift error: {inner}")
+                processing_errors.append((entity_type, entity_id, msg))
 
-        # Update the cursor only if we successfully completed.
+        # Always persist whatever progress we made, even if some entities
+        # failed. progress_cursor is the high-water mark of successful entries.
         save_cursor(
             conn,
-            new_max_timestamp,
-            "succeeded",
+            progress_cursor,
+            "succeeded" if not processing_errors else "partial",
             entities_processed,
             len(drift_records),
+            (
+                f"{len(processing_errors)} per-entity errors"
+                if processing_errors else None
+            ),
         )
 
-        # Separate pass: flag missing webhooks (independent of CDC).
+        # End-of-pass housekeeping (runs even if some entities failed).
+        cleared = auto_resolve_caught_up_drift(conn)
         missing_webhooks_count = flag_missing_webhooks(conn)
 
         elapsed = time.time() - started
+        cursor_advance_s = (progress_cursor - cursor).total_seconds()
         print(
             f"=== reconciler done in {elapsed:.1f}s: "
             f"processed={entities_processed} drift={len(drift_records)} "
-            f"missing_webhooks={missing_webhooks_count} ==="
+            f"errors={len(processing_errors)} caught_up_resolved={cleared} "
+            f"missing_webhooks={missing_webhooks_count} "
+            f"cursor_advance={cursor_advance_s:.0f}s ==="
         )
 
         return {
-            "status": "succeeded",
+            "status": "succeeded" if not processing_errors else "partial",
             "elapsed_s": round(elapsed, 1),
-            "cursor_advance_s": (new_max_timestamp - cursor).total_seconds(),
+            "cursor_advance_s": cursor_advance_s,
             "entities_processed": entities_processed,
             "drift_count": len(drift_records),
             "drift_sample": drift_records[:10],
+            "processing_errors": processing_errors[:10],
+            "caught_up_drift_resolved": cleared,
             "missing_webhooks_flagged": missing_webhooks_count,
-            "new_cursor": new_max_timestamp.isoformat(),
+            "new_cursor": progress_cursor.isoformat(),
         }
 
     finally:
         conn.close()
-
-
-def mark_cache_drift(conn, schema, table, id_col, entity_id):
-    """Set sync_state = 'drift_detected' on a cache row so the UI surfaces it."""
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            f"""
-            UPDATE {schema}.{table}
-            SET sync_state = 'drift_detected',
-                sync_state_changed_at = now()
-            WHERE {id_col} = %s
-            """,
-            (entity_id,),
-        )
-        conn.commit()
-    except Exception as e:
-        print(f"  could not mark drift on {table}:{entity_id} (column may not exist): {e}")
-    finally:
-        cur.close()

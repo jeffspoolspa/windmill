@@ -1,15 +1,11 @@
-summary: CDC-based reconciler — drift detection backstop for the webhook channel
-description: Runs every 15 min via Windmill cron. Uses QBO's CDC endpoint to
-  incrementally fetch entities changed since the last cursor, compares
-  MetaData.LastUpdatedTime against our cache's qbo_last_updated_time, auto-heals
-  soft drift via refresh_invoice/refresh_payment/qbo_customer_sync, and flags
-  critical drift (cache_ahead) for human review. Also flags webhook_expectations
-  past their grace window as 'missing'. This is the third leg of the Pattern D
-  architecture (cache write inline + webhook fast path + reconciler truth
-  backstop).
+summary: Fix Customer table case + run_script_by_path_async + per-entity
+  try/except + incremental cursor + auto-resolve caught-up drift
+description: Fix mid-loop crash on public."Customers" (case-sensitive
+  identifier), wrong wmill kwarg, and add per-entity error handling so one bad
+  row no longer halts the whole pass. Cursor now advances incrementally so we
+  don't re-scan 5 days every run. Also auto-resolves stale cache_ahead drift
+  entries whose invoices have caught up.
 lock: '!inline f/service_billing/cdc_reconciler.script.lock'
-concurrency_time_window_s: 900
-concurrent_limit: 1
 has_on_behalf_of: false
 kind: script
 schema: null
