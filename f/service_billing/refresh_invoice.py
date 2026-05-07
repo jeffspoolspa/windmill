@@ -2,6 +2,20 @@
 #
 # Single-invoice QBO -> Supabase refresh + WO link + status recheck.
 #
+# Callers:
+#   - QBO webhook handler:    main(qbo_invoice_id, operation="...")
+#                             — fetches the invoice from QBO and refreshes
+#   - cdc_reconciler:         main(qbo_invoice_id, qbo_body=<cdc_entity>)
+#                             — passes the body it already has from CDC,
+#                               skipping the QBO GET. Single source of truth
+#                               for the upsert + side effects.
+#
+# Concurrency: the upsert uses an OCC guard on qbo_last_updated_time, so two
+# concurrent callers writing the same invoice never clobber each other —
+# whichever has the newer QBO timestamp wins, the other's UPDATE is a no-op.
+# Side effects (external-memo detection, WO link, status recheck) are gated
+# on `did_write` so the loser doesn't trigger downstream churn either.
+#
 # Four paths handled, all idempotent:
 #
 #   1. Existing invoice (UPSERT path):
@@ -151,22 +165,13 @@ def parse_qbo_timestamp(ts):
 
 
 def looks_voided(qbo_inv):
-    """Heuristic detection of a voided invoice from the QBO response.
-
-    Used as a fallback when refresh_invoice is called manually (no
-    operation hint from a webhook). QBO doesnt expose a clean
-    is_voided boolean; the most reliable signals are:
-      - PrivateNote contains "Voided" (QBO appends this on void)
-      - TotalAmt == 0 AND Balance == 0 AND lines are zeroed/blank
-    """
+    """Heuristic detection of a voided invoice from the QBO response."""
     private_note = (qbo_inv.get("PrivateNote") or "").lower()
     if "voided" in private_note or "void" in private_note.split():
         return True
     total = float(qbo_inv.get("TotalAmt") or 0)
     balance = float(qbo_inv.get("Balance") or 0)
     if total == 0 and balance == 0:
-        # Could be voided OR could just be a zero-dollar invoice. Check
-        # if there are any non-zero line items; if not, treat as voided.
         non_zero_lines = [
             li for li in qbo_inv.get("Line") or []
             if float(li.get("Amount", 0) or 0) != 0
@@ -178,11 +183,19 @@ def looks_voided(qbo_inv):
 
 
 def upsert_invoice(conn, qbo_inv):
-    """Full upsert. Returns (was_new, qbo_invoice_id, prev_memo, qbo_memo).
+    """Upsert with OCC guard on qbo_last_updated_time.
 
-    The latter two enable the caller to detect when QBO's PrivateNote
-    differs from what we had cached — that signals a user edited the memo
-    directly in QBO and we should auto-lock + clear memo_low_confidence."""
+    Returns (was_new, qbo_invoice_id, prev_memo, qbo_memo, did_write).
+
+      was_new   — true when the row didn't exist before our SELECT
+      did_write — true when the INSERT or ON CONFLICT UPDATE actually landed
+                  (false when OCC blocked us — i.e. someone newer beat us).
+                  Side effects (memo-lock, link, recheck) should gate on this
+                  so the race loser doesn't trigger spurious downstream work.
+
+    The OCC guard only updates when EXCLUDED.qbo_last_updated_time is strictly
+    newer than the existing row's. New inserts (no conflict) always land.
+    """
     customer_ref = qbo_inv.get("CustomerRef", {}) or {}
     line_items = parse_line_items(qbo_inv)
     qbo_invoice_id = qbo_inv.get("Id")
@@ -199,10 +212,6 @@ def upsert_invoice(conn, qbo_inv):
     was_new = existing is None
     prev_memo = existing[0] if existing else None
 
-    # Pull memo + statement_memo from QBO. PrivateNote is what we use as the
-    # canonical memo (pre_process writes the composed "WO#XXX: <text>" there);
-    # CustomerMemo.value mirrors it. If the user edits in QBO they typically
-    # change CustomerMemo first, so accept either as the new memo source.
     qbo_private_note = qbo_inv.get("PrivateNote")
     qbo_customer_memo = (qbo_inv.get("CustomerMemo") or {}).get("value")
     qbo_memo = qbo_private_note or qbo_customer_memo
@@ -236,6 +245,10 @@ def upsert_invoice(conn, qbo_inv):
             sync_state            = 'synced',
             sync_state_changed_at = now(),
             sync_error            = NULL
+        WHERE billing.invoices.qbo_last_updated_time IS NULL
+           OR EXCLUDED.qbo_last_updated_time IS NULL
+           OR billing.invoices.qbo_last_updated_time < EXCLUDED.qbo_last_updated_time
+        RETURNING qbo_invoice_id
     """, (
         qbo_invoice_id, qbo_inv.get("DocNumber"),
         customer_ref.get("value"), customer_ref.get("name"),
@@ -248,8 +261,9 @@ def upsert_invoice(conn, qbo_inv):
         _dumps(line_items), _dumps(qbo_inv),
         qbo_last_updated,
     ))
+    did_write = cur.fetchone() is not None
     cur.close()
-    return was_new, qbo_invoice_id, prev_memo, qbo_memo
+    return was_new, qbo_invoice_id, prev_memo, qbo_memo, did_write
 
 
 def link_to_work_order(conn, qbo_invoice_id, doc_number):
@@ -299,12 +313,7 @@ def seed_awaiting_pre_processing(conn, qbo_invoice_id):
 
 
 def handle_voided(conn, qbo_invoice_id, qbo_inv=None, kind="voided"):
-    """Common handler for both Void (kind=voided) and hard-Delete (kind=deleted).
-
-    Both result in: WO unlinks → falls back to awaiting_invoice; cache row
-    flagged in needs_review with the appropriate reason; row kept for forensics.
-    The reason string is what surfaces in the UI needs-review queue.
-    """
+    """Common handler for both Void (kind=voided) and hard-Delete (kind=deleted)."""
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     if kind == "voided":
@@ -314,10 +323,6 @@ def handle_voided(conn, qbo_invoice_id, qbo_inv=None, kind="voided"):
         reason = "invoice_deleted_in_qbo"
         sync_err = "deleted in QBO"
 
-    # Unlink any WOs pointing at this invoice. The unlink does NOT fire
-    # pre-processing (trigger fires on null→not-null only). The WO appears
-    # back in v_awaiting_invoice immediately because that view filters on
-    # qbo_invoice_id IS NULL AND billable AND sub_total > 0 AND NOT skipped.
     cur.execute("""
         UPDATE public.work_orders
         SET qbo_invoice_id = NULL
@@ -326,8 +331,6 @@ def handle_voided(conn, qbo_invoice_id, qbo_inv=None, kind="voided"):
     """, (qbo_invoice_id,))
     unlinked_wos = [r["wo_number"] for r in cur.fetchall()]
 
-    # For void path, we have the QBO response — capture the latest state
-    # in raw alongside the void marker. For delete path, raw stays as-was.
     if qbo_inv:
         cur.execute("""
             UPDATE billing.invoices
@@ -370,62 +373,56 @@ def handle_voided(conn, qbo_invoice_id, qbo_inv=None, kind="voided"):
     }
 
 
-def main(qbo_invoice_id: str, operation: str = ""):
+def main(qbo_invoice_id: str, operation: str = "", qbo_body: dict | None = None):
     """
     Args:
       qbo_invoice_id: Required. QBO Id of the invoice to refresh.
       operation:      Optional. Webhook operation hint
                       ("Create" | "Update" | "Delete" | "Void" | "Emailed").
                       When provided by the webhook handler, drives the
-                      void/delete branch directly. When called manually
-                      without it, we fall back to detecting void from the
-                      response heuristically.
-
-    Returns one of:
-      {"status": "ok", ...}        normal upsert path
-      {"status": "voided", ...}    invoice voided in QBO
-      {"status": "deleted", ...}   invoice hard-deleted in QBO (404)
-      {"status": "error", ...}
+                      void/delete branch directly. Without it, we detect
+                      void heuristically.
+      qbo_body:       Optional. Pre-fetched QBO Invoice body (e.g. from CDC).
+                      When provided, skips the QBO GET — caller already has
+                      authoritative data. Used by cdc_reconciler to avoid a
+                      redundant fetch per drifted invoice.
     """
     if not qbo_invoice_id:
         return {"status": "error", "error": "qbo_invoice_id required"}
 
     op = (operation or "").lower()
-    print(f"=== refresh_invoice {qbo_invoice_id} (op={op or 'manual'}) ===")
-    access_token, realm_id = refresh_qbo_token()
+    print(f"=== refresh_invoice {qbo_invoice_id} (op={op or 'manual'}, "
+          f"body_provided={qbo_body is not None}) ===")
 
-    resp = qbo_get(f"invoice/{qbo_invoice_id}", access_token, realm_id)
+    qbo_inv = qbo_body
+    if qbo_inv is None:
+        access_token, realm_id = refresh_qbo_token()
+        resp = qbo_get(f"invoice/{qbo_invoice_id}", access_token, realm_id)
 
-    # 404 = hard delete (rare, requires admin in QBO)
-    if resp.status_code == 404:
-        conn = get_db_conn()
-        try:
-            result = handle_voided(conn, qbo_invoice_id, qbo_inv=None, kind="deleted")
-            return {"status": "deleted", "qbo_invoice_id": qbo_invoice_id, **result}
-        finally:
-            conn.close()
+        if resp.status_code == 404:
+            conn = get_db_conn()
+            try:
+                result = handle_voided(conn, qbo_invoice_id, qbo_inv=None, kind="deleted")
+                return {"status": "deleted", "qbo_invoice_id": qbo_invoice_id, **result}
+            finally:
+                conn.close()
 
-    if not resp.ok:
-        return {
-            "status": "error",
-            "error": f"QBO fetch failed: {resp.status_code}",
-            "detail": resp.text[:200],
-        }
+        if not resp.ok:
+            return {
+                "status": "error",
+                "error": f"QBO fetch failed: {resp.status_code}",
+                "detail": resp.text[:200],
+            }
 
-    qbo_inv = (resp.json() or {}).get("Invoice")
-    if not qbo_inv:
-        return {"status": "error", "error": "QBO returned no Invoice"}
+        qbo_inv = (resp.json() or {}).get("Invoice")
+        if not qbo_inv:
+            return {"status": "error", "error": "QBO returned no Invoice"}
 
-    # Void detection: webhook operation == "Void" is authoritative; otherwise
-    # fall back to the heuristic for manual invocations.
     is_voided = (op == "void") or looks_voided(qbo_inv)
 
     if is_voided:
         conn = get_db_conn()
         try:
-            # Make sure the row exists in cache before flagging it. If it's
-            # a brand-new void event for an invoice we never cached, do an
-            # initial upsert so the row is present, then flag it.
             cur = conn.cursor()
             cur.execute("SELECT 1 FROM billing.invoices WHERE qbo_invoice_id = %s",
                         (qbo_invoice_id,))
@@ -440,21 +437,16 @@ def main(qbo_invoice_id: str, operation: str = ""):
         finally:
             conn.close()
 
-    # Normal upsert path
     conn = get_db_conn()
     try:
-        was_new, qbo_invoice_id, prev_memo, qbo_memo = upsert_invoice(conn, qbo_inv)
+        was_new, qbo_invoice_id, prev_memo, qbo_memo, did_write = upsert_invoice(conn, qbo_inv)
         conn.commit()
 
-        # Detect external memo edit: cache had a memo, QBO has a different
-        # one. That means a human edited it in QBO directly (or another
-        # integration did). Treat as user-affirmed:
-        #   - Lock the memo so pre_process re-runs preserve it
-        #   - Strip memo_low_confidence (NN%) from needs_review_reason
-        # We skip this for the new-invoice path (was_new=True) — there's no
-        # prior cache value to compare against, and pre_process is about to
-        # run and set its own lock state.
-        if (not was_new) and prev_memo is not None and qbo_memo is not None \
+        # Memo-edit detection only runs if our upsert actually wrote. If OCC
+        # blocked us (someone newer landed first), skip — prev_memo we read
+        # is stale relative to current cache state, so the comparison would
+        # be wrong.
+        if did_write and (not was_new) and prev_memo is not None and qbo_memo is not None \
                 and prev_memo != qbo_memo:
             cur = conn.cursor()
             cur.execute("""
@@ -477,7 +469,7 @@ def main(qbo_invoice_id: str, operation: str = ""):
                   f"(prev='{prev_memo[:60] if prev_memo else None}', "
                   f"new='{qbo_memo[:60] if qbo_memo else None}')")
 
-        # Always try the WO link — idempotent, no-op when link exists.
+        # WO link is idempotent — safe to run regardless of did_write.
         link_result = link_to_work_order(conn, qbo_invoice_id, qbo_inv.get("DocNumber"))
         conn.commit()
 
@@ -486,11 +478,16 @@ def main(qbo_invoice_id: str, operation: str = ""):
             seeded = seed_awaiting_pre_processing(conn, qbo_invoice_id)
             conn.commit()
 
-        if was_new:
+        if was_new and did_write:
             print(f"  new invoice — link={link_result.get('linked')} seeded={seeded}")
         elif link_result.get("linked"):
             print(f"  existing invoice — backfilled WO link to {link_result.get('wo_numbers')}")
+        elif not did_write:
+            print(f"  upsert no-op (OCC blocked — newer state already in cache)")
 
+        # recheck_invoice_status reads current cache, recomputes — idempotent.
+        # Skip when we just inserted+linked: pre_process_invoice will fire via
+        # trigger and set the right billing_status.
         recheck = None
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         if not (was_new and link_result.get("linked")):
@@ -514,6 +511,7 @@ def main(qbo_invoice_id: str, operation: str = ""):
             "status": "ok",
             "qbo_invoice_id": qbo_invoice_id,
             "was_new": was_new,
+            "did_write": did_write,
             "invoice": _json_safe(dict(invoice_row) if invoice_row else None),
             "link_result": link_result,
             "seeded_awaiting_pre_processing": seeded if was_new else None,

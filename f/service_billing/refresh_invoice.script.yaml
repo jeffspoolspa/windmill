@@ -1,15 +1,9 @@
-summary: Sync memo from QBO; auto-lock + clear low-conf flag on detected
-  external memo edits
-description: 'Two changes to the UPSERT path: (1) memo + statement_memo are now
-  in the upsert column list — previously a user editing the memo in QBO went
-  silently ignored because we never wrote back to cache. (2) When the cache had
-  a memo and QBO returns a different one, treat as user-affirmed: set
-  memo_locked=true and strip memo_low_confidence from needs_review_reason. Pairs
-  with the pre_process_invoice update that locks high-confidence memos at write
-  time.'
+summary: Optional qbo_body + OCC guard on qbo_last_updated_time + did_write return
+description: Adds qbo_body=None param so the cdc_reconciler can call this
+  in-process with the CDC entity body and skip the QBO GET. Adds OCC guard (only
+  writes when EXCLUDED.qbo_last_updated_time is newer). Race losers no-op
+  safely. Memo-edit detection gated on did_write.
 lock: '!inline f/service_billing/refresh_invoice.script.lock'
-concurrency_time_window_s: 0
-concurrent_limit: 5
 has_on_behalf_of: false
 kind: script
 schema: null
