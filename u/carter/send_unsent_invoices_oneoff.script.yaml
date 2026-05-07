@@ -1,0 +1,9 @@
+summary: 'One-shot: send 37 paid-but-never-emailed April invoices'
+description: Backfill for April invoices charged in the May 4 / May 7 batches
+  that the script never emailed. Idempotent — skips any QBO already shows as
+  EmailSent. RHODES, GREG (qbo_customer_id=1773) is intentionally excluded — no
+  customer email on file.
+lock: '!inline u/carter/send_unsent_invoices_oneoff.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
