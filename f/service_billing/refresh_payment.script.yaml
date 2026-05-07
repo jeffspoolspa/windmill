@@ -1,7 +1,9 @@
-summary: Optional qbo_body + OCC guard + did_write return
-description: Adds qbo_body=None so cdc_reconciler can call in-process. OCC guard
-  prevents stale writes from clobbering newer cache. CCTransId verification +
-  linked-invoice rechecks still run regardless of did_write.
+summary: Drop cc_trans_id + cc_status from INSERT/UPDATE — they're GENERATED columns
+description: "billing.customer_payments.cc_trans_id and cc_status are GENERATED
+  ALWAYS columns derived from raw->'CreditCardPayment'->'CreditChargeResponse'.
+  Writing them directly raises 'cannot insert a non-DEFAULT value into column'
+  (was hitting on missing_in_cache path). Fix: just write raw, let the generated
+  columns auto-populate."
 lock: '!inline f/service_billing/refresh_payment.script.lock'
 has_on_behalf_of: false
 kind: script

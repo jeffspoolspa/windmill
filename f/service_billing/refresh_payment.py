@@ -108,20 +108,21 @@ def upsert_payment(conn, qbo_pmt):
     memo                = qbo_pmt.get("PrivateNote")
     payment_method_id   = payment_method_ref.get("value")
     payment_method_name = payment_method_ref.get("name")
-    cc_trans_id         = cc_response.get("CCTransId")
-    cc_status           = cc_response.get("Status")
     qbo_last_updated    = parse_qbo_timestamp(
         (qbo_pmt.get("MetaData") or {}).get("LastUpdatedTime")
     )
 
+    # cc_trans_id and cc_status are GENERATED ALWAYS columns derived from
+    # raw->'CreditCardPayment'->'CreditChargeResponse'. We write raw and
+    # they auto-populate; writing them directly raises a Postgres error.
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
         INSERT INTO billing.customer_payments
           (qbo_payment_id, qbo_customer_id, type, total_amt, unapplied_amt,
            txn_date, ref_num, memo, payment_method_id, payment_method_name,
-           cc_trans_id, cc_status, raw, fetched_at,
+           raw, fetched_at,
            qbo_last_updated_time, sync_state, sync_state_changed_at)
-        VALUES (%s, %s, 'payment', %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        VALUES (%s, %s, 'payment', %s, %s, %s, %s, %s, %s, %s,
                 %s::jsonb, now(), %s, 'synced', now())
         ON CONFLICT (qbo_payment_id) DO UPDATE SET
           qbo_customer_id       = EXCLUDED.qbo_customer_id,
@@ -132,8 +133,6 @@ def upsert_payment(conn, qbo_pmt):
           memo                  = EXCLUDED.memo,
           payment_method_id     = EXCLUDED.payment_method_id,
           payment_method_name   = EXCLUDED.payment_method_name,
-          cc_trans_id           = COALESCE(EXCLUDED.cc_trans_id, billing.customer_payments.cc_trans_id),
-          cc_status             = COALESCE(EXCLUDED.cc_status, billing.customer_payments.cc_status),
           raw                   = EXCLUDED.raw,
           fetched_at            = now(),
           qbo_last_updated_time = EXCLUDED.qbo_last_updated_time,
@@ -147,7 +146,7 @@ def upsert_payment(conn, qbo_pmt):
     """, (
         qbo_payment_id, qbo_customer_id, total_amt, unapplied_amt,
         txn_date, ref_num, memo, payment_method_id, payment_method_name,
-        cc_trans_id, cc_status, _dumps(qbo_pmt), qbo_last_updated,
+        _dumps(qbo_pmt), qbo_last_updated,
     ))
     row = cur.fetchone()
     cur.close()
