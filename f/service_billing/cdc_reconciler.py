@@ -445,8 +445,14 @@ def prune_drift_log(conn, days=DRIFT_LOG_RETENTION_DAYS):
 # ---------------------------------------------------------------------------
 
 def process_entity(conn, entity_type, qbo_entity, schema, table, id_col):
-    """Classify drift + log it + heal via inline refresh. Returns
-    (qbo_updated, drift_kind, refresh_result)."""
+    """Classify drift + log it + heal via inline refresh.
+
+    Returns (qbo_updated_for_cursor, drift_kind, refresh_result).
+
+    `qbo_updated_for_cursor` is None when the inline refresh failed —
+    that prevents the caller from advancing the cursor past an entity
+    we never managed to write, so the next reconciler run will retry.
+    """
     entity_id = qbo_entity["Id"]
     qbo_updated = parse_qbo_timestamp(
         qbo_entity.get("MetaData", {}).get("LastUpdatedTime")
@@ -468,7 +474,9 @@ def process_entity(conn, entity_type, qbo_entity, schema, table, id_col):
             field_diff=snapshot_diff or None,
         )
         refresh_result = trigger_inline_refresh(entity_type, entity_id, qbo_entity)
-        return qbo_updated, "missing_in_cache", refresh_result
+        # On refresh error, hold the cursor at this entity so we retry it.
+        ts_for_cursor = None if (refresh_result and refresh_result.get("error")) else qbo_updated
+        return ts_for_cursor, "missing_in_cache", refresh_result
 
     cached_updated = cached.get("qbo_last_updated_time") or cached.get("qbo_last_updated")
 
@@ -483,7 +491,8 @@ def process_entity(conn, entity_type, qbo_entity, schema, table, id_col):
             field_diff=diff or None,
         )
         refresh_result = trigger_inline_refresh(entity_type, entity_id, qbo_entity)
-        return qbo_updated, "cache_stale", refresh_result
+        ts_for_cursor = None if (refresh_result and refresh_result.get("error")) else qbo_updated
+        return ts_for_cursor, "cache_stale", refresh_result
 
     if qbo_updated < cached_updated:
         # Cache claims newer than QBO — DO NOT call refresh (would replace

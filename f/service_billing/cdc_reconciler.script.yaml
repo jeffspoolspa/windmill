@@ -1,14 +1,9 @@
-summary: In-process refresh imports + field_diff + retention + correct
-  refresh_customer path
-description: 'Imports refresh_invoice/refresh_payment/refresh_customer directly
-  and calls them with qbo_body from CDC. Eliminates redundant QBO GET (one per
-  drifted entity) and async script dispatch overhead. Single source of truth for
-  QBO->cache mapping lives in the refresh modules; OCC guards inside each upsert
-  prevent racing writers from clobbering each other. Field-level {before,after}
-  diffs captured to drift_log.field_diff for forensics. End-of-pass:
-  auto-resolve caught-up cache_ahead entries, flag missing webhooks, prune
-  auto_healed drift older than 30 days. Also fixes wrong customer refresh path
-  (was qbo_customer_sync, now refresh_customer).'
+summary: Hold cursor on inline-refresh failure so next run retries
+description: If trigger_inline_refresh returns an error, process_entity now
+  returns ts_for_cursor=None — the caller skips the cursor advance for that
+  entity. Otherwise a transient or schema-induced upsert failure caused the
+  entity to be skipped permanently. drift_log + refresh_failures still record
+  the failure for visibility.
 lock: '!inline f/service_billing/cdc_reconciler.script.lock'
 has_on_behalf_of: false
 kind: script
