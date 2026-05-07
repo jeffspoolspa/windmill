@@ -1,10 +1,11 @@
-summary: send_invoice_email gains force=True; charge-success + zero-balance
-  paths force-resend the paid copy
-description: Adds force flag to send_invoice_email so the EmailStatus=EmailSent
-  skip can be bypassed when the post-charge use case needs a fresh paid copy
-  delivered. Charge-success path (primary + orphan recovery) and zero-balance
-  credits-applied path now both call with force=True. Email-only path keeps the
-  default skip behavior.
+summary: 'Honor credit_review_overridden_at: skip pre-override credits at process time'
+description: "process_invoice's credit re-check was halting on credits the user
+  had already overridden during pre-process — Newton Richard's invoice was stuck
+  in a needs_review loop because a .96 credit dated 2026-04-06 kept re-surfacing
+  despite an override on 2026-04-30. Fix: filter remaining_credits by txn_date >
+  credit_review_overridden_at. Credits with dates on or before the override are
+  ignored (already reviewed); credits dated AFTER the override are still
+  surfaced as new info."
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

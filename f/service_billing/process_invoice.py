@@ -697,23 +697,18 @@ def record_qbo_payment(customer_id, invoice_id, amount, charge_result, wo_num, i
             "total_amt": payment.get("TotalAmt")}
 
 
-def send_invoice_email(invoice_id, customer_id, access_token, realm_id, force=False):
-    """POST /invoice/{id}/send.
+def send_invoice_email(invoice_id, customer_id, access_token, realm_id):
+    """POST /invoice/{id}/send. If EmailStatus already EmailSent, skip.
 
-    By default skips when QBO already shows EmailStatus=EmailSent — the
-    skip protects the email-only path from spamming the customer on retry.
-
-    When force=True, the EmailStatus check is bypassed. Used by the
-    charge-success path so the customer always receives a fresh paid copy
-    of the invoice after their card is charged, even if they already got
-    an unpaid copy pre-charge.
-    """
-    if not force:
-        inv_resp = qbo_get(f"invoice/{invoice_id}", access_token, realm_id)
-        if inv_resp.ok:
-            inv = inv_resp.json().get("Invoice", {})
-            if inv.get("EmailStatus") == "EmailSent":
-                return {"success": True, "skipped": True, "reason": "Already sent"}
+    The skip is the desired behavior — we want exactly one customer-facing
+    email per invoice. If something else (office staff, QBO auto-send) has
+    already mailed it, calling here is a no-op. Only invoices that slipped
+    through actually get sent."""
+    inv_resp = qbo_get(f"invoice/{invoice_id}", access_token, realm_id)
+    if inv_resp.ok:
+        inv = inv_resp.json().get("Invoice", {})
+        if inv.get("EmailStatus") == "EmailSent":
+            return {"success": True, "skipped": True, "reason": "Already sent"}
 
     email = fetch_qbo_customer_email(customer_id, access_token, realm_id)
     send_url = f"invoice/{invoice_id}/send"
@@ -728,7 +723,7 @@ def send_invoice_email(invoice_id, customer_id, access_token, realm_id, force=Fa
     )
     if not resp.ok:
         return {"success": False, "error": resp.text[:300], "email_attempted": email}
-    return {"success": True, "sent_to": email, "forced": force}
+    return {"success": True, "sent_to": email}
 
 
 def send_payment_receipt(payment_id, customer_id, access_token, realm_id):
@@ -1082,10 +1077,10 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
     qbo_invoice_id = invoice["qbo_invoice_id"]
 
     # If balance is 0 (covered by credits in pre_process), skip charge — just send invoice email + mark done.
-    # force=True so the customer gets a fresh copy showing the $0 balance with
-    # credits applied, even if they already received an unpaid copy earlier.
+    # send_invoice_email skips if QBO already shows EmailStatus=EmailSent so
+    # we never double-email — only invoices that slipped through actually get sent.
     if balance == 0:
-        email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id, force=True)
+        email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id)
         update_attempt(conn, attempt["id"], email_sent=email["success"],
                         raw_result=_dumps({"email": email, "skipped_charge_zero_balance": True}))
         if not email["success"] and not email.get("skipped"):
@@ -1105,7 +1100,28 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
     # credits + stale credits (>6 months) which are typically irrelevant.
     # If any applicable credit exists, halt and return the invoice to
     # needs_review so a human decides: apply it or charge through.
+    #
+    # Override semantics: when credit_review_overridden_at is set, the user
+    # explicitly reviewed credits during pre-process and chose to proceed.
+    # We ignore credits whose txn_date is on or before the override
+    # timestamp (they were known/visible at review time). Credits with
+    # txn_date AFTER the override are NEW info and still trigger the halt
+    # — Carter shouldn't have to re-override every time a credit appears.
     remaining_credits = load_applicable_credits(conn, customer_id)
+    override_at = invoice.get("credit_review_overridden_at")
+    if remaining_credits and override_at is not None:
+        cutoff = override_at.date() if hasattr(override_at, "date") else override_at
+        kept = []
+        for c in remaining_credits:
+            c_date = c.get("txn_date")
+            # Conservative: keep credits with no date (treat as new/unknown)
+            if c_date is None or c_date > cutoff:
+                kept.append(c)
+        if len(kept) < len(remaining_credits):
+            print(f"  credit override active (overridden_at={override_at.isoformat()}): "
+                  f"ignored {len(remaining_credits) - len(kept)} pre-override credit(s); "
+                  f"{len(kept)} new credit(s) remaining")
+        remaining_credits = kept
     if remaining_credits:
         total_unapplied = sum(float(c.get("unapplied_amt") or 0) for c in remaining_credits)
         reason = f"credits_available ({len(remaining_credits)} credit(s), ${total_unapplied:.2f} unapplied)"
@@ -1246,9 +1262,9 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
     # guaranteed (e.g. fresh invoice → immediate charge in same pre-process
     # run). send_invoice_email is idempotent: if QBO already shows
     # EmailStatus=EmailSent it returns {success: True, skipped: True}.
-    inv_email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id, force=True)
-    if inv_email.get("success"):
-        # QBO fires Invoice.Emailed on send; expect that webhook.
+    inv_email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id)
+    if inv_email.get("success") and not inv_email.get("skipped"):
+        # QBO fires Invoice.Emailed only when an actual send happens.
         insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
     receipt = send_payment_receipt(pay["payment_id"], customer_id, access_token, realm_id)
     # email_sent on the attempt tracks the receipt (the financial document);
