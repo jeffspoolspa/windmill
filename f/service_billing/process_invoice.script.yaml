@@ -1,11 +1,10 @@
-summary: Fix Decimal JSON serialization crash on credit re-check halt
-description: Adds _json_default + _dumps helpers (Decimal/date/datetime/UUID
-  safe) and routes every json.dumps call site through them. Was crashing in
-  _process_charge_path credit re-check when invoice had unmatched credits —
-  load_applicable_credits returns NUMERIC unapplied_amt (Decimal) and DATE
-  txn_date which json.dumps cant serialize. The new safety net caught it cleanly
-  (great) but no money moved (the crash was BEFORE the charge call). Same
-  pattern was latent in 9 other json.dumps call sites — all fixed.
+summary: Send paid-invoice email after every successful charge (in addition to receipt)
+description: Adds send_invoice_email + Invoice webhook expectation in both the
+  primary charge-success path and the orphan-recovery path. Customer now
+  receives a paid copy of the invoice alongside the payment receipt — matches
+  the email-only path which already sends the invoice as the deliverable.
+  send_invoice_email is idempotent (skips if EmailStatus=EmailSent) so re-runs
+  are safe.
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

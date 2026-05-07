@@ -1227,8 +1227,20 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
     # updates the invoice cache as a side effect, and the auto-promote
     # trigger flips billing_status to processed.
 
-    # Send receipt (best-effort — financial state already correct)
+    # Send the now-paid invoice + payment receipt (best-effort — financial
+    # state is already correct). We always send the invoice itself even
+    # after a charge so the customer has a paid copy alongside the receipt;
+    # they're complementary documents and pre-charge sends are not always
+    # guaranteed (e.g. fresh invoice → immediate charge in same pre-process
+    # run). send_invoice_email is idempotent: if QBO already shows
+    # EmailStatus=EmailSent it returns {success: True, skipped: True}.
+    inv_email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id)
+    if inv_email.get("success") and not inv_email.get("skipped"):
+        # QBO fires Invoice.Emailed when send succeeds; expect that webhook.
+        insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
     receipt = send_payment_receipt(pay["payment_id"], customer_id, access_token, realm_id)
+    # email_sent on the attempt tracks the receipt (the financial document);
+    # the invoice send is logged in raw_result for the audit trail.
     update_attempt(conn, attempt["id"], email_sent=receipt["success"])
 
     # Refresh cached balance
@@ -1237,13 +1249,16 @@ def _process_charge_path(conn, attempt, invoice, qbo_inv, customer_id, customer_
         refresh_invoice_cache(conn, qbo_invoice_id, fresh)
 
     update_attempt(conn, attempt["id"], status="succeeded",
-                    raw_result=_dumps({"payment": pay, "receipt": receipt}))
+                    raw_result=_dumps({"payment": pay, "receipt": receipt,
+                                        "invoice_email": inv_email}))
     mark_invoice_processed(conn, qbo_invoice_id)
     return _result(qbo_invoice_id, "succeeded",
                    attempt_id=str(attempt["id"]),
                    charge_id=cr["charge_id"],
                    qbo_payment_id=pay["payment_id"],
-                   receipt_sent=receipt["success"])
+                   receipt_sent=receipt["success"],
+                   invoice_email_sent=inv_email["success"],
+                   invoice_email_skipped=inv_email.get("skipped", False))
 
 
 def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer_name,
@@ -1285,6 +1300,10 @@ def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer
     # (so we don't insert an Invoice expectation here either).
     insert_webhook_expectation(conn, "Payment", pay["payment_id"])
 
+    # Same dual-send as the primary charge path: now-paid invoice + receipt.
+    inv_email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id)
+    if inv_email.get("success") and not inv_email.get("skipped"):
+        insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
     receipt = send_payment_receipt(pay["payment_id"], customer_id, access_token, realm_id)
     update_attempt(conn, prior["id"], email_sent=receipt["success"])
 
@@ -1294,13 +1313,16 @@ def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer
 
     update_attempt(conn, prior["id"], status="succeeded",
                     raw_result=_dumps({"orphan_recovery": True, "payment": pay,
-                                            "receipt": receipt}))
+                                            "receipt": receipt,
+                                            "invoice_email": inv_email}))
     mark_invoice_processed(conn, qbo_invoice_id)
     return _result(qbo_invoice_id, "succeeded",
                    attempt_id=str(prior["id"]),
                    charge_id=charge_id,
                    qbo_payment_id=pay["payment_id"],
-                   recovered_from="orphan_or_charge_succeeded")
+                   recovered_from="orphan_or_charge_succeeded",
+                   invoice_email_sent=inv_email["success"],
+                   invoice_email_skipped=inv_email.get("skipped", False))
 
 
 def _process_invoice_only(conn, attempt, invoice, qbo_inv, customer_id, access_token, realm_id):
