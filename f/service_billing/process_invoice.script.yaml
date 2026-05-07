@@ -1,11 +1,13 @@
-summary: 'Honor credit_review_overridden_at: skip pre-override credits at process time'
-description: "process_invoice's credit re-check was halting on credits the user
-  had already overridden during pre-process — Newton Richard's invoice was stuck
-  in a needs_review loop because a .96 credit dated 2026-04-06 kept re-surfacing
-  despite an override on 2026-04-30. Fix: filter remaining_credits by txn_date >
-  credit_review_overridden_at. Credits with dates on or before the override are
-  ignored (already reviewed); credits dated AFTER the override are still
-  surfaced as new info."
+summary: Prior-attempt charge_declined gate now distinguishes real card declines
+  (charge_id NOT NULL) from pre-charge halts
+description: "process_invoice has two layers that mark attempts as
+  'charge_declined': (a) real card declines from Intuit, (b) pre-charge halts
+  (credits_available, no_payment_method) that never touch Intuit. The
+  retry-prevention gate was conflating them, blocking retries even when the
+  prior 'decline' was a credit-review halt that the user has since overridden.
+  Fix: gate only applies when prior.charge_id IS NOT NULL — i.e. an actual
+  charge call landed at Intuit. Pre-charge halts (charge_id IS NULL) bypass the
+  gate freely so override-then-retry works."
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

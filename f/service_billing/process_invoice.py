@@ -845,34 +845,45 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
                        attempt_id=str(prior["id"]))
 
     if prior and prior["status"] == "charge_declined" and not force:
-        # Only halt if the new attempt would do the SAME THING the declined
-        # attempt did. The decline is specific to a (channel, PM) pair — if
-        # the user has switched channels (e.g. credit_card → email) OR
-        # picked a different PM (different card on the same channel), it's
-        # a fresh attempt path, not a retry of the failed one.
-        new_target_pm_id = invoice.get("target_payment_method_id")
-        new_target_pm_id_str = (
-            str(new_target_pm_id) if new_target_pm_id else None
-        )
-        prior_pm_id_str = (
-            str(prior.get("customer_payment_method_id"))
-            if prior.get("customer_payment_method_id") else None
-        )
-        same_attempt_path = (
-            prior.get("channel") == channel
-            and prior_pm_id_str == new_target_pm_id_str
-            and channel != "email"  # email path always safe to re-attempt
-        )
-        if same_attempt_path:
-            mark_invoice_needs_review(
-                conn, qbo_invoice_id,
-                f"charge_declined ({(prior.get('error_message') or 'declined')[:120]})",
+        # Distinguish a REAL card decline from a pre-charge halt that also
+        # writes status='charge_declined' (credits_available, no_payment_method).
+        # Real card declines have a populated charge_id (Intuit assigns one
+        # even on decline) — pre-charge halts never call Intuit so charge_id
+        # stays NULL. The gate only applies to real declines: replaying a
+        # PM that the bank actually rejected without first changing it is
+        # what we want to prevent. A pre-charge halt that's been resolved
+        # (e.g. credit_review_overridden_at set) should retry freely.
+        prior_was_real_decline = bool(prior.get("charge_id"))
+
+        if prior_was_real_decline:
+            # Only halt if the new attempt would do the SAME THING the declined
+            # attempt did. The decline is specific to a (channel, PM) pair —
+            # if the user has switched channels (e.g. credit_card → email)
+            # OR picked a different PM (different card on the same channel),
+            # it's a fresh attempt path, not a retry of the failed one.
+            new_target_pm_id = invoice.get("target_payment_method_id")
+            new_target_pm_id_str = (
+                str(new_target_pm_id) if new_target_pm_id else None
             )
-            return _result(qbo_invoice_id, "needs_human", reason="charge_declined",
-                           error=prior.get("error_message"),
-                           attempt_id=str(prior["id"]),
-                           note="prior attempt declined this same PM; "
-                                "change channel/PM or pass force=true to retry")
+            prior_pm_id_str = (
+                str(prior.get("customer_payment_method_id"))
+                if prior.get("customer_payment_method_id") else None
+            )
+            same_attempt_path = (
+                prior.get("channel") == channel
+                and prior_pm_id_str == new_target_pm_id_str
+                and channel != "email"  # email path always safe to re-attempt
+            )
+            if same_attempt_path:
+                mark_invoice_needs_review(
+                    conn, qbo_invoice_id,
+                    f"charge_declined ({(prior.get('error_message') or 'declined')[:120]})",
+                )
+                return _result(qbo_invoice_id, "needs_human", reason="charge_declined",
+                               error=prior.get("error_message"),
+                               attempt_id=str(prior["id"]),
+                               note="prior attempt declined this same PM; "
+                                    "change channel/PM or pass force=true to retry")
 
     # Reconciler couldn't determine charge state — human investigation required.
     if prior and prior["status"] == "needs_reconcile_review" and not force:
