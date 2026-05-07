@@ -784,10 +784,30 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
             # path will handle picking one. If both are NULL, we'll fail below.
             preferred_type = "credit_card"  # pessimistic default — picker will refine
         else:
+            # Pre-flight error: write a stub processing_attempts row so the
+            # batch progress modal sees this invoice was actually touched
+            # (instead of leaving it "Queued" forever) AND flip the invoice
+            # to needs_review with a clear reason. The recheck_invoice_status
+            # fix should prevent this state in the first place; this is the
+            # belt-and-suspenders for any invoice that slips through.
+            err = (f"invalid preferred_payment_type '{preferred_type}' and no "
+                   f"legacy payment_method to fall back to (re-run pre_process_invoice)")
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("""
+                INSERT INTO billing.processing_attempts
+                  (qbo_invoice_id, wo_number, invoice_number, stage, status,
+                   dry_run, charge_amount, idempotency_key, error_message)
+                VALUES (%s, %s, %s, 'process', 'error',
+                        %s, 0, gen_random_uuid(), %s)
+                RETURNING id
+            """, (qbo_invoice_id, wo_number, invoice_number, dry_run, err[:500]))
+            attempt_id = cur.fetchone()["id"]
+            cur.close()
+            conn.commit()
+            mark_invoice_needs_review(conn, qbo_invoice_id, err[:200])
             return _result(qbo_invoice_id, "error",
-                           error=f"invalid preferred_payment_type '{preferred_type}' "
-                                 f"and no legacy payment_method to fall back to "
-                                 f"(re-run pre_process_invoice)")
+                           attempt_id=str(attempt_id),
+                           error=err)
 
     # Channel for this attempt mirrors the decision: 'email' for email path,
     # else the type that'll be charged. Stored on processing_attempts.channel

@@ -1,13 +1,12 @@
-summary: Prior-attempt charge_declined gate now distinguishes real card declines
-  (charge_id NOT NULL) from pre-charge halts
-description: "process_invoice has two layers that mark attempts as
-  'charge_declined': (a) real card declines from Intuit, (b) pre-charge halts
-  (credits_available, no_payment_method) that never touch Intuit. The
-  retry-prevention gate was conflating them, blocking retries even when the
-  prior 'decline' was a credit-review halt that the user has since overridden.
-  Fix: gate only applies when prior.charge_id IS NOT NULL — i.e. an actual
-  charge call landed at Intuit. Pre-charge halts (charge_id IS NULL) bypass the
-  gate freely so override-then-retry works."
+summary: WAL stub on preferred_payment_type pre-flight error so batch modal sees
+  the failure
+description: "Pre-flight error path for invalid preferred_payment_type was
+  returning silently without creating a processing_attempts row. The batch
+  progress modal subscribes to processing_attempts and showed those invoices as
+  'Queued' forever. Fix: write a status='error' attempt row + flip invoice to
+  needs_review so the modal renders the failure visibly. Pairs with the
+  billing.recheck_invoice_status fix that prevents un-pre-processed invoices
+  from being promoted to ready_to_process in the first place."
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script
