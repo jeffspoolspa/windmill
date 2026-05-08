@@ -1,0 +1,12 @@
+summary: 'Outbox-pattern worker: drains awaiting_pre_processing service invoices
+  reliably'
+description: Replaces the pg_net trigger as the primary mechanism for getting
+  WO-linked invoices through pre_process. Every 60s, queries for stuck invoices
+  (awaiting_pre_processing + WO-linked + never pre-processed + >2min old), calls
+  pre_process_invoice.main() in-process for each. Hard cap at 25 per tick. The
+  pg_net trigger was at-most-once and dropped requests under burst load; this is
+  the at-least-once backstop that makes the system deterministic.
+lock: '!inline f/service_billing/dispatch_pre_processing.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
