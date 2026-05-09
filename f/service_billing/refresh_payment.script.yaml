@@ -1,9 +1,5 @@
-summary: Drop cc_trans_id + cc_status from INSERT/UPDATE — they're GENERATED columns
-description: "billing.customer_payments.cc_trans_id and cc_status are GENERATED
-  ALWAYS columns derived from raw->'CreditCardPayment'->'CreditChargeResponse'.
-  Writing them directly raises 'cannot insert a non-DEFAULT value into column'
-  (was hitting on missing_in_cache path). Fix: just write raw, let the generated
-  columns auto-populate."
+summary: Drop manual recheck loop (Phase 2B)
+description: fn_set_credits_ok_from_payment trigger handles fan-out automatically.
 lock: '!inline f/service_billing/refresh_payment.script.lock'
 has_on_behalf_of: false
 kind: script

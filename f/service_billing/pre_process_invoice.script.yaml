@@ -1,13 +1,7 @@
-summary: Strengthen O'Brien memo prompt with explicit format/counter-examples +
-  3 new few-shots
-description: The LLM was producing memos like Volleyball Pool Heat Exchanger
-  Diagnosis (pool name in body, no tag) instead of the required Heat Exchanger
-  Diagnosis (VOLLEYBALL) format. Reformatted the rule with structured numbered
-  steps, added an explicit list of CORRECT and WRONG examples (one matching the
-  actual failure case), and added 3 new O'Brien few-shot examples covering the
-  volleyball pool drained scenario and other variants. Existing low-confidence
-  flag still triggers for missing tags as a safety net. No deterministic
-  post-processor.
+summary: 'Phase 2B-slim: enrichment-only'
+description: Pre_process now writes only enrichment_ok + pre_processed_at +
+  source-of-truth fields. billing_status owned by projection trigger from
+  20260508000007.
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

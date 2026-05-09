@@ -57,10 +57,16 @@ def get_db_conn():
 
 def find_stuck_invoices(conn, limit: int = PER_TICK_LIMIT):
     """Stuck = awaiting_pre_processing AND linked-to-billable-WO AND never
-    pre-processed AND has been sitting that way for at least the grace window.
+    pre-processed AND subtotal_ok=true AND sitting >= grace window.
 
     The WO-link filter is essential — without it we'd also try to pre-process
     maintenance autopay invoices (separate pipeline, no WO).
+
+    The subtotal_ok=TRUE gate is the single source of truth for "data is
+    self-consistent enough to attempt enrichment." When subtotal_ok is FALSE
+    or NULL, the projection trigger has already routed the invoice to
+    needs_review (subtotal_mismatch reason). Dispatching pre_process on
+    those would just waste a Claude call on data we know is wrong.
     """
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
@@ -77,6 +83,7 @@ def find_stuck_invoices(conn, limit: int = PER_TICK_LIMIT):
            AND w.billable = true
            AND w.skipped_at IS NULL
            AND i.pre_processed_at IS NULL
+           AND i.subtotal_ok IS TRUE
            AND i.fetched_at < now() - make_interval(mins => %s)
          ORDER BY i.fetched_at ASC
          LIMIT %s

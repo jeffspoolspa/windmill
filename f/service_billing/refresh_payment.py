@@ -290,28 +290,17 @@ def main(qbo_payment_id: str, qbo_body: dict | None = None):
         # CC verify reads QBO body + our processing_attempts; safe regardless.
         verification = verify_cc_trans_id(conn, qbo_payment_id, cc_trans_id)
 
-        # Recheck linked invoices' billing_status — also safe regardless of
-        # did_write (reads current state).
-        recheck_results = []
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        for inv_id in linked_invoice_ids:
-            try:
-                cur.execute("SELECT billing.recheck_invoice_status(%s) AS r", (inv_id,))
-                r = cur.fetchone()["r"]
-                recheck_results.append({
-                    "qbo_invoice_id":      inv_id,
-                    "changed":             r.get("changed"),
-                    "prev_billing_status": r.get("prev_billing_status"),
-                    "new_billing_status":  r.get("new_billing_status"),
-                })
-            except Exception as e:
-                recheck_results.append({
-                    "qbo_invoice_id": inv_id,
-                    "error":          str(e)[:200],
-                })
+        # NO MANUAL RECHECK NEEDED.
+        # The upsert_payment write to billing.customer_payments fires the
+        # fn_set_credits_ok_from_payment trigger automatically, which fans
+        # out to every linked invoice for the affected customer, recomputes
+        # credits_ok, and (via the projection trigger) updates billing_status
+        # in-place. This used to be a manual loop calling recheck_invoice_status
+        # — now the database handles it inside the same transaction as the
+        # cache write. See migrations 20260508000003..7.
+        recheck_results: list[dict] = []  # kept for return-shape compat
 
         conn.commit()
-        cur.close()
 
         if not did_write:
             print(f"  upsert no-op (OCC blocked — newer state already in cache)")

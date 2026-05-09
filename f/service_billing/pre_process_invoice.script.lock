@@ -9,5 +9,5 @@ idna==3.13
 psycopg2-binary==2.9.12
 requests==2.33.1
 typing-extensions==4.15.0
-urllib3==2.6.3
-wmill==1.694.0
+urllib3==2.7.0
+wmill==1.699.0

@@ -1,8 +1,5 @@
-summary: Optional qbo_body + OCC guard on qbo_last_updated_time + did_write return
-description: Adds qbo_body=None param so the cdc_reconciler can call this
-  in-process with the CDC entity body and skip the QBO GET. Adds OCC guard (only
-  writes when EXCLUDED.qbo_last_updated_time is newer). Race losers no-op
-  safely. Memo-edit detection gated on did_write.
+summary: Drop manual recheck call (Phase 2B)
+description: Per-source maintenance triggers fire from billing.invoices column changes.
 lock: '!inline f/service_billing/refresh_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

@@ -1,3 +1,45 @@
+# f/service_billing/pre_process_invoice
+#
+# Phase 2B-slim: pre_process is now deterministic enrichment-only.
+#
+# Old behavior (pre Phase 2B):
+#   - Computed and wrote subtotal_ok, enrichment_ok, billing_status,
+#     needs_review_reason directly. Built reason strings inline. Set the
+#     billing.skip_recheck flag to suppress fan-out triggers during writes.
+#
+# New behavior (after Phase 2B):
+#   - Pre_process owns ONLY two indicator-adjacent writes: enrichment_ok
+#     (success/failure of its own work) and pre_processed_at (run timestamp).
+#   - Plus its source-of-truth fields: payment_method, preferred_payment_type,
+#     target_payment_method_id, qbo_class, memo, statement_memo, memo_locked,
+#     credits_applied. These are values pre_process derives or applies; they
+#     are NOT indicators — the source-table maintenance triggers recompute
+#     payment_method_ok / credits_ok from them automatically.
+#   - billing_status and needs_review_reason are owned by the projection
+#     trigger. Pre_process does not write them. Final status is whatever
+#     projection decided after pre_process's UPDATE fired the maintenance +
+#     projection cascade. We read it back at the end for the return value.
+#   - Subtotal check is removed entirely. The dispatch worker gates on
+#     subtotal_ok=TRUE before firing pre_process. The subtotal_ok column
+#     is owned by triggers on work_orders.sub_total / invoices.subtotal
+#     changes — pre_process never writes it.
+#   - Credits are still applied (auto-match against open credits). Each
+#     successful apply decrements customer_payments.unapplied_amt, which
+#     fires fn_set_credits_ok_from_payment → recomputes credits_ok →
+#     projection. Pre_process doesn't append a "credit_review" reason
+#     itself; projection composes it from credits_ok=false.
+#   - skip_recheck flag removed. The new triggers are deterministic and
+#     idempotent; running them during pre_process is correct, not wasteful
+#     enough to justify the flag complexity.
+#
+# Failure paths write enrichment_ok=false + pre_processed_at=now(). The
+# projection trigger then sets billing_status=needs_review with reason
+# "enrichment_failed". Phase 2C will preserve detail (current memo prompt
+# error, low-confidence percentage, etc.) — for now the failure detail is
+# lost when status is composed by projection. Tradeoff accepted: simpler
+# Phase 2B, richer failure detail comes in 2C via processing_attempts
+# stage='pre_process' rows or a new enrichment_error column.
+
 import calendar
 import json
 import random
@@ -14,12 +56,10 @@ SUPABASE_RESOURCE = "u/carter/supabase"
 OPENAI_KEY_VAR = "f/service_billing/OPENAI_API_KEY"
 
 MEMO_CONFIDENCE_THRESHOLD = 0.85
-SUBTOTAL_TOLERANCE = 0.02
 MODEL = "gpt-4o-mini"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 STAGE_FETCHING = "fetching_qbo"
-STAGE_SUBTOTAL = "checking_subtotal"
 STAGE_CREDITS = "matching_credits"
 STAGE_PAYMENT_METHOD = "resolving_payment_method"
 STAGE_CLASS = "deriving_class"
@@ -51,16 +91,6 @@ def get_db_conn():
         dbname=sb.get("dbname", "postgres"), user=sb["user"],
         password=sb["password"], sslmode=sb.get("sslmode", "require"),
     )
-
-
-def set_skip_recheck(conn, on: bool):
-    cur = conn.cursor()
-    if on:
-        cur.execute("SET billing.skip_recheck = 'on'")
-    else:
-        cur.execute("RESET billing.skip_recheck")
-    conn.commit()
-    cur.close()
 
 
 def set_stage(conn, qbo_invoice_id, stage):
@@ -227,19 +257,6 @@ def resolve_payment_for_invoice(conn, qbo_customer_id, wo_description):
     )
     target_pm_id = cur.fetchone()[0]
 
-    anomaly = False
-    if preferred == 'email':
-        cur.execute("""
-            SELECT
-              bool_or(is_active = true) AS has_active,
-              bool_or(is_active = true AND is_default = true) AS has_default
-            FROM billing.customer_payment_methods
-            WHERE qbo_customer_id = %s
-        """, (qbo_customer_id,))
-        row = cur.fetchone()
-        if row and row[0] and not row[1]:
-            anomaly = True
-
     cur.close()
 
     legacy = 'invoice' if preferred == 'email' else 'on_file'
@@ -248,7 +265,6 @@ def resolve_payment_for_invoice(conn, qbo_customer_id, wo_description):
         "preferred":              preferred,
         "legacy_payment_method":  legacy,
         "target_pm_id":           target_pm_id,
-        "anomaly_no_default":     anomaly,
     }
 
 
@@ -542,6 +558,9 @@ def match_credits_to_wo(open_credits, wo, qbo_inv=None):
 
 
 def refresh_invoice_cache(conn, qbo_invoice_id, qbo_invoice):
+    """Write QBO body fields back to the cache. The UPDATE on
+    billing.invoices.subtotal fires the maintenance trigger that recomputes
+    subtotal_ok and (via projection) billing_status."""
     subtotal = qbo_invoice_subtotal(qbo_invoice)
     balance = float(qbo_invoice.get("Balance", 0) or 0)
     total_amt = float(qbo_invoice.get("TotalAmt", 0) or 0)
@@ -556,67 +575,101 @@ def refresh_invoice_cache(conn, qbo_invoice_id, qbo_invoice):
     conn.commit(); cur.close()
 
 
-def fail_flag(conn, qbo_invoice_id, billing_status, reason):
+def mark_enrichment_failed(conn, qbo_invoice_id):
+    """Failure path. Writes enrichment_ok=false + pre_processed_at=now().
+    The projection trigger then sets billing_status=needs_review with reason
+    'enrichment_failed'.
+
+    Phase 2C will preserve detail (the specific error: low-confidence %,
+    API 5xx, QBO write failure, etc.) by either (a) logging a row to
+    processing_attempts stage='pre_process' or (b) writing to a new
+    enrichment_error column. For Phase 2B the failure detail is lost when
+    projection composes the reason.
+    """
     cur = conn.cursor()
     cur.execute("""
         UPDATE billing.invoices
-        SET billing_status = %s,
-            needs_review_reason = %s,
+        SET enrichment_ok    = false,
             pre_processed_at = now(),
             pre_process_stage = %s
         WHERE qbo_invoice_id = %s
-    """, (billing_status, reason, STAGE_DONE, qbo_invoice_id))
+    """, (STAGE_DONE, qbo_invoice_id))
     conn.commit(); cur.close()
 
 
 def write_result(conn, qbo_invoice_id, result):
+    """Write enrichment_ok + source-of-truth fields. The single UPDATE fires
+    the maintenance triggers (payment_method_ok recompute, etc.) and the
+    projection trigger which writes billing_status + needs_review_reason.
+
+    Pre_process does NOT write billing_status, needs_review_reason, or
+    subtotal_ok — those are owned by triggers post Phase 2B.
+    """
     cur = conn.cursor()
     cur.execute("""
         UPDATE billing.invoices
-        SET billing_status = %s, needs_review_reason = %s,
-            payment_method = %s,
-            preferred_payment_type = %s,
-            target_payment_method_id = %s,
-            qbo_class = %s, memo = %s, statement_memo = %s,
-            memo_locked = %s,
-            subtotal_ok = %s, enrichment_ok = %s,
-            credits_applied = %s::jsonb,
-            pre_processed_at = now(),
-            pre_process_stage = %s
+        SET payment_method            = %s,
+            preferred_payment_type    = %s,
+            target_payment_method_id  = %s,
+            qbo_class                 = %s,
+            memo                      = %s,
+            statement_memo            = %s,
+            memo_locked               = %s,
+            enrichment_ok             = %s,
+            credits_applied           = %s::jsonb,
+            pre_processed_at          = now(),
+            pre_process_stage         = %s
         WHERE qbo_invoice_id = %s
-    """, (result["billing_status"], result.get("needs_review_reason"),
-          result.get("payment_method"),
+    """, (result.get("payment_method"),
           result.get("preferred_payment_type"),
           result.get("target_payment_method_id"),
-          result.get("qbo_class"), result.get("memo"), result.get("statement_memo"),
+          result.get("qbo_class"),
+          result.get("memo"),
+          result.get("statement_memo"),
           bool(result.get("memo_locked")),
-          result.get("subtotal_ok"), result.get("enrichment_ok"),
+          result.get("enrichment_ok"),
           json.dumps(result.get("credits_applied") or []),
           STAGE_DONE,
           qbo_invoice_id))
     conn.commit(); cur.close()
 
 
+def read_projected_status(conn, qbo_invoice_id):
+    """After write_result, read back what the projection trigger decided.
+    Returns (billing_status, needs_review_reason)."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT billing_status, needs_review_reason FROM billing.invoices WHERE qbo_invoice_id = %s",
+        (qbo_invoice_id,),
+    )
+    row = cur.fetchone(); cur.close()
+    return (row[0], row[1]) if row else (None, None)
+
+
 def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=False):
-    issues = []
-    result = {"qbo_invoice_id": qbo_invoice_id, "billing_status": None, "needs_review_reason": None,
-              "payment_method": None, "preferred_payment_type": None, "target_payment_method_id": None,
-              "qbo_class": None, "memo": None, "statement_memo": None,
-              "subtotal_ok": None, "enrichment_ok": None, "credits_applied": []}
+    result = {
+        "qbo_invoice_id": qbo_invoice_id,
+        "payment_method": None, "preferred_payment_type": None, "target_payment_method_id": None,
+        "qbo_class": None, "memo": None, "statement_memo": None, "memo_locked": False,
+        "enrichment_ok": None, "credits_applied": [],
+    }
 
     invoice = load_invoice(conn, qbo_invoice_id)
     if not invoice:
         return {"status": "error", "qbo_invoice_id": qbo_invoice_id, "error": "not found"}
     if invoice.get("billing_status") == "processed":
         return {"status": "skipped", "qbo_invoice_id": qbo_invoice_id,
-                "reason": "already processed (terminal - revert first to re-run)"}
+                "reason": "already processed (terminal)"}
     if not force and invoice.get("billing_status") == "processing":
         return {"status": "skipped", "qbo_invoice_id": qbo_invoice_id,
                 "reason": "already processing"}
+
     wo = load_linked_wo(conn, qbo_invoice_id)
     if not wo:
-        fail_flag(conn, qbo_invoice_id, "needs_review", "no_linked_wo")
-        return {"status": "needs_review", "qbo_invoice_id": qbo_invoice_id, "reason": "no_linked_wo"}
+        # Dispatcher's WO-link filter should prevent this; if we somehow get
+        # here, mark enrichment failed so we don't retry endlessly.
+        mark_enrichment_failed(conn, qbo_invoice_id)
+        return {"status": "error", "qbo_invoice_id": qbo_invoice_id, "error": "no_linked_wo"}
 
     wo_number = wo["wo_number"]
     qbo_customer_id = invoice.get("qbo_customer_id")
@@ -625,78 +678,69 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
         set_stage(conn, qbo_invoice_id, STAGE_FETCHING)
         qbo_inv = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
         if not qbo_inv:
-            fail_flag(conn, qbo_invoice_id, "needs_review", "qbo_fetch_failed")
-            return {"status": "needs_review", "qbo_invoice_id": qbo_invoice_id, "reason": "qbo_fetch_failed"}
+            mark_enrichment_failed(conn, qbo_invoice_id)
+            return {"status": "needs_review", "qbo_invoice_id": qbo_invoice_id,
+                    "reason": "qbo_fetch_failed"}
 
-        set_stage(conn, qbo_invoice_id, STAGE_SUBTOTAL)
-        wo_subtotal = float(wo.get("sub_total") or 0)
-        qbo_subtotal = qbo_invoice_subtotal(qbo_inv)
-        subtotal_ok = True
-        if wo_subtotal > 0 and qbo_subtotal > 0 and abs(wo_subtotal - qbo_subtotal) >= SUBTOTAL_TOLERANCE:
-            subtotal_ok = False
-            issues.append(f"subtotal_mismatch (WO ${wo_subtotal:.2f} vs QBO ${qbo_subtotal:.2f})")
-        result["subtotal_ok"] = subtotal_ok
+        # NO subtotal check here — dispatch worker gates on subtotal_ok=TRUE
+        # before firing pre_process. The maintenance trigger on
+        # invoices.subtotal/work_orders.sub_total maintains subtotal_ok.
 
-        if subtotal_ok:
-            set_stage(conn, qbo_invoice_id, STAGE_CREDITS)
-            open_credits = load_open_credits(conn, qbo_customer_id)
-            matches = match_credits_to_wo(open_credits, wo, qbo_inv)
-            matched_ids = {c["qbo_payment_id"] for c, _, _ in matches}
-            remaining = float(qbo_inv.get("Balance", 0) or 0)
-            for credit, amt, reason in matches:
-                amt = min(amt, remaining)
-                if amt <= 0:
-                    break
-                ar = apply_credit(credit["qbo_payment_id"], credit["type"], qbo_inv["Id"],
-                                  qbo_inv.get("CustomerRef"), amt, access_token, realm_id)
-                result["credits_applied"].append({"credit_id": credit["qbo_payment_id"], "amount": amt,
-                                                   "reason": reason, "success": ar["success"],
-                                                   "error": ar.get("error")})
-                if ar["success"]:
-                    remaining -= amt
-                    cur = conn.cursor()
-                    cur.execute(
-                        "UPDATE billing.customer_payments SET unapplied_amt = GREATEST(unapplied_amt - %s, 0) "
-                        "WHERE qbo_payment_id = %s",
-                        (amt, credit["qbo_payment_id"]),
-                    )
-                    cur.execute(
-                        """INSERT INTO billing.payment_invoice_links
-                             (payment_id, invoice_id, amount, applied_via)
-                           VALUES (%s, %s, %s, 'auto_match')
-                           ON CONFLICT (payment_id, invoice_id) DO UPDATE SET
-                             amount = billing.payment_invoice_links.amount + EXCLUDED.amount""",
-                        (credit["qbo_payment_id"], qbo_invoice_id, amt),
-                    )
-                    conn.commit(); cur.close()
-
-            unmatched = [
-                c for c in open_credits
-                if c["qbo_payment_id"] not in matched_ids
-                and float(c.get("unapplied_amt") or 0) > 0
-            ]
-            if unmatched and not invoice.get("credit_review_overridden_at"):
-                total_unmatched = sum(float(c.get("unapplied_amt") or 0) for c in unmatched)
-                issues.append(
-                    f"credit_review ({len(unmatched)} unmatched credit(s), "
-                    f"${total_unmatched:.2f} unapplied)"
+        # Apply credits — each successful apply decrements
+        # customer_payments.unapplied_amt, which fires
+        # fn_set_credits_ok_from_payment → recompute credits_ok →
+        # projection. Pre_process does NOT append a credit_review reason
+        # itself; projection composes it from credits_ok=false.
+        set_stage(conn, qbo_invoice_id, STAGE_CREDITS)
+        open_credits = load_open_credits(conn, qbo_customer_id)
+        matches = match_credits_to_wo(open_credits, wo, qbo_inv)
+        remaining = float(qbo_inv.get("Balance", 0) or 0)
+        for credit, amt, reason in matches:
+            amt = min(amt, remaining)
+            if amt <= 0:
+                break
+            ar = apply_credit(credit["qbo_payment_id"], credit["type"], qbo_inv["Id"],
+                              qbo_inv.get("CustomerRef"), amt, access_token, realm_id)
+            result["credits_applied"].append({
+                "credit_id": credit["qbo_payment_id"], "amount": amt,
+                "reason": reason, "success": ar["success"],
+                "error": ar.get("error"),
+            })
+            if ar["success"]:
+                remaining -= amt
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE billing.customer_payments SET unapplied_amt = GREATEST(unapplied_amt - %s, 0) "
+                    "WHERE qbo_payment_id = %s",
+                    (amt, credit["qbo_payment_id"]),
                 )
+                cur.execute(
+                    """INSERT INTO billing.payment_invoice_links
+                         (payment_id, invoice_id, amount, applied_via)
+                       VALUES (%s, %s, %s, 'auto_match')
+                       ON CONFLICT (payment_id, invoice_id) DO UPDATE SET
+                         amount = billing.payment_invoice_links.amount + EXCLUDED.amount""",
+                    (credit["qbo_payment_id"], qbo_invoice_id, amt),
+                )
+                conn.commit(); cur.close()
 
+        # Resolve payment method (fires fn_set_payment_method_ok_from_invoice
+        # via the per-source trigger when these columns change in write_result)
         set_stage(conn, qbo_invoice_id, STAGE_PAYMENT_METHOD)
         pm_resolution = resolve_payment_for_invoice(
-            conn, qbo_customer_id, wo.get("work_description")
+            conn, qbo_customer_id, wo.get("work_description"),
         )
         result["preferred_payment_type"]   = pm_resolution["preferred"]
         result["payment_method"]           = pm_resolution["legacy_payment_method"]
         result["target_payment_method_id"] = pm_resolution["target_pm_id"]
 
-        if pm_resolution["anomaly_no_default"]:
-            issues.append("no_default_payment_method")
-
+        # Derive QBO class
         set_stage(conn, qbo_invoice_id, STAGE_CLASS)
-        result["qbo_class"] = derive_qbo_class(wo.get("assigned_to"), wo.get("type"),
-                                                wo.get("work_description"))
+        result["qbo_class"] = derive_qbo_class(
+            wo.get("assigned_to"), wo.get("type"), wo.get("work_description"),
+        )
 
+        # Memo generation
         set_stage(conn, qbo_invoice_id, STAGE_MEMO)
         enrichment_ok = True
         composed = None
@@ -734,10 +778,10 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
             memo_locked_new = False
             if "error" in memo_result:
                 enrichment_ok = False
-                issues.append(f"memo_api_error ({memo_result['error'][:80]})")
+                print(f"  memo failed: {memo_result['error'][:120]}")
             elif memo_result.get("confidence", 0) < MEMO_CONFIDENCE_THRESHOLD:
                 enrichment_ok = False
-                issues.append(f"memo_low_confidence ({memo_result.get('confidence', 0):.0%})")
+                print(f"  memo low confidence: {memo_result.get('confidence', 0):.0%}")
                 memo_text = memo_result.get("memo")
             else:
                 memo_text = memo_result.get("memo")
@@ -749,6 +793,7 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
             result["memo_locked"] = memo_locked_new
             print(f"  memo via {memo_source}: {composed} (locked={memo_locked_new})")
 
+        # Write to QBO if enrichment OK
         if enrichment_ok and composed:
             set_stage(conn, qbo_invoice_id, STAGE_WRITING)
             classes = fetch_qbo_classes(access_token, realm_id)
@@ -759,34 +804,40 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
             uw = update_qbo_invoice_with_retry(qbo_invoice_id, updates, access_token, realm_id)
             if not uw["success"]:
                 enrichment_ok = False
-                issues.append(f"qbo_write_failed ({uw.get('error', '')[:80]})")
+                print(f"  qbo write failed: {(uw.get('error') or '')[:120]}")
             else:
                 qbo_inv = uw.get("invoice") or fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id) or qbo_inv
 
         result["enrichment_ok"] = enrichment_ok
+
+        # Refresh local cache from QBO (may fire subtotal_ok recompute trigger)
         refresh_invoice_cache(conn, qbo_invoice_id, qbo_inv)
 
-        if issues:
-            result["billing_status"] = "needs_review"
-            result["needs_review_reason"] = ", ".join(issues)
-        else:
-            result["billing_status"] = "ready_to_process"
+        # The single UPDATE here fires payment_method_ok recompute (because
+        # payment_method/target/preferred changed) AND projection (because
+        # enrichment_ok + pre_processed_at changed). Final billing_status
+        # is set by projection.
         write_result(conn, qbo_invoice_id, result)
 
-        return {"status": result["billing_status"], "qbo_invoice_id": qbo_invoice_id,
-                "wo_number": wo_number, "subtotal_ok": subtotal_ok, "enrichment_ok": enrichment_ok,
-                "payment_method": result["payment_method"],
-                "preferred_payment_type": result["preferred_payment_type"],
-                "target_payment_method_id": result["target_payment_method_id"],
-                "qbo_class": result["qbo_class"],
-                "memo": composed,
-                "credits_applied_count": len([c for c in result["credits_applied"] if c["success"]]),
-                "needs_review_reason": result.get("needs_review_reason")}
+        final_status, final_reason = read_projected_status(conn, qbo_invoice_id)
+
+        return {
+            "status":                   final_status or "unknown",
+            "qbo_invoice_id":           qbo_invoice_id,
+            "wo_number":                wo_number,
+            "enrichment_ok":            enrichment_ok,
+            "payment_method":           result["payment_method"],
+            "preferred_payment_type":   result["preferred_payment_type"],
+            "target_payment_method_id": result["target_payment_method_id"],
+            "qbo_class":                result["qbo_class"],
+            "memo":                     composed,
+            "credits_applied_count":    len([c for c in result["credits_applied"] if c["success"]]),
+            "needs_review_reason":      final_reason,
+        }
 
     except Exception as e:
         try:
-            fail_flag(conn, qbo_invoice_id, "needs_review",
-                      f"pre_processing_error: {str(e)[:200]}")
+            mark_enrichment_failed(conn, qbo_invoice_id)
         except Exception:
             pass
         return {"status": "error", "qbo_invoice_id": qbo_invoice_id, "error": str(e)[:500]}
@@ -802,8 +853,6 @@ def main(qbo_invoice_id: str = None, force: bool = False,
     print(f"=== pre_process_invoice (bulk={bulk_all}, limit={limit}, force={force}, sleep={sleep_ms}ms, model={MODEL}) ===")
     conn = get_db_conn()
     try:
-        set_skip_recheck(conn, True)
-
         access_token, realm_id = refresh_qbo_token()
         api_key = wmill.get_variable(OPENAI_KEY_VAR)
 
@@ -844,8 +893,4 @@ def main(qbo_invoice_id: str = None, force: bool = False,
         return {"status": "success", "total": len(targets), "stats": stats, "sample": sample}
 
     finally:
-        try:
-            set_skip_recheck(conn, False)
-        except Exception:
-            pass
         conn.close()

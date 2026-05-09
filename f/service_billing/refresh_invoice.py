@@ -485,21 +485,14 @@ def main(qbo_invoice_id: str, operation: str = "", qbo_body: dict | None = None)
         elif not did_write:
             print(f"  upsert no-op (OCC blocked — newer state already in cache)")
 
-        # recheck_invoice_status reads current cache, recomputes — idempotent.
-        # Skip when we just inserted+linked: pre_process_invoice will fire via
-        # trigger and set the right billing_status.
-        recheck = None
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        if not (was_new and link_result.get("linked")):
-            try:
-                cur.execute("SELECT billing.recheck_invoice_status(%s) AS r",
-                            (qbo_invoice_id,))
-                recheck = cur.fetchone()["r"]
-            except Exception as e:
-                print(f"  recheck skipped: {e}")
-                conn.rollback()
-        cur.close()
-        conn.commit()
+        # NO MANUAL RECHECK NEEDED.
+        # The upsert_invoice write to billing.invoices fires the per-source
+        # maintenance triggers automatically (subtotal change → subtotal_ok,
+        # payment cols → payment_method_ok, etc.) and the projection trigger
+        # updates billing_status in-place. Bootstrap also fires from the
+        # invoice INSERT side or from the work_orders link transition.
+        # See migrations 20260508000003..7.
+        recheck = None  # kept for return-shape compat
 
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT * FROM billing.invoices WHERE qbo_invoice_id = %s",
