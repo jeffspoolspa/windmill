@@ -1,13 +1,11 @@
-summary: Sync new payment fields + clear all non-deterministic reasons on save
-description: 'Two fixes: (1) When payment_method changes, also derive + write
-  preferred_payment_type AND target_payment_method_id (legacy
-  invoice→email/NULL, on_file→most-recent-default-PMs type+uuid). Without this,
-  changing the dropdown to email-only would leave process_invoice charging the
-  same card. (2) Clear needs_review_reason entirely instead of regex-stripping
-  just memo_low_confidence. The user is asserting the invoice is ready, so
-  non-deterministic reasons (user_revert, qbo_write_failed, memo_api_error)
-  should all be wiped. recheck_invoice_status rebuilds the deterministic ones
-  (subtotal_mismatch, credit_review) afterward if they still apply.'
+summary: Stamp preferred_payment_type_overridden_at when PM actually changes
+description: Closes the gap where triage classification edits silently overwrote
+  payment_method without flagging the row as user-overridden — leaving it
+  eligible for re-resolve by the new fn_resolve_pm_on_cpm_change trigger or the
+  customer-cascade RPC. CASE in the UPDATE only stamps when
+  payment_method/preferred_payment_type/target_payment_method_id actually differ
+  from the old values, so a no-op submit (user opens editor without touching PM)
+  does not falsely mark the row as overridden.
 lock: '!inline f/service_billing/push_invoice_edits.script.lock'
 has_on_behalf_of: false
 kind: script

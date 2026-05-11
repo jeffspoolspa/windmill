@@ -4,23 +4,12 @@
 # Pushes memo + statement_memo + qbo_class to QBO via PATCH, then writes the
 # same values to billing.invoices along with memo_locked=true + enrichment_ok=true.
 #
-# Different from pre_process_invoice:
-#   - Does NOT regenerate the memo via OpenAI (user-supplied)
-#   - Does NOT re-derive qbo_class (user-supplied)
-#   - Sets memo_locked=true (user has affirmed the memo)
-#   - Clears needs_review_reason entirely (user is asserting the issues are
-#     resolved); recheck_invoice_status rebuilds the deterministic ones
-#     (subtotal_mismatch, credit_review) if still applicable
-#   - Sets enrichment_ok=true (the QBO write went through)
-#   - When payment_method changes, ALSO updates preferred_payment_type AND
-#     target_payment_method_id so the new model stays in sync. 'invoice' →
-#     'email' + NULL target. 'on_file' → most-recent-default PM's type + uuid.
-#
-# After this script returns, billing.recheck_invoice_status (called inline)
-# recomputes billing_status based on the now-cleaner needs_review_reason
-# and whatever subtotal/credit reasons may remain.
-#
-# Idempotent — safe to retry. The QBO PATCH is sparse, won't double-apply.
+# Phase 2C-touch: when payment_method (or its derived preferred/target)
+# actually CHANGES, also stamp preferred_payment_type_overridden_at = now().
+# That marks this row as "user has chosen the PM" so the customer-level
+# cascade RPC AND the customer_payment_methods auto-resolve trigger both
+# skip it. Without the stamp, those flows would silently overwrite manual
+# edits the moment the customer's wallet changes.
 
 import json
 import time
@@ -132,18 +121,13 @@ def derive_new_payment_fields(conn, qbo_invoice_id, payment_method):
       'on_file' (charge) → preferred_payment_type=<type>,   target=<uuid>
                           where <type, uuid> is the customer's most-recently-
                           added default PM. Falls back to ('email', NULL) if
-                          no default is on file (matches resolve_preferred_
-                          payment_type's behavior).
-
-    Returns (preferred_payment_type, target_payment_method_id). Returns
-    (None, None) if payment_method is None or unknown — caller should leave
-    those fields untouched.
+                          no default is on file.
     """
     if payment_method == "invoice":
         return ("email", None)
 
     if payment_method != "on_file":
-        return (None, None)  # unknown — don't touch
+        return (None, None)
 
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
@@ -160,9 +144,6 @@ def derive_new_payment_fields(conn, qbo_invoice_id, payment_method):
     row = cur.fetchone()
     cur.close()
     if not row:
-        # No default PM available — process_invoice would fail anyway,
-        # so resolve to email to keep the user from clicking Process and
-        # hitting a no_payment_method error.
         return ("email", None)
     return (row["type"], str(row["id"]))
 
@@ -183,7 +164,6 @@ def main(qbo_invoice_id: str,
     print(f"=== push_invoice_edits {qbo_invoice_id} ===")
     access_token, realm_id = refresh_qbo_token()
 
-    # Build the QBO PATCH body. Only include fields the user provided.
     updates = {}
     composed_memo = memo
     composed_statement = statement_memo or memo
@@ -202,10 +182,8 @@ def main(qbo_invoice_id: str,
         updates["ClassRef"] = {"value": class_id, "name": qbo_class}
 
     if not updates:
-        # Nothing to push to QBO — just update cache state for memo_locked + enrichment
         print("  no QBO fields to push, updating cache flags only")
     else:
-        # Push to QBO
         result = update_qbo_with_retry(qbo_invoice_id, updates, access_token, realm_id)
         if not result["success"]:
             return {"status": "error",
@@ -213,11 +191,6 @@ def main(qbo_invoice_id: str,
                     "qbo_invoice_id": qbo_invoice_id}
         print(f"  QBO PATCH ok ({list(updates.keys())})")
 
-        # Track that we expect a corresponding QBO webhook back. The webhook
-        # handler's confirm_webhook_expectation RPC will mark this row
-        # confirmed when the matching invoice.update event arrives. If it
-        # doesn't arrive within the grace window, the cdc_reconciler flips
-        # the row to status='missing' — surfaces in the sync issues badge.
         try:
             _exp_conn = get_db_conn()
             _cur = _exp_conn.cursor()
@@ -230,22 +203,10 @@ def main(qbo_invoice_id: str,
             _cur.close()
             _exp_conn.close()
         except Exception as e:
-            # Expectation tracking is observability — don't fail the operation
-            # if we can't write the row. Log and continue.
             print(f"  (webhook_expectation insert failed: {e})")
 
-    # Update the cache. Set memo_locked=true and enrichment_ok=true. Clear
-    # needs_review_reason entirely — the user is asserting the invoice is
-    # ready, so any non-deterministic reasons (memo_low_confidence,
-    # user_revert, qbo_write_failed, memo_api_error) should be wiped.
-    # recheck_invoice_status rebuilds the deterministic reasons
-    # (subtotal_mismatch, credit_review) below if any still apply.
-    #
-    # If payment_method changed, ALSO derive + write the new vocab fields
-    # so process_invoice charges the right thing.
     conn = get_db_conn()
     try:
-        # Derive new payment fields from the legacy dropdown value.
         new_preferred, new_target = (None, None)
         explicitly_set_pm_fields = False
         if payment_method is not None:
@@ -257,10 +218,13 @@ def main(qbo_invoice_id: str,
 
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        # Two UPDATE shapes depending on whether we're changing PM fields.
-        # Avoids overwriting target_payment_method_id with NULL when the
-        # user didn't change payment_method.
         if explicitly_set_pm_fields:
+            # CASE expression compares the OLD column values (as they exist
+            # in the row before this UPDATE applies) to the new params.
+            # Only stamp the override timestamp when the PM actually changes
+            # — otherwise a no-op submit (user opened the editor without
+            # touching PM) would falsely mark the row as user-overridden
+            # and prevent future cascade flows from updating it.
             cur.execute("""
                 UPDATE billing.invoices
                 SET memo                      = COALESCE(%s, memo),
@@ -269,6 +233,13 @@ def main(qbo_invoice_id: str,
                     payment_method            = %s,
                     preferred_payment_type    = %s,
                     target_payment_method_id  = %s,
+                    preferred_payment_type_overridden_at = CASE
+                      WHEN payment_method            IS DISTINCT FROM %s
+                        OR preferred_payment_type    IS DISTINCT FROM %s
+                        OR target_payment_method_id  IS DISTINCT FROM %s
+                      THEN now()
+                      ELSE preferred_payment_type_overridden_at
+                    END,
                     memo_locked               = true,
                     enrichment_ok             = true,
                     needs_review_reason       = NULL,
@@ -277,8 +248,10 @@ def main(qbo_invoice_id: str,
                 RETURNING qbo_invoice_id, billing_status, needs_review_reason,
                           memo, statement_memo, qbo_class, payment_method,
                           preferred_payment_type, target_payment_method_id,
+                          preferred_payment_type_overridden_at,
                           memo_locked, enrichment_ok
             """, (composed_memo, composed_statement, qbo_class,
+                  payment_method, new_preferred, new_target,
                   payment_method, new_preferred, new_target,
                   qbo_invoice_id))
         else:
@@ -295,6 +268,7 @@ def main(qbo_invoice_id: str,
                 RETURNING qbo_invoice_id, billing_status, needs_review_reason,
                           memo, statement_memo, qbo_class, payment_method,
                           preferred_payment_type, target_payment_method_id,
+                          preferred_payment_type_overridden_at,
                           memo_locked, enrichment_ok
             """, (composed_memo, composed_statement, qbo_class, qbo_invoice_id))
 
@@ -304,9 +278,6 @@ def main(qbo_invoice_id: str,
             return {"status": "error",
                     "error": f"invoice {qbo_invoice_id} not in billing.invoices"}
 
-        # Run recheck to recompute billing_status from current state. Will
-        # rebuild needs_review_reason with subtotal_mismatch / credit_review
-        # if they still apply against the now-clean slate.
         cur.execute("SELECT billing.recheck_invoice_status(%s) AS r", (qbo_invoice_id,))
         recheck = cur.fetchone()["r"]
         conn.commit()
@@ -315,15 +286,11 @@ def main(qbo_invoice_id: str,
         return {
             "status": "ok",
             "qbo_invoice_id": qbo_invoice_id,
-            "billing_status": recheck.get("new_billing_status"),
+            "billing_status": recheck.get("new_billing_status") if isinstance(recheck.get("projection"), dict) else recheck.get("new_billing_status"),
             "needs_review_reason": recheck.get("new_reason"),
             "invoice": _json_safe(dict(updated)),
             "qbo_pushed": list(updates.keys()),
-            "recheck": _json_safe({
-                "changed": recheck.get("changed"),
-                "prev_billing_status": recheck.get("prev_billing_status"),
-                "new_billing_status": recheck.get("new_billing_status"),
-            }),
+            "recheck": _json_safe(recheck),
         }
     finally:
         conn.close()
