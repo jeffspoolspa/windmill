@@ -1,18 +1,24 @@
+# Pull customer payment methods (cards + ACH) from QBO Payments API v4
+# into billing.customer_payment_methods.
+#
+# Only fetches for customers that have billable WOs (invoice_number IS NOT NULL).
+# Uses the same QBO Payments v4 endpoints as the original
+# service_billing_processing script:
+#   - GET /quickbooks/v4/customers/{id}/cards
+#   - GET /quickbooks/v4/customers/{id}/bank-accounts
+#
+# Schedule: every 4 hours.
+
 import requests
 import wmill
 import psycopg2
 import psycopg2.extras
 import uuid
-import time
 from datetime import datetime, timezone
 
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
-CACHE_TTL_MINUTES = 240
-
-# Per-endpoint retry policy — cards/bank-accounts calls fail transiently under load
-QBO_RETRY_ATTEMPTS = 3
-QBO_RETRY_BACKOFF_S = 1.5
+CACHE_TTL_MINUTES = 240  # 4 hours — don't re-fetch recently cached customers
 
 
 def refresh_qbo_token():
@@ -40,75 +46,53 @@ def get_db_conn():
     )
 
 
-def _get_with_retry(url, access_token):
-    """Hit a QBO Payments endpoint with exponential backoff.
-    Returns (response_or_None, succeeded_bool).
-    Succeeded=True ONLY if the final call returned 2xx — that's our contract
-    for trusting the result enough to use it as grounds for deactivating
-    stored methods. 404 counts as success (customer has no methods of this
-    type) but network / 5xx / 429 exhaust the retries and return False.
-    """
-    last_err = None
-    for attempt in range(QBO_RETRY_ATTEMPTS):
-        headers = {"Authorization": f"Bearer {access_token}",
-                   "Accept": "application/json",
-                   "Request-Id": str(uuid.uuid4())}
-        try:
-            r = requests.get(url, headers=headers, timeout=30)
-        except (requests.Timeout, requests.ConnectionError) as e:
-            last_err = f"network: {e}"
-        else:
-            if r.ok or r.status_code == 404:
-                return r, True
-            # 429 / 5xx / other transient — retry
-            if r.status_code >= 500 or r.status_code == 429:
-                last_err = f"{r.status_code}: {r.text[:120]}"
-            else:
-                # 4xx that isn't 429 — definitive failure, don't retry
-                return r, False
-        if attempt + 1 < QBO_RETRY_ATTEMPTS:
-            time.sleep(QBO_RETRY_BACKOFF_S * (2 ** attempt))
-    print(f"  retry exhausted for {url}: {last_err}")
-    return None, False
-
-
-def fetch_methods_for_customer(customer_id, access_token):
-    """Returns (methods, fetch_fully_ok).
-
-    fetch_fully_ok=True ONLY when BOTH the cards AND bank-accounts queries
-    completed successfully (or returned 404). This is the gate on whether
-    we trust the result enough to deactivate stored methods — previous
-    bug: silent fetch errors returned empty methods, which then blanket-
-    deactivated real cards. Now the caller only deactivates when
-    fetch_fully_ok is True.
-    """
+def fetch_methods_for_customer(customer_id: str, access_token: str) -> list[dict]:
+    """Fetch cards + ACH for one customer from QBO Payments API v4."""
     methods = []
-    cards_url = f"https://api.intuit.com/quickbooks/v4/customers/{customer_id}/cards"
-    banks_url = f"https://api.intuit.com/quickbooks/v4/customers/{customer_id}/bank-accounts"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Request-Id": str(uuid.uuid4()),
+    }
 
-    cards_resp, cards_ok = _get_with_retry(cards_url, access_token)
-    if cards_ok and cards_resp is not None and cards_resp.status_code == 200:
-        try:
-            body = cards_resp.json()
-            for c in (body if isinstance(body, list) else []):
+    # Cards
+    try:
+        r = requests.get(
+            f"https://api.intuit.com/quickbooks/v4/customers/{customer_id}/cards",
+            headers=headers, timeout=20,
+        )
+        if r.ok:
+            cards = r.json() if isinstance(r.json(), list) else []
+            for c in cards:
                 if c.get("status") == "ACTIVE":
                     methods.append({
-                        "type": "card",
+                        # cpm_type_check requires 'credit_card' or 'ach'.
+                        # The legacy 'card' value crashed every scheduled
+                        # run since the constraint was tightened.
+                        "type": "credit_card",
                         "qbo_payment_method_id": c.get("id"),
                         "card_brand": c.get("cardType"),
                         "last_four": (c.get("number") or "")[-4:],
+                        # QBO returns `default: true/false` on each card
+                        # (not nullable). Read it through; ACH does the
+                        # same below. Without this, every card came in
+                        # is_default=false, breaking PM-type resolution.
                         "is_default": bool(c.get("default")),
                         "raw": c,
                     })
-        except ValueError as e:
-            print(f"  card parse error for {customer_id}: {e}")
-            cards_ok = False
+    except Exception as e:
+        print(f"  card error for {customer_id}: {e}")
 
-    banks_resp, banks_ok = _get_with_retry(banks_url, access_token)
-    if banks_ok and banks_resp is not None and banks_resp.status_code == 200:
-        try:
-            body = banks_resp.json()
-            for b in (body if isinstance(body, list) else []):
+    # ACH
+    try:
+        r = requests.get(
+            f"https://api.intuit.com/quickbooks/v4/customers/{customer_id}/bank-accounts",
+            headers={**headers, "Request-Id": str(uuid.uuid4())},
+            timeout=20,
+        )
+        if r.ok:
+            banks = r.json() if isinstance(r.json(), list) else []
+            for b in banks:
                 if b.get("verificationStatus") in ("VERIFIED", "NOT_VERIFIED"):
                     methods.append({
                         "type": "ach",
@@ -118,133 +102,117 @@ def fetch_methods_for_customer(customer_id, access_token):
                         "is_default": bool(b.get("default")),
                         "raw": b,
                     })
-        except ValueError as e:
-            print(f"  bank parse error for {customer_id}: {e}")
-            banks_ok = False
+    except Exception as e:
+        print(f"  bank error for {customer_id}: {e}")
 
-    fetch_fully_ok = cards_ok and banks_ok
-    return methods, fetch_fully_ok
+    return methods
 
 
-def main(force_refresh: bool = False, customer_ids: list = None):
-    """
-    Pull QBO customer payment methods (cards + ACH) into billing.customer_payment_methods.
+def main(force_refresh: bool = False):
+    """Refresh customer payment methods for all billable customers.
 
     Args:
-      force_refresh: ignore the CACHE_TTL_MINUTES window, re-fetch every customer.
-      customer_ids: if passed, ONLY fetch these customers (used for targeted
-                    single-customer refreshes from process_invoice or manual recovery).
+        force_refresh: If True, re-fetch all regardless of cache TTL.
     """
-    print(f"=== pull_customer_payment_methods (force={force_refresh}, "
-          f"scoped={customer_ids is not None}) ===")
+    print(f"=== pull_customer_payment_methods started (force={force_refresh}) ===")
+
     conn = get_db_conn()
     cur = conn.cursor()
 
-    if customer_ids:
-        target_ids = [str(c) for c in customer_ids if c]
-    elif force_refresh:
+    # Find unique QBO customer IDs for billable WOs
+    if force_refresh:
         cur.execute("""
-            SELECT DISTINCT i.qbo_customer_id FROM public.work_orders w
+            SELECT DISTINCT i.qbo_customer_id
+            FROM public.work_orders w
             JOIN billing.invoices i ON i.doc_number = w.invoice_number
             WHERE w.invoice_number IS NOT NULL AND i.qbo_customer_id IS NOT NULL
         """)
-        target_ids = [r[0] for r in cur.fetchall()]
     else:
-        cur.execute(f"""
-            SELECT DISTINCT i.qbo_customer_id FROM public.work_orders w
+        # Skip customers we already fetched recently
+        cur.execute("""
+            SELECT DISTINCT i.qbo_customer_id
+            FROM public.work_orders w
             JOIN billing.invoices i ON i.doc_number = w.invoice_number
             WHERE w.invoice_number IS NOT NULL AND i.qbo_customer_id IS NOT NULL
               AND i.qbo_customer_id NOT IN (
                 SELECT DISTINCT qbo_customer_id FROM billing.customer_payment_methods
-                WHERE fetched_at > now() - interval '{CACHE_TTL_MINUTES} minutes'
+                WHERE fetched_at > now() - interval '%s minutes'
               )
-        """)
-        target_ids = [r[0] for r in cur.fetchall()]
-    cur.close()
-    print(f"Target: {len(target_ids)} customer(s)")
+        """ % CACHE_TTL_MINUTES)
 
-    if not target_ids:
+    customer_ids = [r[0] for r in cur.fetchall()]
+    cur.close()
+    print(f"Found {len(customer_ids)} customers to fetch")
+
+    if not customer_ids:
         conn.close()
         return {"status": "nothing_to_fetch", "customers": 0}
 
     access_token = refresh_qbo_token()
     now = datetime.now(timezone.utc)
     cur = conn.cursor()
-    stats = {"customers": 0, "with_methods": 0, "total_methods": 0,
-             "cards": 0, "ach": 0, "default_cards": 0, "default_ach": 0,
-             "skipped_fetch_error": 0}
 
-    for i, cid in enumerate(target_ids):
-        methods, fetch_ok = fetch_methods_for_customer(cid, access_token)
-        stats["customers"] += 1
+    stats = {"customers": 0, "with_methods": 0, "total_methods": 0, "cards": 0, "ach": 0}
 
-        if not fetch_ok:
-            # SAFE MODE: we didn't get a clean answer from QBO. Do NOT blanket-
-            # deactivate this customer's stored methods — that would nuke real
-            # data on a transient failure. Log and move on; they'll be retried
-            # next run (or via targeted customer_ids=[cid] call).
-            stats["skipped_fetch_error"] += 1
-            print(f"  customer {cid}: fetch incomplete, leaving existing rows untouched")
-            conn.commit()
-            continue
+    stats["customer_errors"] = 0
+    for i, cid in enumerate(customer_ids):
+        try:
+            methods = fetch_methods_for_customer(cid, access_token)
+            stats["customers"] += 1
 
-        # Fetch was clean → upsert what we got and deactivate anything not present.
-        # Two-step: first INSERT/UPDATE the live set (marks them is_active=true),
-        # then UPDATE is_active=false for anything fetched_at is older than `now`.
-        live_ids = []
-        if methods:
-            stats["with_methods"] += 1
-            for m in methods:
-                cur.execute("""
-                    INSERT INTO billing.customer_payment_methods
-                        (qbo_customer_id, qbo_payment_method_id, type, card_brand,
-                         last_four, is_default, is_active, raw, fetched_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, true, %s::jsonb, %s)
-                    ON CONFLICT (qbo_customer_id, qbo_payment_method_id) DO UPDATE SET
-                        type = EXCLUDED.type,
-                        card_brand = EXCLUDED.card_brand,
-                        last_four = EXCLUDED.last_four,
-                        is_default = EXCLUDED.is_default,
-                        is_active = true,
-                        raw = EXCLUDED.raw,
-                        fetched_at = EXCLUDED.fetched_at
-                """, (cid, m["qbo_payment_method_id"], m["type"], m["card_brand"],
-                      m["last_four"], m["is_default"],
-                      psycopg2.extras.Json(m.get("raw", {})), now))
-                live_ids.append(m["qbo_payment_method_id"])
-                stats["total_methods"] += 1
-                if m["type"] == "card":
-                    stats["cards"] += 1
-                    if m["is_default"]:
-                        stats["default_cards"] += 1
-                else:
-                    stats["ach"] += 1
-                    if m["is_default"]:
-                        stats["default_ach"] += 1
-
-        # Deactivate methods we DIDN'T see in this successful fetch.
-        if live_ids:
+            # Deactivate old entries for this customer
             cur.execute(
-                "UPDATE billing.customer_payment_methods "
-                "SET is_active = false "
-                "WHERE qbo_customer_id = %s "
-                "  AND qbo_payment_method_id NOT IN %s "
-                "  AND is_active = true",
-                (cid, tuple(live_ids)),
-            )
-        else:
-            # Customer truly has no active methods right now — deactivate all.
-            cur.execute(
-                "UPDATE billing.customer_payment_methods "
-                "SET is_active = false "
-                "WHERE qbo_customer_id = %s AND is_active = true",
+                "UPDATE billing.customer_payment_methods SET is_active = false WHERE qbo_customer_id = %s",
                 (cid,),
             )
-        conn.commit()
+
+            if methods:
+                stats["with_methods"] += 1
+                for m in methods:
+                    cur.execute("""
+                        INSERT INTO billing.customer_payment_methods
+                            (qbo_customer_id, qbo_payment_method_id, type, card_brand,
+                             last_four, is_default, is_active, raw, fetched_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, true, %s::jsonb, %s)
+                        ON CONFLICT (qbo_customer_id, qbo_payment_method_id) DO UPDATE SET
+                            type = EXCLUDED.type, card_brand = EXCLUDED.card_brand,
+                            last_four = EXCLUDED.last_four, is_default = EXCLUDED.is_default,
+                            is_active = true, raw = EXCLUDED.raw, fetched_at = EXCLUDED.fetched_at
+                    """, (
+                        cid, m["qbo_payment_method_id"], m["type"],
+                        m["card_brand"], m["last_four"], m["is_default"],
+                        psycopg2.extras.Json(m.get("raw", {})), now,
+                    ))
+                    stats["total_methods"] += 1
+                    if m["type"] == "credit_card":
+                        stats["cards"] += 1
+                    else:
+                        stats["ach"] += 1
+
+            conn.commit()
+        except Exception as e:
+            # Per-customer isolation. Without this, one bad row (a new
+            # cardType QBO returns that we don't model, an unexpected
+            # constraint, etc.) crashes the entire sweep and every
+            # downstream customer goes unfetched — exactly how RIGBY's
+            # card got missed for days. Roll back the failed transaction,
+            # log, and keep going.
+            stats["customer_errors"] += 1
+            print(f"  ERROR on customer {cid}: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            # Re-acquire cursor — psycopg2 cursors can become unusable
+            # after a transaction abort.
+            cur.close()
+            cur = conn.cursor()
+
         if (i + 1) % 50 == 0:
-            print(f"  ... {i + 1}/{len(target_ids)} customers")
+            print(f"  ... {i + 1}/{len(customer_ids)} customers (errors so far: {stats['customer_errors']})")
 
     cur.close()
     conn.close()
+
     print(f"=== done: {stats} ===")
     return {"status": "success", **stats}

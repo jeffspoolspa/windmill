@@ -1,14 +1,11 @@
-summary: Pull customer payment methods — safe-deactivate on fetch success only
-description: 'CRITICAL fix: previous version blanket-deactivated a customer
-  BEFORE fetching, then if the QBO cards/bank-accounts call errored silently
-  (network / 429 / 5xx / exception), the customer was left with no active
-  methods even though their real card was still in QBO. This happened to
-  customer 1635 (ROWAN, JOSEPH) — their VISA x7939 got marked inactive on a
-  transient failure. New behavior: retry with exponential backoff, and only
-  deactivate stored methods when we get a CLEAN answer from both the cards AND
-  bank-accounts endpoints. On transient failure, leave existing rows untouched
-  and retry next cycle. Also adds optional customer_ids arg so process_invoice
-  or admin actions can force a single-customer refresh.'
+summary: 'Fix cpm_type_check crash: card -> credit_card; per-customer
+  try/except; honor QBO default flag'
+description: "Three fixes for the silently-failing every-4h sweep: (1) write
+  type=credit_card not card so the cpm_type_check constraint accepts the row;
+  (2) read the actual default boolean from QBO instead of hardcoding False (was
+  breaking PM-type resolution); (3) wrap the per-customer loop in try/except +
+  rollback so one bad row doesn't skip every downstream customer (this is what
+  hid RIGBY RON 1737 for days)."
 lock: '!inline f/service_billing/pull_customer_payment_methods.script.lock'
 has_on_behalf_of: false
 kind: script
