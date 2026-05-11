@@ -5,9 +5,9 @@ charset-normalizer==3.4.7
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
-idna==3.13
+idna==3.14
 psycopg2-binary==2.9.12
 requests==2.33.1
 typing-extensions==4.15.0
 urllib3==2.7.0
-wmill==1.697.0
+wmill==1.699.0

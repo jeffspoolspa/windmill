@@ -1,12 +1,12 @@
-summary: WAL stub on preferred_payment_type pre-flight error so batch modal sees
-  the failure
-description: "Pre-flight error path for invalid preferred_payment_type was
-  returning silently without creating a processing_attempts row. The batch
-  progress modal subscribes to processing_attempts and showed those invoices as
-  'Queued' forever. Fix: write a status='error' attempt row + flip invoice to
-  needs_review so the modal renders the failure visibly. Pairs with the
-  billing.recheck_invoice_status fix that prevents un-pre-processed invoices
-  from being promoted to ready_to_process in the first place."
+summary: Bump invoice DueDate to today before emailing in invoice-only path
+description: 'Invoices that sat in needs_review/ready_to_process for several
+  days were emailing customers with stale (often past) DueDate values, showing
+  OVERDUE badges in the QBO portal that confused people paying immediately upon
+  receipt. New helper bump_invoice_due_date_to_today PATCHes the QBO invoice
+  with todays date, no-ops when DueDate is already current/future. Called from
+  _process_invoice_only just before send_invoice_email. Tracks an Invoice
+  webhook expectation when the PATCH actually fires so the cache refreshes via
+  refresh_invoice. Best-effort: PATCH failure does not block the email.'
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

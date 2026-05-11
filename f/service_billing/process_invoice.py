@@ -697,6 +697,57 @@ def record_qbo_payment(customer_id, invoice_id, amount, charge_result, wo_num, i
             "total_amt": payment.get("TotalAmt")}
 
 
+def bump_invoice_due_date_to_today(invoice_id, access_token, realm_id, max_retries=2):
+    """PATCH the QBO invoice's DueDate to today's date.
+
+    Why: invoices that sit in needs_review / ready_to_process for several
+    days arrive at the customer with a stale (often past) DueDate, showing
+    an "OVERDUE" badge in the QBO customer portal that confuses people
+    paying immediately upon receipt. Resetting to today gives them a
+    fresh due date aligned with when the email actually lands.
+
+    Skips the PATCH (no-op) when the existing DueDate is already today
+    or in the future, both to save an API call and to preserve any
+    intentional future-dated terms.
+
+    Returns:
+      {"success": True, "skipped": True, "current_due_date": "..."} when no PATCH needed
+      {"success": True, "old_due_date": "...", "new_due_date": "today"}
+      {"success": False, "error": "..."}
+    """
+    today_iso = date.today().isoformat()
+    last_err = None
+    for attempt in range(max_retries + 1):
+        inv_resp = qbo_get(f"invoice/{invoice_id}", access_token, realm_id)
+        if not inv_resp.ok:
+            if attempt < max_retries:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            return {"success": False, "error": f"fetch failed: {inv_resp.status_code}"}
+        inv = inv_resp.json().get("Invoice")
+        if not inv:
+            return {"success": False, "error": "QBO returned no Invoice"}
+        current = inv.get("DueDate")
+        if current and current >= today_iso:
+            return {"success": True, "skipped": True, "current_due_date": current}
+        body = {
+            "Id":         inv["Id"],
+            "SyncToken":  inv["SyncToken"],
+            "sparse":     True,
+            "DueDate":    today_iso,
+        }
+        resp = qbo_post("invoice", access_token, realm_id, body)
+        if resp.ok:
+            return {"success": True, "old_due_date": current, "new_due_date": today_iso}
+        text = resp.text[:400]
+        last_err = f"HTTP {resp.status_code}: {text}"
+        if "Stale Object" in text and attempt < max_retries:
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        break
+    return {"success": False, "error": last_err}
+
+
 def send_invoice_email(invoice_id, customer_id, access_token, realm_id):
     """POST /invoice/{id}/send. If EmailStatus already EmailSent, skip.
 
@@ -1387,6 +1438,26 @@ def _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer
 def _process_invoice_only(conn, attempt, invoice, qbo_inv, customer_id, access_token, realm_id):
     """preferred_payment_type='email' — email IS the deliverable. Auto-retry email up to N times."""
     qbo_invoice_id = invoice["qbo_invoice_id"]
+
+    # Bump DueDate to today before emailing. Invoices that sat in
+    # needs_review / ready_to_process for several days otherwise arrive at
+    # the customer with a stale (often past) DueDate, showing OVERDUE in
+    # the QBO portal. The helper no-ops when DueDate is already today or
+    # future, so this is cheap on freshly-arrived invoices.
+    due_update = bump_invoice_due_date_to_today(qbo_invoice_id, access_token, realm_id)
+    if due_update.get("success") and not due_update.get("skipped"):
+        # PATCH on the invoice fires Invoice.Update from QBO → cache
+        # refresh via refresh_invoice. Track the expectation so the badge
+        # surfaces if it ever doesn't arrive.
+        insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
+        print(f"  bumped DueDate {due_update.get('old_due_date')} → {due_update.get('new_due_date')}")
+    elif due_update.get("skipped"):
+        print(f"  DueDate already current ({due_update.get('current_due_date')}), no PATCH")
+    else:
+        # Best-effort — if the PATCH fails, still send the email rather
+        # than block the customer-facing deliverable on an aesthetic fix.
+        print(f"  DueDate bump failed (continuing with email): {due_update.get('error')}")
+
     last_err = None
     for i in range(EMAIL_RETRY_MAX):
         email = send_invoice_email(qbo_invoice_id, customer_id, access_token, realm_id)
