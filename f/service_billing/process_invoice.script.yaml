@@ -1,12 +1,11 @@
-summary: Bump invoice DueDate to today before emailing in invoice-only path
-description: 'Invoices that sat in needs_review/ready_to_process for several
-  days were emailing customers with stale (often past) DueDate values, showing
-  OVERDUE badges in the QBO portal that confused people paying immediately upon
-  receipt. New helper bump_invoice_due_date_to_today PATCHes the QBO invoice
-  with todays date, no-ops when DueDate is already current/future. Called from
-  _process_invoice_only just before send_invoice_email. Tracks an Invoice
-  webhook expectation when the PATCH actually fires so the cache refreshes via
-  refresh_invoice. Best-effort: PATCH failure does not block the email.'
+summary: force=true on a prior-succeeded invoice with open balance creates a
+  recovery attempt
+description: 'Previously the prior=succeeded gate short-circuited regardless of
+  force or QBO balance. New behavior: when force=true AND the invoice still has
+  a balance > 0 (e.g. the original processing was email-only and the customer
+  never paid), the script falls through to create a fresh processing_attempts
+  row and charges the live balance against the now-explicit
+  target_payment_method_id. Without force, behavior unchanged.'
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

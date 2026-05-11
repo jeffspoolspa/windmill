@@ -886,18 +886,37 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
         return _retry_record_payment_for_orphan(conn, prior, invoice, customer_id, customer_name,
                                                  wo_number, invoice_number, access_token, realm_id)
 
-    # Already done
+    # Already done — but check QBO balance: a prior succeeded attempt
+    # might leave an open balance (partial credit applied later, refund,
+    # or the original processing was email-only without a charge). When
+    # the user explicitly requests force=True (e.g., clicking "Charge
+    # balance" on the WO detail page), let a new attempt run for the
+    # remaining balance instead of refusing.
     if prior and prior["status"] == "succeeded":
-        # Verify QBO state aligns
-        qbo_inv, err = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
-        if qbo_inv:
-            refresh_invoice_cache(conn, qbo_invoice_id, qbo_inv)
-            if float(qbo_inv.get("Balance", 0) or 0) == 0:
+        qbo_inv_chk, err = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
+        if qbo_inv_chk:
+            refresh_invoice_cache(conn, qbo_invoice_id, qbo_inv_chk)
+            chk_balance = float(qbo_inv_chk.get("Balance", 0) or 0)
+            if chk_balance == 0:
                 mark_invoice_processed(conn, qbo_invoice_id)
                 return _result(qbo_invoice_id, "already_succeeded",
                                attempt_id=str(prior["id"]))
-        return _result(qbo_invoice_id, "already_succeeded", attempt_id=str(prior["id"]),
-                       note="prior succeeded but QBO state could not be verified")
+            # Balance > 0 with a prior succeeded attempt. Without force
+            # we preserve the historical behavior (refuse, don't double-
+            # charge anything). With force we fall through to create a
+            # NEW attempt against the current balance — exactly the
+            # "charge open balance" recovery flow.
+            if not force:
+                return _result(qbo_invoice_id, "already_succeeded",
+                               attempt_id=str(prior["id"]),
+                               note=f"prior succeeded; open balance ${chk_balance:.2f} "
+                                    f"— pass force=true to create a recovery attempt")
+            # Fall through with the live balance loaded into qbo_inv_chk
+            # so the rest of the function picks up the recovery amount.
+        elif not force:
+            return _result(qbo_invoice_id, "already_succeeded",
+                           attempt_id=str(prior["id"]),
+                           note="prior succeeded but QBO state could not be verified")
 
     # Halt for human-required states. These pre-flight halts return WITHOUT
     # creating a new attempt row — but the invoice itself should reflect
