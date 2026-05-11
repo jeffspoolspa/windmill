@@ -1,5 +1,6 @@
 version: v2
 locks:
+  f/alerts/send_pending_system_alerts: cbdcc2e4c018d62130c6090e0d2ec846a5d70b9bdbbb634fd34b929dd0464df4
   f/billing_audit/compute_chemical_estimates: 60c854d8abfdebaa6263e2d5370b35bb7d9d3d4180d3671eb7b784908333a91f
   f/billing_audit/load_month: da2460b38f633c93b6327a0e41e2fad0baca7d9b2e3084087d8074fcc1101c5b
   f/billing/apply_maint_credits: e220b37336c6a10fe069c599f8b172c1c98749c522b58be342583d2cc5126db7

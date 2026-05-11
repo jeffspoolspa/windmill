@@ -1,0 +1,9 @@
+summary: Send pending system_alerts via Gmail (cron, every 5 min)
+description: Polls public.system_alerts for rows with status='pending' and sends
+  each via the Gmail service-account (jpsbilling@jeffspoolspa.com). Marks rows
+  as sent or failed (with retry counter). Designed for the card-vault
+  reconciliation-failure alerts but generic — any source can write rows.
+lock: '!inline f/alerts/send_pending_system_alerts.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
