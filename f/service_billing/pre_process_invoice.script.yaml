@@ -1,7 +1,9 @@
-summary: 'Phase 2B-slim: enrichment-only'
-description: Pre_process now writes only enrichment_ok + pre_processed_at +
-  source-of-truth fields. billing_status owned by projection trigger from
-  20260508000007.
+summary: Align QBO TxnDate to wo.completed in the enrichment PATCH
+description: When pre_process pushes memo/class to QBO it now also PATCHes
+  TxnDate to match the linked WOs completion date. Office staff often create the
+  QBO invoice a day or two after the work was done so the customer-facing
+  invoice date was admin-lag-dependent rather than reflecting when service
+  actually happened. No-op when already aligned.
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

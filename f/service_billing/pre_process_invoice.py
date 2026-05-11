@@ -801,6 +801,22 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
             updates = {"PrivateNote": composed, "CustomerMemo": {"value": composed}}
             if class_id:
                 updates["ClassRef"] = {"value": class_id, "name": result["qbo_class"]}
+            # Align QBO's TxnDate (the "invoice date" the customer sees on
+            # the invoice) with the actual work-completion date from ION.
+            # Office staff often create the QBO invoice a day or two after
+            # the work was done; without this PATCH the customer sees the
+            # admin-entered date instead of when we actually did the
+            # service. Only set when it differs to avoid a wasteful round
+            # trip on already-aligned invoices.
+            wo_completed = wo.get("completed")
+            if wo_completed is not None:
+                completed_iso = (
+                    wo_completed.isoformat()
+                    if hasattr(wo_completed, "isoformat")
+                    else str(wo_completed)
+                )[:10]
+                if qbo_inv.get("TxnDate") != completed_iso:
+                    updates["TxnDate"] = completed_iso
             uw = update_qbo_invoice_with_retry(qbo_invoice_id, updates, access_token, realm_id)
             if not uw["success"]:
                 enrichment_ok = False
