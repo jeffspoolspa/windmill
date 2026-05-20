@@ -7,6 +7,23 @@ from datetime import datetime
 GUSTO_API = "https://api.gusto.com"
 
 
+def get_access_token():
+    """Exchange client_credentials for a fresh Gusto OAuth access token."""
+    client_id = wmill.get_variable("f/gusto/client_id")
+    client_secret = wmill.get_variable("f/gusto/client_secret")
+    resp = requests.post(
+        f"{GUSTO_API}/oauth/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        headers={"Accept": "application/json"},
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
 def gusto_get(url, headers, max_retries=5):
     """GET with 429 backoff using the Retry-After header (default 30s)."""
     for attempt in range(max_retries):
@@ -25,10 +42,10 @@ def main():
     supabase = create_client(supa_url, supa_key)
 
     company_id = wmill.get_variable("f/gusto/company_id")
-    token = wmill.get_variable("f/gusto/personal_access_token")
+    access_token = get_access_token()
 
     headers = {
-        'Authorization': f'Bearer {token}',
+        'Authorization': f'Bearer {access_token}',
         'X-Gusto-API-Version': '2025-06-15',
         'Accept': 'application/json'
     }
