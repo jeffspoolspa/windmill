@@ -8,20 +8,32 @@ GUSTO_API = "https://api.gusto.com"
 
 
 def get_access_token():
-    """Exchange client_credentials for a fresh Gusto OAuth access token."""
+    """Exchange refresh_token for a fresh access token. Gusto rotates refresh
+    tokens on use, so we save the new one back to Windmill before returning."""
     client_id = wmill.get_variable("f/gusto/client_id")
     client_secret = wmill.get_variable("f/gusto/client_secret")
+    refresh_token = wmill.get_variable("f/gusto/refresh_token")
+
     resp = requests.post(
         f"{GUSTO_API}/oauth/token",
         data={
-            "grant_type": "client_credentials",
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
             "client_id": client_id,
             "client_secret": client_secret,
         },
         headers={"Accept": "application/json"},
     )
-    resp.raise_for_status()
-    return resp.json()["access_token"]
+    if resp.status_code != 200:
+        print(f"Gusto OAuth failed: {resp.status_code} {resp.text[:500]}")
+        resp.raise_for_status()
+    payload = resp.json()
+
+    new_refresh = payload.get("refresh_token")
+    if new_refresh and new_refresh != refresh_token:
+        wmill.set_variable("f/gusto/refresh_token", new_refresh)
+
+    return payload["access_token"]
 
 
 def gusto_get(url, headers, max_retries=5):
