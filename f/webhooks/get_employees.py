@@ -4,7 +4,8 @@ import requests
 from supabase import create_client
 from datetime import datetime
 
-GUSTO_API = "https://api.gusto.com"
+GUSTO_API = "https://api.gusto-demo.com"
+GUSTO_REDIRECT_URI = "https://jeffspoolspa.com"
 
 
 def get_access_token():
@@ -16,13 +17,14 @@ def get_access_token():
 
     resp = requests.post(
         f"{GUSTO_API}/oauth/token",
-        data={
+        json={
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "client_id": client_id,
             "client_secret": client_secret,
+            "redirect_uri": GUSTO_REDIRECT_URI,
         },
-        headers={"Accept": "application/json"},
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
     )
     if resp.status_code != 200:
         print(f"Gusto OAuth failed: {resp.status_code} {resp.text[:500]}")
