@@ -9,6 +9,7 @@ GUSTO_API = "https://api.gusto.com"
 MAINTENANCE_DEPARTMENT_ID = "757659e3-d73f-48c3-999f-6f071f1e3587"
 TECH_EMAIL_DOMAIN = "techs.jeffspoolspa.internal"
 DEFAULT_TECH_PASSWORD = "Swimming#1"
+NAME_SUFFIX_RE = re.compile(r"[\s,]+(jr|sr|ii|iii|iv|v)\.?$", re.IGNORECASE)
 
 
 def gusto_get(url, headers, max_retries=5):
@@ -23,10 +24,19 @@ def gusto_get(url, headers, max_retries=5):
     return resp
 
 
+def strip_name_suffix(last_name):
+    """Strip trailing generational suffixes like Jr, Sr, II, III, IV, V."""
+    if not last_name:
+        return last_name
+    return NAME_SUFFIX_RE.sub("", last_name).strip()
+
+
 def derive_base_username(first_name, last_name):
-    """first letter of first name + last name, sanitized to a-z, lowercased."""
+    """first letter of first name + last name (with generational suffix stripped),
+    sanitized to a-z, lowercased."""
     if not first_name or not last_name:
         return None
+    last_name = strip_name_suffix(last_name)
     first_clean = re.sub(r"[^a-z]", "", first_name.lower())
     last_clean = re.sub(r"[^a-z]", "", last_name.lower())
     if not first_clean or not last_clean:
