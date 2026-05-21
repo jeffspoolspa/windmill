@@ -1,3 +1,4 @@
+import re
 import time
 import wmill
 import requests
@@ -5,6 +6,9 @@ from supabase import create_client
 from datetime import datetime
 
 GUSTO_API = "https://api.gusto.com"
+MAINTENANCE_DEPARTMENT_ID = "757659e3-d73f-48c3-999f-6f071f1e3587"
+TECH_EMAIL_DOMAIN = "techs.jeffspoolspa.internal"
+DEFAULT_TECH_PASSWORD = "Swimming#1"
 
 
 def gusto_get(url, headers, max_retries=5):
@@ -19,9 +23,86 @@ def gusto_get(url, headers, max_retries=5):
     return resp
 
 
+def derive_base_username(first_name, last_name):
+    """first letter of first name + last name, sanitized to a-z, lowercased."""
+    if not first_name or not last_name:
+        return None
+    first_clean = re.sub(r"[^a-z]", "", first_name.lower())
+    last_clean = re.sub(r"[^a-z]", "", last_name.lower())
+    if not first_clean or not last_clean:
+        return None
+    return f"{first_clean[0]}{last_clean}"
+
+
+def unique_tech_username(supabase, base, employee_id):
+    """Append digits if needed to avoid colliding with another employee's tech_username."""
+    candidate = base
+    suffix = 2
+    while True:
+        existing = (
+            supabase.table("employees")
+            .select("id")
+            .eq("tech_username", candidate)
+            .neq("id", employee_id)
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            return candidate
+        candidate = f"{base}{suffix}"
+        suffix += 1
+
+
+def ensure_tech_login(supabase, emp_row):
+    """Create a tech login for active maintenance employees without one.
+    Returns True if a new login was created, False otherwise."""
+    if emp_row.get("department_id") != MAINTENANCE_DEPARTMENT_ID:
+        return False
+    if emp_row.get("status") != "active":
+        return False
+    if emp_row.get("auth_user_id"):
+        return False
+
+    base = derive_base_username(emp_row.get("first_name"), emp_row.get("last_name"))
+    if not base or len(base) < 2:
+        print(f"Skipping tech login: name doesn't sanitize to a valid username (emp {emp_row.get('id')})")
+        return False
+
+    username = unique_tech_username(supabase, base, emp_row["id"])
+    synthetic_email = f"{username}@{TECH_EMAIL_DOMAIN}"
+
+    try:
+        auth_resp = supabase.auth.admin.create_user({
+            "email": synthetic_email,
+            "password": DEFAULT_TECH_PASSWORD,
+            "email_confirm": True,
+        })
+    except Exception as e:
+        print(f"Failed to create auth user {synthetic_email}: {e}")
+        return False
+
+    auth_user_id = auth_resp.user.id
+
+    try:
+        supabase.table("employees").update({
+            "auth_user_id": auth_user_id,
+            "tech_username": username,
+        }).eq("id", emp_row["id"]).execute()
+        print(f"Created tech login {username} for {emp_row.get('first_name')} {emp_row.get('last_name')}")
+        return True
+    except Exception as e:
+        # Roll back orphaned auth user so retry has a clean slate
+        try:
+            supabase.auth.admin.delete_user(auth_user_id)
+        except Exception:
+            pass
+        print(f"Failed to link auth user to employee {emp_row['id']}: {e}")
+        return False
+
+
 def main():
     supa_url = wmill.get_variable("f/SUPABASE/URL")
-    supa_key = wmill.get_variable("f/SUPABASE/ANON_KEY")
+    supa_key = wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY")
     supabase = create_client(supa_url, supa_key)
 
     company_id = wmill.get_variable("f/gusto/company_id")
@@ -38,6 +119,7 @@ def main():
     employees = emp_response.json()
 
     results = []
+    new_logins = 0
 
     for emp in employees:
         emp_uuid = emp['uuid']
@@ -103,8 +185,15 @@ def main():
             on_conflict='gusto_uuid'
         ).execute()
 
-        results.append(result.data[0])
+        emp_row = result.data[0]
+        results.append(emp_row)
+
+        try:
+            if ensure_tech_login(supabase, emp_row):
+                new_logins += 1
+        except Exception as e:
+            print(f"Error while ensuring tech login for {emp_uuid}: {e}")
 
         time.sleep(0.15)
 
-    return {"synced": len(results), "employees": results}
+    return {"synced": len(results), "new_tech_logins": new_logins}
