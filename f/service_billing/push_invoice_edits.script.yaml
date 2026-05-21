@@ -1,11 +1,5 @@
-summary: Stamp preferred_payment_type_overridden_at when PM actually changes
-description: Closes the gap where triage classification edits silently overwrote
-  payment_method without flagging the row as user-overridden — leaving it
-  eligible for re-resolve by the new fn_resolve_pm_on_cpm_change trigger or the
-  customer-cascade RPC. CASE in the UPDATE only stamps when
-  payment_method/preferred_payment_type/target_payment_method_id actually differ
-  from the old values, so a no-op submit (user opens editor without touching PM)
-  does not falsely mark the row as overridden.
+summary: Pre-confirm webhook_expectations when webhook arrived before insert
+description: ''
 lock: '!inline f/service_billing/push_invoice_edits.script.lock'
 has_on_behalf_of: false
 kind: script

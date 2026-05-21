@@ -194,11 +194,31 @@ def main(qbo_invoice_id: str,
         try:
             _exp_conn = get_db_conn()
             _cur = _exp_conn.cursor()
+            # See process_invoice.insert_webhook_expectation for the race
+            # rationale: QBO can fire the webhook in <300ms, beating this
+            # INSERT. Pre-check webhook_log so a webhook that already
+            # arrived immediately confirms instead of leaving a pending row
+            # to time out and surface as a false 'missing webhook' alert.
             _cur.execute("""
                 INSERT INTO billing.webhook_expectations
-                  (entity_type, entity_id, expected_by, source)
-                VALUES ('Invoice', %s, now() + interval '5 minutes', 'self_initiated')
-            """, (qbo_invoice_id,))
+                  (entity_type, entity_id, expected_by, source, status, webhook_received_at)
+                SELECT
+                    'Invoice', %s, now() + interval '5 minutes', 'self_initiated',
+                    CASE WHEN recent_wh.received_at IS NOT NULL THEN 'confirmed' ELSE 'pending' END,
+                    recent_wh.received_at
+                  FROM (
+                      SELECT MAX(received_at) AS received_at
+                        FROM billing.webhook_log
+                       WHERE entity_type = 'Invoice'
+                         AND entity_id = %s
+                         AND received_at > now() - interval '30 seconds'
+                  ) AS recent_wh
+                RETURNING status
+            """, (qbo_invoice_id, qbo_invoice_id))
+            _row = _cur.fetchone()
+            if _row and _row[0] == 'confirmed':
+                print(f"  webhook_expectation pre-confirmed [Invoice:{qbo_invoice_id}] "
+                      f"(webhook beat insert; race resolved inline)")
             _exp_conn.commit()
             _cur.close()
             _exp_conn.close()
