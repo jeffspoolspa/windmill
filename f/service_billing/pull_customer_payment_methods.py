@@ -25,6 +25,7 @@ import wmill
 import psycopg2
 import psycopg2.extras
 import uuid
+import time
 from datetime import datetime, timezone
 
 QBO_RESOURCE = "u/carter/quickbooks_api"
@@ -61,6 +62,51 @@ def get_db_conn():
     )
 
 
+# 429 retry policy: when a burst of webhooks fires (e.g. an invoice sync
+# inserts 30 invoices at once and pg_net fires 30 per-customer webhooks
+# in parallel), QBO will rate-limit a handful. Without retry, those
+# customers stay stale and their open invoices get blocked from
+# ready_to_process by the freshness gate. Three exponential-backoff
+# retries (0.5s, 1.5s, 4.5s) is enough to clear almost any burst.
+RETRY_429_ATTEMPTS = 3
+RETRY_429_BASE_DELAY = 0.5
+RETRY_429_BACKOFF = 3.0
+
+
+def _qbo_get_with_429_retry(url: str, base_headers: dict, label: str):
+    """GET wrapper that retries HTTP 429 with exponential backoff.
+
+    Returns (response, error_string_or_none). Caller checks error first;
+    if None, response is a successful requests.Response.
+    """
+    last_status = None
+    for attempt in range(RETRY_429_ATTEMPTS):
+        try:
+            r = requests.get(
+                url,
+                headers={**base_headers, "Request-Id": str(uuid.uuid4())},
+                timeout=20,
+            )
+        except Exception as e:
+            return None, f"{label} exception: {e!r}"
+
+        if r.status_code != 429:
+            if r.ok:
+                return r, None
+            return None, f"{label} HTTP {r.status_code}: {r.text[:300]}"
+
+        last_status = r.status_code
+        # Honor Retry-After if QBO sends one; otherwise use our backoff
+        retry_after = r.headers.get("Retry-After")
+        if retry_after and retry_after.isdigit():
+            sleep_for = float(retry_after)
+        else:
+            sleep_for = RETRY_429_BASE_DELAY * (RETRY_429_BACKOFF ** attempt)
+        time.sleep(sleep_for)
+
+    return None, f"{label} HTTP {last_status} after {RETRY_429_ATTEMPTS} retries"
+
+
 def fetch_methods_for_customer(customer_id: str, access_token: str):
     """Fetch cards + ACH for one customer from QBO Payments API v4.
 
@@ -76,52 +122,44 @@ def fetch_methods_for_customer(customer_id: str, access_token: str):
     }
 
     # Cards
-    try:
-        r = requests.get(
-            f"https://api.intuit.com/quickbooks/v4/customers/{customer_id}/cards",
-            headers={**base_headers, "Request-Id": str(uuid.uuid4())},
-            timeout=20,
-        )
-        if not r.ok:
-            errors.append(f"cards HTTP {r.status_code}: {r.text[:300]}")
-        else:
-            cards = r.json() if isinstance(r.json(), list) else []
-            for c in cards:
-                if c.get("status") == "ACTIVE":
-                    methods.append({
-                        "type": "credit_card",
-                        "qbo_payment_method_id": c.get("id"),
-                        "card_brand": c.get("cardType"),
-                        "last_four": (c.get("number") or "")[-4:],
-                        "is_default": bool(c.get("default")),
-                        "raw": c,
-                    })
-    except Exception as e:
-        errors.append(f"cards exception: {e!r}")
+    r, err = _qbo_get_with_429_retry(
+        f"https://api.intuit.com/quickbooks/v4/customers/{customer_id}/cards",
+        base_headers, "cards",
+    )
+    if err:
+        errors.append(err)
+    else:
+        cards = r.json() if isinstance(r.json(), list) else []
+        for c in cards:
+            if c.get("status") == "ACTIVE":
+                methods.append({
+                    "type": "credit_card",
+                    "qbo_payment_method_id": c.get("id"),
+                    "card_brand": c.get("cardType"),
+                    "last_four": (c.get("number") or "")[-4:],
+                    "is_default": bool(c.get("default")),
+                    "raw": c,
+                })
 
     # ACH
-    try:
-        r = requests.get(
-            f"https://api.intuit.com/quickbooks/v4/customers/{customer_id}/bank-accounts",
-            headers={**base_headers, "Request-Id": str(uuid.uuid4())},
-            timeout=20,
-        )
-        if not r.ok:
-            errors.append(f"bank HTTP {r.status_code}: {r.text[:300]}")
-        else:
-            banks = r.json() if isinstance(r.json(), list) else []
-            for b in banks:
-                if b.get("verificationStatus") in ("VERIFIED", "NOT_VERIFIED"):
-                    methods.append({
-                        "type": "ach",
-                        "qbo_payment_method_id": b.get("id"),
-                        "card_brand": b.get("bankName"),
-                        "last_four": (b.get("accountNumber") or "")[-4:],
-                        "is_default": bool(b.get("default")),
-                        "raw": b,
-                    })
-    except Exception as e:
-        errors.append(f"bank exception: {e!r}")
+    r, err = _qbo_get_with_429_retry(
+        f"https://api.intuit.com/quickbooks/v4/customers/{customer_id}/bank-accounts",
+        base_headers, "bank",
+    )
+    if err:
+        errors.append(err)
+    else:
+        banks = r.json() if isinstance(r.json(), list) else []
+        for b in banks:
+            if b.get("verificationStatus") in ("VERIFIED", "NOT_VERIFIED"):
+                methods.append({
+                    "type": "ach",
+                    "qbo_payment_method_id": b.get("id"),
+                    "card_brand": b.get("bankName"),
+                    "last_four": (b.get("accountNumber") or "")[-4:],
+                    "is_default": bool(b.get("default")),
+                    "raw": b,
+                })
 
     return methods, errors
 
