@@ -1,11 +1,5 @@
-summary: force=true on a prior-succeeded invoice with open balance creates a
-  recovery attempt
-description: 'Previously the prior=succeeded gate short-circuited regardless of
-  force or QBO balance. New behavior: when force=true AND the invoice still has
-  a balance > 0 (e.g. the original processing was email-only and the customer
-  never paid), the script falls through to create a fresh processing_attempts
-  row and charges the live balance against the now-explicit
-  target_payment_method_id. Without force, behavior unchanged.'
+summary: Pre-confirm webhook_expectations when webhook arrived before insert
+description: ''
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

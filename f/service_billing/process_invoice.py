@@ -249,6 +249,16 @@ def insert_webhook_expectation(conn, entity_type, entity_id):
     independently. It's optional — failure here doesn't fail the write
     (the webhook is the verification layer; this just lets us catch missed
     confirmations). Best-effort only.
+
+    Race-handling: QBO regularly fires webhooks <300ms after our write
+    returns — faster than we can INSERT this row. Without compensation the
+    webhook handler runs confirm_webhook_expectation() against an empty
+    pending set, drops the confirmation, and the row we then insert sits
+    'pending' for the full grace window (cdc_reconciler catches it
+    eventually but the UI shows a stuck spinner). To plug the race we
+    check billing.webhook_log for a matching event in the last 30 seconds
+    at INSERT time. If one is already there we insert as 'confirmed'
+    directly with webhook_received_at backfilled from the log.
     """
     if not entity_id:
         return
@@ -256,10 +266,28 @@ def insert_webhook_expectation(conn, entity_type, entity_id):
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO billing.webhook_expectations (
-                entity_type, entity_id, expected_by, source, status
-            ) VALUES (%s, %s, now() + (%s || ' minutes')::interval,
-                      'self_initiated', 'pending')
-        """, (entity_type, entity_id, str(WEBHOOK_GRACE_MINUTES)))
+                entity_type, entity_id, expected_by, source, status, webhook_received_at
+            )
+            SELECT
+                %s, %s,
+                now() + (%s || ' minutes')::interval,
+                'self_initiated',
+                CASE WHEN recent_wh.received_at IS NOT NULL THEN 'confirmed' ELSE 'pending' END,
+                recent_wh.received_at
+            FROM (
+                SELECT MAX(received_at) AS received_at
+                  FROM billing.webhook_log
+                 WHERE entity_type = %s
+                   AND entity_id = %s
+                   AND received_at > now() - interval '30 seconds'
+            ) AS recent_wh
+            RETURNING status
+        """, (entity_type, entity_id, str(WEBHOOK_GRACE_MINUTES),
+              entity_type, entity_id))
+        row = cur.fetchone()
+        if row and row[0] == 'confirmed':
+            print(f"  webhook_expectation pre-confirmed [{entity_type}:{entity_id}] "
+                  f"(webhook beat insert; race resolved inline)")
         conn.commit(); cur.close()
     except Exception as e:
         # Don't fail the write — log + continue. cdc_reconciler is the
