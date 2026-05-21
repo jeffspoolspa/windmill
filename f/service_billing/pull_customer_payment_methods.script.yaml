@@ -1,11 +1,14 @@
-summary: 'Fix cpm_type_check crash: card -> credit_card; per-customer
-  try/except; honor QBO default flag'
-description: "Three fixes for the silently-failing every-4h sweep: (1) write
-  type=credit_card not card so the cpm_type_check constraint accepts the row;
-  (2) read the actual default boolean from QBO instead of hardcoding False (was
-  breaking PM-type resolution); (3) wrap the per-customer loop in try/except +
-  rollback so one bad row doesn't skip every downstream customer (this is what
-  hid RIGBY RON 1737 for days)."
+summary: Sweep all active QBO customers; TTL via Customers.pm_last_checked_at;
+  surface QBO non-2xx
+description: (1) Drop the invoice_number gate so the table mirrors all QBO
+  Payments customers, not just those with billable invoices — fixed COKER MIKE
+  (6254) and ~8.4k other customers that were invisible. (2) Anchor TTL on
+  Customers.pm_last_checked_at so customers with no PMs on file aren't
+  re-fetched every cycle; CACHE_TTL_MINUTES = 1440 (24h). (3) Surface non-2xx
+  QBO responses as fetch_errors that block the timestamp bump, so transient
+  429/500 retries naturally instead of silently looking like "no methods on
+  file" for a full TTL window. Adds only_customer_id arg for future on-demand UI
+  refresh.
 lock: '!inline f/service_billing/pull_customer_payment_methods.script.lock'
 has_on_behalf_of: false
 kind: script
