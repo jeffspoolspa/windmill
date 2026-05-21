@@ -128,7 +128,22 @@ def main(previous_result: dict, supabase_connection: dict):
                     "(FORMAT CSV, DELIMITER E'\\t', NULL '', QUOTE '\"', ESCAPE '\"')"
                 )
                 cursor.copy_expert(copy_sql, output)
-                update_set = ', '.join([f'{col} = EXCLUDED.{col}' for col in update_cols])
+                # Preserve refresh-supplied invoice_number when bulk doesn't provide one.
+                # f/ION/refresh_stale_work_orders sources invoice_number from the per-WO
+                # WOStatus.cfm endpoint — more reliable than bulk WorkOrderDetail.cfm,
+                # which silently drops some WOs (e.g., WO 4972018: in CARTER ADMIN's
+                # manual download, absent from playwright session same URL same user).
+                # Without COALESCE a NULL from EXCLUDED would overwrite a good refresh
+                # value every 4 hours.
+                update_set_parts = []
+                for col in update_cols:
+                    if col == 'invoice_number':
+                        update_set_parts.append(
+                            f'{col} = COALESCE(EXCLUDED.{col}, work_orders.{col})'
+                        )
+                    else:
+                        update_set_parts.append(f'{col} = EXCLUDED.{col}')
+                update_set = ', '.join(update_set_parts)
                 where_conditions = ' OR '.join([
                     f'work_orders.{col} IS DISTINCT FROM EXCLUDED.{col}' for col in update_cols
                 ])
