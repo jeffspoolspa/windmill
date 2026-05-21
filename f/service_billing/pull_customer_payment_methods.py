@@ -1,26 +1,24 @@
 # Pull customer payment methods (cards + ACH) from QBO Payments API v4
 # into billing.customer_payment_methods.
 #
-# Sweeps EVERY active customer with a QBO ID. The previous gate
-# (`invoice_number IS NOT NULL` against billing.invoices) caused new
-# cards/ACH to be invisible until the customer was first invoiced
-# locally — sometimes weeks after they added the method in QBO. The
-# table is meant to be a complete mirror of QBO Payments, not a slice
-# driven by invoice activity.
+# Two ways this script gets invoked:
+#   1. AFTER INSERT trigger on billing.invoices fires a webhook with
+#      only_customer_id=<NEW.qbo_customer_id> — the real-time path that
+#      keeps PMs fresh for every open invoice (see migration
+#      20260521000003_invoice_insert_triggers_pm_refresh.sql).
+#   2. A daily scheduled run with no args — backstop that catches anything
+#      the trigger missed (pg_net failure, Windmill outage, restored backup,
+#      etc.) using the smart selection below.
 #
-# QBO Payments endpoints (same as before):
+# The smart selection scopes the sweep to customers who actually need a
+# PM check — those with open billable invoices whose PM data is missing,
+# stale, or pre-dates the most recent invoice. The previous "all 8.9k
+# customers" approach was wasteful; the trigger handles the live signal,
+# the daily backstop just sweeps a small remainder.
+#
+# QBO Payments endpoints (per-customer; QBO has no bulk endpoint):
 #   - GET /quickbooks/v4/customers/{id}/cards
 #   - GET /quickbooks/v4/customers/{id}/bank-accounts
-#
-# TTL gate: we anchor on public."Customers".pm_last_checked_at, which is
-# bumped after every successful QBO call (including the "no methods" case).
-# A failed QBO call (non-2xx, timeout, network error) does NOT bump the
-# timestamp, so it retries next sweep instead of silently looking like
-# "this customer has no methods on file" for the next TTL window.
-#
-# Schedule: every 4 hours. With ~8.9k active customers and CACHE_TTL_MINUTES
-# at 1440 (24h), each sweep refreshes roughly 1/6 of the base (~1.5k) — a
-# 20-30 minute run. A force_refresh run will re-fetch everyone in one pass.
 
 import requests
 import wmill
@@ -32,13 +30,10 @@ from datetime import datetime, timezone
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
 
-# 24h. The sweep runs every 4h, so each cycle picks up the slice of
-# customers that crossed the 24h mark since their last check — about
-# 1/6 of the customer base per run. Total budget: every customer
-# refreshed once a day. Tune lower if you need faster turnaround on
-# QBO-side PM changes (and you've added concurrency / accepted longer
-# per-sweep wall time).
-CACHE_TTL_MINUTES = 1440
+# Daily-backstop safety net: even with no new invoices, refresh any open-
+# invoice customer that hasn't been checked in this long. Catches the case
+# where a card on QBO got removed without a corresponding invoice event.
+BACKSTOP_TTL_INTERVAL = "1 day"
 
 
 def refresh_qbo_token():
@@ -69,10 +64,9 @@ def get_db_conn():
 def fetch_methods_for_customer(customer_id: str, access_token: str):
     """Fetch cards + ACH for one customer from QBO Payments API v4.
 
-    Returns (methods, fetch_errors). fetch_errors is a list of strings;
-    when non-empty the caller should NOT mark the customer as checked
-    (we don't know whether the empty methods list is real or just QBO
-    being unhappy with us this minute).
+    Returns (methods, fetch_errors). When fetch_errors is non-empty the
+    caller must NOT mark the customer as checked — we don't know whether
+    the empty methods list is real or just QBO being unhappy with us.
     """
     methods: list[dict] = []
     errors: list[str] = []
@@ -136,9 +130,14 @@ def main(force_refresh: bool = False, only_customer_id: str = ""):
     """Refresh customer payment methods.
 
     Args:
-        force_refresh: If True, ignore TTL — re-fetch every eligible customer.
+        force_refresh: If True, sweep ALL customers with open invoices
+            ignoring TTL. Used to clear backlogs.
         only_customer_id: If non-empty, fetch just this one QBO customer ID
-            (bypasses TTL too; useful for on-demand UI refresh).
+            (bypasses every filter). The trigger path uses this.
+
+    Default (no args): smart-selection sweep over customers with open
+    invoices where PM data is missing, stale, or pre-dates the most recent
+    invoice. The daily backstop schedule calls this form.
     """
     print(
         f"=== pull_customer_payment_methods started "
@@ -151,26 +150,41 @@ def main(force_refresh: bool = False, only_customer_id: str = ""):
     if only_customer_id:
         customer_ids = [only_customer_id]
     elif force_refresh:
+        # Backlog clear — every customer with an open billable invoice,
+        # regardless of pm_last_checked_at. Used to seed after deploys.
         cur.execute("""
-            SELECT qbo_customer_id FROM public."Customers"
-            WHERE qbo_customer_id IS NOT NULL
-              AND is_active = true
-              AND deleted_at IS NULL
-            ORDER BY pm_last_checked_at NULLS FIRST
+            SELECT DISTINCT i.qbo_customer_id
+              FROM billing.invoices i
+              JOIN public."Customers" c ON c.qbo_customer_id = i.qbo_customer_id
+             WHERE i.qbo_customer_id IS NOT NULL
+               AND c.is_active = true
+               AND c.deleted_at IS NULL
+               AND i.billing_status != 'processed'
         """)
         customer_ids = [r[0] for r in cur.fetchall()]
     else:
+        # Daily backstop selection: customers with open invoices whose PM
+        # data is either missing, stale, or pre-dates their most-recent
+        # invoice. The third predicate is what makes the trigger and the
+        # sweep agree — if a trigger fired and succeeded, pm_last_checked_at
+        # will be more recent than every invoice for that customer and the
+        # sweep skips them. If the trigger missed (pg_net failure etc.),
+        # the invoice's fetched_at is newer and the sweep catches up.
         cur.execute(
+            f"""
+            SELECT DISTINCT i.qbo_customer_id
+              FROM billing.invoices i
+              JOIN public."Customers" c ON c.qbo_customer_id = i.qbo_customer_id
+             WHERE i.qbo_customer_id IS NOT NULL
+               AND c.is_active = true
+               AND c.deleted_at IS NULL
+               AND i.billing_status != 'processed'
+               AND (
+                    c.pm_last_checked_at IS NULL
+                    OR i.fetched_at > c.pm_last_checked_at
+                    OR c.pm_last_checked_at < now() - interval '{BACKSTOP_TTL_INTERVAL}'
+               )
             """
-            SELECT qbo_customer_id FROM public."Customers"
-            WHERE qbo_customer_id IS NOT NULL
-              AND is_active = true
-              AND deleted_at IS NULL
-              AND (pm_last_checked_at IS NULL
-                   OR pm_last_checked_at < now() - (%s || ' minutes')::interval)
-            ORDER BY pm_last_checked_at NULLS FIRST
-            """,
-            (CACHE_TTL_MINUTES,),
         )
         customer_ids = [r[0] for r in cur.fetchall()]
 
@@ -202,18 +216,19 @@ def main(force_refresh: bool = False, only_customer_id: str = ""):
 
             if fetch_errors:
                 # Treat as "we couldn't ask QBO" — don't touch existing rows
-                # and don't bump pm_last_checked_at. Will retry next sweep.
-                # Previously this looked identical to "customer has no
-                # methods" and silently hid days of staleness.
+                # and don't bump pm_last_checked_at. Customer naturally
+                # retries on the next trigger or backstop. Previously this
+                # looked identical to "customer has no methods" and silently
+                # hid days of staleness.
                 stats["fetch_errors"] += 1
                 for err in fetch_errors:
                     print(f"  fetch_error {cid}: {err}")
                 conn.commit()
                 continue
 
-            # Deactivate existing rows — methods still present in QBO get
-            # flipped back to is_active=true by the upsert below; anything
-            # QBO no longer returns stays deactivated.
+            # Deactivate existing rows — methods still in QBO get flipped
+            # back to is_active=true by the upsert below; anything QBO no
+            # longer returns stays deactivated.
             cur.execute(
                 "UPDATE billing.customer_payment_methods SET is_active = false WHERE qbo_customer_id = %s",
                 (cid,),
@@ -255,9 +270,7 @@ def main(force_refresh: bool = False, only_customer_id: str = ""):
             # Per-customer isolation. Without this, one bad row (an
             # unexpected QBO field, a constraint violation, a transient
             # DB blip) crashes the entire sweep and every downstream
-            # customer goes unfetched — exactly how RIGBY's card got
-            # missed for days. Roll back the aborted transaction, log,
-            # and keep going.
+            # customer goes unfetched.
             stats["exceptions"] += 1
             print(f"  ERROR on customer {cid}: {e}")
             try:
@@ -267,7 +280,7 @@ def main(force_refresh: bool = False, only_customer_id: str = ""):
             cur.close()
             cur = conn.cursor()
 
-        if (i + 1) % 200 == 0:
+        if (i + 1) % 100 == 0:
             print(
                 f"  ... {i + 1}/{len(customer_ids)} customers "
                 f"(fetch_errors={stats['fetch_errors']}, exceptions={stats['exceptions']})"
