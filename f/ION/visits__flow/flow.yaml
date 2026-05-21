@@ -35,7 +35,7 @@ value:
             expr: results.a
           lookback_days:
             type: javascript
-            expr: flow_input.lookback_days ?? 14
+            expr: flow_input.lookback_days ?? 7
           supabase_connection:
             type: static
             value: $res:u/carter/supabase
