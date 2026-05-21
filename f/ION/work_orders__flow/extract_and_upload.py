@@ -7,12 +7,27 @@
 # generated column derived from billable_override + schedule_status, so we do
 # NOT include it in the upsert (Postgres rejects writes to GENERATED columns).
 # employee_id reconciled separately via ion_username lookup.
+#
+# Date sanitization: ION's HTML report occasionally has garbage strings
+# (part numbers, serial fragments) in date columns. Without coercion, ONE
+# bad row causes the entire COPY-into-temp-table to abort, rolling back
+# ALL upserts — which is exactly how 2024 work orders silently failed to
+# sync for who-knows-how-long. We pd.to_datetime(errors='coerce') each date
+# column, log the offending wo_number + customer + raw value so the data
+# can be cleaned up in ION too, then proceed.
+#
+# Failure mode: raise instead of returning status='error' so Windmill
+# marks the job failed and alerts fire. Previously the script returned
+# error-state inside a 'success' dict, which the flow read as green.
 
 import pandas as pd
 import json
 from sqlalchemy import create_engine, text
 import io
 import csv
+
+DATE_COLUMNS = ['install_date', 'created', 'scheduled', 'started', 'completed', 'last_sent']
+
 
 def main(previous_result: dict, supabase_connection: dict):
     print('Loading reports...')
@@ -56,11 +71,31 @@ def main(previous_result: dict, supabase_connection: dict):
                 .str.replace(',', '', regex=False)
                 .replace('', None))
             work_orders[col] = pd.to_numeric(work_orders[col], errors='coerce')
+
+    # Date coercion + verbose logging of bad rows so we can trace each one
+    # back to its WO in ION and verify it's an ION data-entry mistake vs a
+    # parser misalignment bug on our side.
+    bad_date_summary = {}
+    for col in DATE_COLUMNS:
+        if col not in work_orders.columns:
+            continue
+        raw = work_orders[col]
+        parsed = pd.to_datetime(raw, errors='coerce')
+        bad_mask = parsed.isna() & raw.notna() & (raw.astype(str).str.strip() != '')
+        bad_count = int(bad_mask.sum())
+        if bad_count > 0:
+            bad_date_summary[col] = bad_count
+            print(f'  {col}: coerced {bad_count} bad value(s) to NULL')
+            bad_rows = work_orders.loc[bad_mask, ['wo_number', 'customer', col]]
+            for _, r in bad_rows.iterrows():
+                wo = r.get('wo_number', '?')
+                cust = r.get('customer', '?')
+                val = r.get(col, '?')
+                print(f'    WO {wo} ({cust}): {col}={val!r}')
+        work_orders[col] = parsed
+
     work_orders = work_orders.replace('', None)
 
-    # NOTE: `billable` is a GENERATED column on public.work_orders
-    # (COALESCE(billable_override, schedule_status IN ('Closed', 'Closed - Not Invoiced')))
-    # so we deliberately don't add it to the DataFrame. Postgres will compute it.
     print('Data cleaned')
 
     print('Upserting to Supabase...')
@@ -131,11 +166,17 @@ def main(previous_result: dict, supabase_connection: dict):
         error_msg = str(e)
         print(f'Connection error: {error_msg}')
 
+    if not success:
+        raise Exception(
+            f'Upsert failed for {total_rows} work orders: {error_msg}'
+        )
+
     return {
-        'status': 'success' if success else 'error',
+        'status': 'success',
         'total_work_orders': total_rows,
-        'processed': total_rows if success else 0,
-        'failed': 0 if success else total_rows,
+        'processed': total_rows,
+        'failed': 0,
         'employee_links_reconciled': employee_reconciled,
-        'error': error_msg if not success else None,
+        'bad_dates_coerced': bad_date_summary,
+        'error': None,
     }
