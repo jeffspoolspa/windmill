@@ -4,38 +4,7 @@ import requests
 from supabase import create_client
 from datetime import datetime
 
-GUSTO_API = "https://api.gusto-demo.com"
-GUSTO_REDIRECT_URI = "https://jeffspoolspa.com"
-
-
-def get_access_token():
-    """Exchange refresh_token for a fresh access token. Gusto rotates refresh
-    tokens on use, so we save the new one back to Windmill before returning."""
-    client_id = wmill.get_variable("f/gusto/client_id")
-    client_secret = wmill.get_variable("f/gusto/client_secret")
-    refresh_token = wmill.get_variable("f/gusto/refresh_token")
-
-    resp = requests.post(
-        f"{GUSTO_API}/oauth/token",
-        json={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": GUSTO_REDIRECT_URI,
-        },
-        headers={"Accept": "application/json", "Content-Type": "application/json"},
-    )
-    if resp.status_code != 200:
-        print(f"Gusto OAuth failed: {resp.status_code} {resp.text[:500]}")
-        resp.raise_for_status()
-    payload = resp.json()
-
-    new_refresh = payload.get("refresh_token")
-    if new_refresh and new_refresh != refresh_token:
-        wmill.set_variable("f/gusto/refresh_token", new_refresh)
-
-    return payload["access_token"]
+GUSTO_API = "https://api.gusto.com"
 
 
 def gusto_get(url, headers, max_retries=5):
@@ -56,10 +25,10 @@ def main():
     supabase = create_client(supa_url, supa_key)
 
     company_id = wmill.get_variable("f/gusto/company_id")
-    access_token = get_access_token()
+    token = wmill.get_variable("f/gusto/personal_access_token")
 
     headers = {
-        'Authorization': f'Bearer {access_token}',
+        'Authorization': f'Bearer {token}',
         'X-Gusto-API-Version': '2025-06-15',
         'Accept': 'application/json'
     }
