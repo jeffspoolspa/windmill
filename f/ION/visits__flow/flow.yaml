@@ -1,0 +1,87 @@
+summary: visits (login → fetch service log → parse → normalize → upsert
+  maintenance.visits/chem_readings/consumables_usage)
+description: >-
+  Maintenance visit ingest pipeline. Mirrors the structure of f/ION/work_orders
+  but for the Completed Service Log report instead of Work Order Detail.
+
+
+  Step A: f/ION/_discover/emit_session — Playwright login to Fluidra → ION;
+  returns IonSession (cookies, cfClientId, ionOrigin).
+
+  Step B: f/ION/_discover/parse_normalize_test — picker-prime + bare data fetch
+  against /reports/CompletedLogDetail.cfm, parse via f/ION/_lib/parser,
+  normalize via f/ION/_lib/normalize, upsert via f/ION/_lib/upsert into
+  maintenance.visits / maintenance.chem_readings /
+  maintenance.consumables_usage. Auto-creates public.pools.
+
+
+  Inputs:
+    - lookback_days (int, default 7): how many days back to pull from ION.
+    - write_unmapped (bool, default true): if true, normalize step merges newly-seen unmapped ION fields back into public.app_config.
+
+  TODO: emit_session and parse_normalize_test still live under f/ION/_discover/.
+  Promote them out of _discover/ when stable and update this flow's module
+  paths.
+value:
+  modules:
+    - id: a
+      summary: emit_session
+      value:
+        type: script
+        input_transforms:
+          ion:
+            type: static
+            value:
+              loginUrl: $var:f/ION/LOGIN_URL
+              password: $var:f/ION/PASSWORD
+              username: $var:f/ION/USERNAME
+        path: f/ION/_discover/emit_session
+      continue_on_error: false
+      retry:
+        constant:
+          attempts: 0
+          seconds: 0
+        exponential:
+          attempts: 2
+          multiplier: 2
+          random_factor: 0
+          seconds: 10
+    - id: b
+      summary: parse_normalize_upsert
+      value:
+        type: script
+        input_transforms:
+          ion_session:
+            type: javascript
+            expr: results.a
+          lookback_days:
+            type: javascript
+            expr: flow_input.lookback_days ?? 7
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+          write_unmapped:
+            type: javascript
+            expr: flow_input.write_unmapped ?? true
+        path: f/ION/_discover/parse_normalize_test
+      continue_on_error: false
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - lookback_days
+    - write_unmapped
+  properties:
+    lookback_days:
+      type: integer
+      description: How many days back to fetch from the ION Completed Service Log
+        (default 7).
+      default: 7
+    write_unmapped:
+      type: boolean
+      description: If true, merge newly-seen unmapped ION fields back into
+        public.app_config (default true).
+      default: true
+  required: []
+tag: chromium
