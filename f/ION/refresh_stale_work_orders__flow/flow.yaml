@@ -1,0 +1,80 @@
+summary: Refresh stale WOs from ION's per-WO WOStatus.cfm endpoint
+description: Per-WO refresh layer compensating for ION's bulk
+  WorkOrderDetail.cfm silently dropping rows on a per-session basis (proven
+  empirically with WO 4972018 — present in CARTER ADMIN's manual XLS download,
+  absent from playwright session same URL same user). Picks N stalest WOs (NULLS
+  FIRST on last_refreshed_at), hits /workorders/WOStatus.cfm per WO, parses
+  invoice_number + schedule_status, updates via COALESCE so we never clobber a
+  non-NULL DB value.
+value:
+  modules:
+    - id: a
+      summary: select_stale
+      value:
+        type: rawscript
+        content: '!inline select_stale.py'
+        input_transforms:
+          batch_size:
+            type: javascript
+            expr: flow_input.batch_size
+          stale_after_hours:
+            type: javascript
+            expr: flow_input.stale_after_hours
+          wo_number:
+            type: javascript
+            expr: flow_input.wo_number
+        lock: '!inline select_stale.lock'
+        language: python3
+    - id: b
+      summary: fetch_status
+      value:
+        type: rawscript
+        content: '!inline fetch_status.ts'
+        input_transforms:
+          ion:
+            type: static
+            value:
+              loginUrl: $var:f/ION/LOGIN_URL
+              password: $var:f/ION/PASSWORD
+              username: $var:f/ION/USERNAME
+          previous_result:
+            type: javascript
+            expr: results.a
+        lock: '!inline fetch_status.lock'
+        language: bun
+        tag: chromium
+    - id: c
+      summary: apply_updates
+      value:
+        type: rawscript
+        content: '!inline apply_updates.py'
+        input_transforms:
+          previous_result:
+            type: javascript
+            expr: results.b
+        lock: '!inline apply_updates.lock'
+        language: python3
+  same_worker: true
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - batch_size
+    - stale_after_hours
+    - wo_number
+  properties:
+    batch_size:
+      type: integer
+      description: How many WOs to refresh per run
+      default: 200
+    stale_after_hours:
+      type: integer
+      description: Treat a WO as stale if last_refreshed_at is older than this many hours
+      default: 24
+    wo_number:
+      type: string
+      description: If set, refresh ONLY this single WO (ad-hoc use; ignores batch_size
+        and stale_after_hours)
+  required: []
+tag: chromium
