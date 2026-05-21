@@ -726,9 +726,24 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
 
         # Resolve payment method (fires fn_set_payment_method_ok_from_invoice
         # via the per-source trigger when these columns change in write_result)
+        #
+        # The "*bill*" override (case-insensitive ILIKE in
+        # billing.resolve_preferred_payment_type) was historically only
+        # checked against work_description. In practice the office writes
+        # *bill* into whichever text field they're in — technician
+        # instructions and corrective action are equally common. Concatenate
+        # all three so the override fires regardless of which field holds
+        # the token. CHESSER WO 5007168 + OLSON WO 5000640 both got
+        # auto-charged on 2026-05-21 because *bill* was in their tech
+        # instructions, not their work_description.
         set_stage(conn, qbo_invoice_id, STAGE_PAYMENT_METHOD)
+        wo_text_blob = " ".join(filter(None, [
+            wo.get("work_description"),
+            wo.get("technician_instructions"),
+            wo.get("corrective_action"),
+        ]))
         pm_resolution = resolve_payment_for_invoice(
-            conn, qbo_customer_id, wo.get("work_description"),
+            conn, qbo_customer_id, wo_text_blob,
         )
         result["preferred_payment_type"]   = pm_resolution["preferred"]
         result["payment_method"]           = pm_resolution["legacy_payment_method"]
