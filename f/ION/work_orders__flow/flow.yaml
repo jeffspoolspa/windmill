@@ -72,3 +72,4 @@ schema:
       description: 'YYYY-MM-DD override for ION ScheduleStart. Default: lookback_days back.'
       default: null
   required: []
+tag: chromium
