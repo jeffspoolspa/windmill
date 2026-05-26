@@ -7,14 +7,5 @@ kind: script
 schema:
   $schema: https://json-schema.org/draft/2020-12/schema
   type: object
-  properties:
-    force_refresh:
-      type: boolean
-      description: ''
-      default: false
-    only_customer_id:
-      type: string
-      description: ''
-      default: ''
-      originalType: string
+  properties: {}
   required: []
