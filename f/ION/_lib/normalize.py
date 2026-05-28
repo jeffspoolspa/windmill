@@ -113,6 +113,100 @@ TRANSFORMS = {
 }
 
 
+# ─── Task alias + definition catalog (encoded in code, like consumables) ──────
+# Source of truth for the per-visit task checklist. ION reports use short
+# column headers ("Brsh", "Vac", "Cell") which need normalization to
+# canonical names before insertion into maintenance.visit_tasks.
+#
+# Why these live in code instead of a DB-driven table:
+#   - The set is small (~25 entries) and changes rarely.
+#   - Keeping it in code means the upsert step has zero extra DB lookups
+#     per row — same pattern that consumables follow (item_name resolution
+#     happens in upsert.py via the items table, but the structural mapping
+#     stays in code).
+#   - Adding/changing a task is a code change (PR-reviewed) rather than a
+#     row insert someone makes in the dashboard with no record.
+#
+# Adding a new task:
+#   1. Add the row to TASK_DEFINITIONS with display_name + category +
+#      display_order.
+#   2. Add every raw ION header that should resolve to it in TASK_ALIASES.
+#   3. No migration needed — task_name is a free-text column in
+#      maintenance.visit_tasks, so new canonical names just start appearing.
+
+TASK_ALIASES: dict[str, str] = {
+    # equipment
+    "Filt":  "cleaned_filter",
+    "Cell":  "cleaned_salt_cell",
+    "Service Pump": "service_pump",
+    "HEAT":  "heater_working",
+    # cleaning
+    "Vac":   "vacuum_pool",
+    "Brsh":  "brushed_pool",
+    "PBsk":  "emptied_pump_baskets",
+    "SBsk":  "emptied_skimmer_baskets",
+    "Bag":   "emptied_cleaner_bag",
+    "Net":   "skim_net_surface",
+    # water management
+    "Fill":  "drained_filled",
+    "Added Water": "added_water",
+    # inspection
+    "Safety Inspection": "safety_inspection",
+    # other
+    "Customer Tabs (Not to be billed)": "customer_tabs",
+    "WELL":  "install_well_points",
+    "DECK":  "deck_repair",
+    "TILE":  "redo_tile",
+    "REGR":  "regrout",
+    "PP":    "painted_pool",
+    "FT":    "fibertech_coating",
+    "BT":    "bead_track_replace",
+    "BL":    "bead_lock_replace",
+    "FR":    "floor_repair",
+}
+
+# canonical_name -> metadata for UI rendering / grouping / sort order
+TASK_DEFINITIONS: dict[str, dict] = {
+    "cleaned_filter":          {"display_name": "Cleaned Filter",          "category": "equipment",  "display_order": 1},
+    "cleaned_salt_cell":       {"display_name": "Cleaned Salt Cell",       "category": "equipment",  "display_order": 2},
+    "service_pump":            {"display_name": "Service Pump",            "category": "equipment",  "display_order": 3},
+    "heater_working":          {"display_name": "Heater Working",          "category": "equipment",  "display_order": 4},
+    "vacuum_pool":             {"display_name": "Vacuum Pool",             "category": "cleaning",   "display_order": 5},
+    "brushed_pool":            {"display_name": "Brushed Pool",            "category": "cleaning",   "display_order": 6},
+    "emptied_pump_baskets":    {"display_name": "Emptied Pump Baskets",    "category": "cleaning",   "display_order": 7},
+    "emptied_skimmer_baskets": {"display_name": "Emptied Skimmer Baskets", "category": "cleaning",   "display_order": 8},
+    "emptied_cleaner_bag":     {"display_name": "Emptied Cleaner Bag",     "category": "cleaning",   "display_order": 9},
+    "skim_net_surface":        {"display_name": "Skim/Net Surface",        "category": "cleaning",   "display_order": 10},
+    "drained_filled":          {"display_name": "Drained/Filled",          "category": "water_mgmt", "display_order": 11},
+    "added_water":             {"display_name": "Added Water",             "category": "water_mgmt", "display_order": 12},
+    "safety_inspection":       {"display_name": "Safety Inspection",       "category": "inspection", "display_order": 13},
+    "customer_tabs":           {"display_name": "Customer Tabs (Not to be billed)", "category": "other", "display_order": 14},
+    "install_well_points":     {"display_name": "Install Well Points",     "category": "other",      "display_order": 15},
+    "deck_repair":             {"display_name": "Deck Repair",             "category": "other",      "display_order": 16},
+    "redo_tile":               {"display_name": "Redo Tile?",              "category": "other",      "display_order": 17},
+    "regrout":                 {"display_name": "Regrout?",                "category": "other",      "display_order": 18},
+    "painted_pool":            {"display_name": "Painted Pool?",           "category": "other",      "display_order": 19},
+    "fibertech_coating":       {"display_name": "Fibertech Coating?",      "category": "other",      "display_order": 20},
+    "bead_track_replace":      {"display_name": "Bead Track Replace",      "category": "other",      "display_order": 21},
+    "bead_lock_replace":       {"display_name": "Bead Lock Replace",       "category": "other",      "display_order": 22},
+    "floor_repair":            {"display_name": "Floor Repair",            "category": "other",      "display_order": 23},
+}
+
+
+def resolve_task_alias(raw_name: str) -> str:
+    """Map an ION raw column header (e.g. 'Brsh') to its canonical task name
+    (e.g. 'brushed_pool'). Falls back to a slugified version of the raw name
+    if no alias is registered — that way we capture the data anyway and a
+    later code change can add the alias without losing rows.
+    """
+    if raw_name in TASK_ALIASES:
+        return TASK_ALIASES[raw_name]
+    # Slug fallback: 'Some New Task!' -> 'some_new_task'
+    import re as _re
+    slug = _re.sub(r'[^a-z0-9]+', '_', raw_name.lower()).strip('_')
+    return slug or "unknown"
+
+
 # ─── DB helpers ────────────────────────────────────────────────────────────────
 
 def _connect(supabase_connection: dict):
@@ -142,24 +236,30 @@ def load_mappings(supabase_connection: dict, key: str = "ion_field_mappings") ->
 
 # ─── Core normalize fn ─────────────────────────────────────────────────────────
 
-def _flatten_parser_row(raw_row: dict) -> tuple[dict, dict]:
+def _flatten_parser_row(raw_row: dict) -> tuple[dict, dict, dict]:
     """The parser emits flat ION fields PLUS nested _readings/_tasks/_consumables.
-    Flatten readings + tasks into the same lookup dict (their keys are unique
-    ION names like 'FC', 'Vac', so no collision with core fields). Keep
-    consumables separate — they unpivot to their own table.
+    Flatten readings into the same lookup dict (their keys are unique ION
+    names like 'FC' that are mapped via app_config to chem_readings columns).
+    Keep tasks and consumables separate — they unpivot to their own tables
+    via local alias mapping (no app_config lookup).
+
+    Returns: (flat, tasks_raw, consumables_raw)
     """
     flat: dict = {}
+    tasks: dict = {}
     consumables: dict = {}
     for k, v in raw_row.items():
-        if k in ("_readings", "_tasks"):
+        if k == "_readings":
             if isinstance(v, dict):
                 for sub_k, sub_v in v.items():
                     flat[sub_k] = sub_v
+        elif k == "_tasks":
+            tasks = v if isinstance(v, dict) else {}
         elif k == "_consumables":
             consumables = v if isinstance(v, dict) else {}
         else:
             flat[k] = v
-    return flat, consumables
+    return flat, tasks, consumables
 
 
 def normalize_row(
@@ -177,7 +277,7 @@ def normalize_row(
         unmapped:      {source_field -> sample_value_str}
         bad_transform: [(source_field, transform_name), ...]
     """
-    flat, consumables = _flatten_parser_row(raw_row)
+    flat, tasks_raw, consumables = _flatten_parser_row(raw_row)
 
     canonical: dict[str, dict] = defaultdict(dict)
     unmapped: dict[str, str] = {}
@@ -201,6 +301,27 @@ def normalize_row(
             bad_transform.append((source_field, m.get("transform")))
             continue
         canonical[m["canonical_table"]][m["canonical_field"]] = transformed
+
+    # Tasks: apply local alias map (TASK_ALIASES), convert Yes/No → boolean,
+    # emit as visit_tasks_rows for the upsert step. Pattern mirrors how
+    # consumables are handled below — structural mapping in code, row
+    # insertion in upsert.py.
+    if tasks_raw:
+        task_rows: list = []
+        for raw_name, raw_value in tasks_raw.items():
+            completed = _yes_no_to_bool(raw_value)
+            if completed is None:
+                # Empty cell — skip (tech didn't fill it in). Different from
+                # "No" which means tech explicitly marked it not done.
+                continue
+            canonical_name = resolve_task_alias(raw_name)
+            task_rows.append({
+                "task_name":    canonical_name,
+                "raw_task_name": raw_name,
+                "completed":    completed,
+            })
+        if task_rows:
+            canonical["visit_tasks_rows"] = task_rows
 
     if consumables:
         items: list = []

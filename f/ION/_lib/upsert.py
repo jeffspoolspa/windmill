@@ -7,7 +7,7 @@ f/ION/_lib/upsert
 Layer 3 of the ION ingest pipeline:
     parser   ->  raw ION dicts
     normalize ->  canonical-shaped dicts (this is the input)
-    UPSERT   ->  maintenance.visits / chem_readings / consumables_usage
+    UPSERT   ->  maintenance.visits / chem_readings / consumables_usage / visit_tasks
                   + auto-create public.pools
 
 What it does:
@@ -323,6 +323,7 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             "chem_readings_inserted": 0,
             "consumables_inserted": 0,
             "consumables_unresolved_items": defaultdict(int),
+            "visit_tasks_inserted": 0,
         }
 
         # Build prepared visit rows + indexable links to readings/consumables
@@ -334,6 +335,7 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             chem = row.get("chem_readings", {}) or {}
             pool_meta = row.get("pools", {}) or {}
             consumables = row.get("consumables_usage_rows", []) or []
+            visit_tasks = row.get("visit_tasks_rows", []) or []
 
             # ION's "Address1" is the customer name as a ship-to label;
             # "Address2" is the actual street. Try Address2 first; fall back
@@ -412,7 +414,12 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                 "notes": v.get("notes"),
                 "external_source": source,
             })
-            per_row_extras.append({"pool_id": pool_id, "chem": chem, "consumables": consumables})
+            per_row_extras.append({
+                "pool_id": pool_id,
+                "chem": chem,
+                "consumables": consumables,
+                "visit_tasks": visit_tasks,
+            })
             stats["rows_resolved"] += 1
 
         if not visit_buffer:
@@ -459,7 +466,10 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                 visit_ids.append(cur.fetchone()[0])
                 stats["visits_upserted"] += 1
 
-        # DELETE existing chem + consumables for these visits, then INSERT
+        # DELETE existing chem + consumables + visit_tasks for these visits,
+        # then INSERT. Same DELETE-then-INSERT idempotency pattern across all
+        # three — re-running an ingestion for the same visit_ids replaces
+        # the per-visit detail rather than appending duplicates.
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM maintenance.chem_readings WHERE visit_id = ANY(%s::uuid[])",
@@ -467,6 +477,10 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             )
             cur.execute(
                 "DELETE FROM maintenance.consumables_usage WHERE visit_id = ANY(%s::uuid[])",
+                (visit_ids,),
+            )
+            cur.execute(
+                "DELETE FROM maintenance.visit_tasks WHERE visit_id = ANY(%s::uuid[])",
                 (visit_ids,),
             )
 
@@ -534,6 +548,35 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                     page_size=500,
                 )
                 stats["consumables_inserted"] = len(cons_rows)
+
+        # Insert visit_tasks (one row per checked-or-unchecked task per visit).
+        # Canonical task_name comes from f/ION/_lib/normalize.resolve_task_alias,
+        # which maps raw ION column headers (Brsh, Vac, Cell, ...) to
+        # snake_case canonical names.
+        task_rows = []
+        for visit_id, extras in zip(visit_ids, per_row_extras):
+            pool_id = extras["pool_id"]
+            for t in extras["visit_tasks"]:
+                task_rows.append({
+                    "visit_id":  visit_id,
+                    "pool_id":   pool_id,
+                    "task_name": t["task_name"],
+                    "completed": t["completed"],
+                    "source":    source,
+                })
+
+        if task_rows:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_batch(
+                    cur,
+                    """INSERT INTO maintenance.visit_tasks
+                       (visit_id, pool_id, task_name, completed, source)
+                       VALUES (%(visit_id)s, %(pool_id)s, %(task_name)s,
+                               %(completed)s, %(source)s)""",
+                    task_rows,
+                    page_size=500,
+                )
+                stats["visit_tasks_inserted"] = len(task_rows)
 
         conn.commit()
 
