@@ -1,0 +1,7 @@
+summary: Backfill task_id + task_schedule_id on existing maintenance.visits from
+  clean tasks/schedules (fill-only, dry_run default)
+description: ''
+lock: '!inline f/ION/_lib/relink_visits.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
