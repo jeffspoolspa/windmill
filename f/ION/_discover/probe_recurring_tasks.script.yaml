@@ -1,4 +1,5 @@
-summary: 'Probe v12: control - replicate WO report flow with my technique'
+summary: 'Probe v13: TRUSTED click (sec-fetch-user) on injected anchor ->
+  capture download'
 description: ''
 lock: '!inline f/ION/_discover/probe_recurring_tasks.script.lock'
 has_on_behalf_of: false
