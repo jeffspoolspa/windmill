@@ -2,9 +2,11 @@
 //playwright@1.40.0
 //node-html-parser@6.1.13
 
-// Probe (read-only): trusted click is the fix (sec-fetch-user:?1), but ION overlays
-// blocked the injected anchor. Strip overlays, inject a top-most anchor, force-click
-// (still a real input gesture) -> navigation/download.
+// Probe (read-only): faithful real-app flow to trigger session priming --
+//   login -> ColdFusionNavigate('/reports/reports.cfm','pageContent')
+//        -> ColdFusionNavigate(serviceEvents...&set=1,'rptDetail')
+//        -> click the actual rendered RecurringtasksActive link -> capture download
+// Instruments report-request statuses so we see exactly what 200s/500s.
 
 import { chromium } from "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -20,9 +22,17 @@ export async function main() {
     executablePath: "/usr/bin/chromium",
     args: ["--no-sandbox","--single-process","--no-zygote","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu"],
   })
+  const netlog: any[] = []
   try {
     const context = await browser.newContext({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36", acceptDownloads: true })
+    let popupDownload: any = null
+    context.on("page", (pop: any) => {
+      pop.on("response", (res: any) => { const u = res.url(); if (/reports\/|Recurringtasks|serviceEvents/i.test(u)) netlog.push({ from: "popup", status: res.status(), url: u.replace("https://ionpoolcare.com","").slice(0,90) }) })
+      pop.on("download", (d: any) => { popupDownload = d })
+    })
     const page = await context.newPage()
+    page.on("response", (res: any) => { const u = res.url(); if (/reports\/|Recurringtasks|serviceEvents/i.test(u)) netlog.push({ from: "main", status: res.status(), url: u.replace("https://ionpoolcare.com","").slice(0,90) }) })
+
     await page.goto(LOGIN_URL)
     await page.locator("#txtUserName").fill(USERNAME)
     await page.locator("#txtPassword").fill(PASSWORD)
@@ -34,57 +44,49 @@ export async function main() {
     await page.waitForLoadState("networkidle", { timeout: 45000 })
     const ionOrigin = new URL(page.url()).origin
     await page.waitForTimeout(2000)
+    const today = new Date().toISOString().slice(0, 10)
+    const out: any = {}
 
-    const reportUrl = `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0`
+    // STEP 1: load the Reports landing page the app way
+    await page.evaluate(() => { document.querySelectorAll('div.resizable.ui-draggable, div[id*="MyServiceWin"], div[id*="MyPrintWin"]').forEach(el => el.remove()) })
+    await page.evaluate(() => { /* @ts-ignore */ ColdFusionNavigate("/reports/reports.cfm", "pageContent") }).catch((e:any)=>{ out.reportsNavErr = String(e).slice(0,100) })
+    await page.waitForTimeout(3500)
+    out.hasRptDetail = await page.evaluate(() => !!document.getElementById("rptDetail"))
 
-    // strip overlays/popups + inject a top-most full-screen anchor
-    await page.evaluate((href: string) => {
-      document.querySelectorAll('div.resizable.ui-draggable, div[id*="MyServiceWin"], div[id*="MyPrintWin"], .ui-widget-overlay, .modal, .x-mask').forEach(el => el.remove())
-      const a = document.createElement("a")
-      a.id = "__dl_probe"
-      a.href = href
-      a.textContent = "DOWNLOAD PROBE"
-      a.style.cssText = "position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:2147483647;background:#fff;display:block;font-size:30px;"
-      document.body.appendChild(a)
-    }, reportUrl)
-    await page.waitForTimeout(500)
+    // STEP 2: load serviceEvents picker into rptDetail (sets session criteria the app way)
+    await page.evaluate((u: string) => { /* @ts-ignore */ ColdFusionNavigate(u, "rptDetail") }, `/reports/serviceEvents.cfm?office=0&tech=0&serviceType=0&Start=${today}&end=&set=1`).catch((e:any)=>{ out.seNavErr = String(e).slice(0,100) })
+    await page.waitForTimeout(3500)
 
-    const out: any = { reportUrl }
-    const dlPromise = page.waitForEvent("download", { timeout: 20000 }).catch(() => null)
-    await page.click("#__dl_probe", { force: true, timeout: 8000 }).catch((e: any) => { out.clickErr = String(e?.message || e).slice(0, 120) })
-    const dl = await dlPromise
-    out.gotDownload = Boolean(dl)
+    // STEP 3: find the rendered RecurringtasksActive link
+    const link = await page.evaluate(() => {
+      const a = document.querySelector('a[href*="RecurringtasksActive"]') as HTMLAnchorElement | null
+      return a ? { found: true, href: a.getAttribute("href"), target: a.getAttribute("target") } : { found: false }
+    })
+    out.link = link
 
-    if (dl) {
-      const p = await dl.path()
-      out.downloadFilename = dl.suggestedFilename()
-      if (p) {
-        const buf = await readFile(p)
-        out.byteLength = buf.length
-        const isZip = buf.subarray(0, 2).toString("latin1") === "PK"
-        out.isBinaryXlsx = isZip
-        const body = isZip ? null : buf.toString("utf8")
-        if (body) {
-          const root = parse(body)
-          const tables = root.querySelectorAll("table")
-          let best: any = null, bestRows = 0
-          for (const t of tables) { const rows = t.querySelectorAll("tr").length; if (rows > bestRows) { bestRows = rows; best = t } }
-          out.tableCount = tables.length
-          if (best && bestRows > 1) {
-            const trs = best.querySelectorAll("tr")
-            const cell = (tr: any) => tr.querySelectorAll("th,td").map((c: any) => c.text.replace(/\s+/g, " ").trim())
-            out.dataRows = trs.length
-            out.headerRow = trs[0] ? cell(trs[0]) : []
-            out.columnCount = out.headerRow.length
-            out.sampleRows = trs.slice(1, 4).map(cell)
-          } else { out.dataPreview = body.slice(0, 800) }
-        } else { out.note = "binary xlsx downloaded" }
+    // STEP 4: real-click it
+    if (link.found) {
+      const dlPromise = page.waitForEvent("download", { timeout: 18000 }).catch(() => null)
+      await page.click('a[href*="RecurringtasksActive"]', { force: true, timeout: 8000 }).catch((e:any)=>{ out.clickErr = String(e?.message||e).slice(0,100) })
+      const dl = (await dlPromise) || popupDownload
+      out.gotDownload = Boolean(dl)
+      if (dl) {
+        const p = await dl.path()
+        out.downloadFilename = dl.suggestedFilename()
+        if (p) {
+          const buf = await readFile(p)
+          out.byteLength = buf.length
+          const body = buf.subarray(0,2).toString("latin1") === "PK" ? null : buf.toString("utf8")
+          if (body) {
+            const root = parse(body); const rows = root.querySelectorAll("tr")
+            const hdr = rows.find((r:any)=> r.text.includes("Cust ID"))
+            out.dataRows = rows.length
+            out.headerFound = !!hdr
+          }
+        }
       }
-    } else {
-      await page.waitForTimeout(1500)
-      out.landedUrl = page.url()
-      try { out.bodyPreview = (await page.content()).slice(0, 400) } catch {}
     }
+    out.netlog = netlog
     return out
   } finally {
     await browser.close()

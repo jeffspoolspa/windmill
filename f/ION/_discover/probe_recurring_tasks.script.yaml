@@ -1,4 +1,5 @@
-summary: 'Probe v14: strip overlays + force trusted click -> capture download'
+summary: 'Probe v15: full real-app navigation (reports.cfm -> serviceEvents
+  container -> click rendered link)'
 description: ''
 lock: '!inline f/ION/_discover/probe_recurring_tasks.script.lock'
 has_on_behalf_of: false
