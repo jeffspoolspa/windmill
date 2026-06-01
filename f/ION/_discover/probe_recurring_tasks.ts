@@ -2,16 +2,14 @@
 //playwright@1.40.0
 //node-html-parser@6.1.13
 
-// Probe (read-only): faithful real-app flow to trigger session priming --
-//   login -> ColdFusionNavigate('/reports/reports.cfm','pageContent')
-//        -> ColdFusionNavigate(serviceEvents...&set=1,'rptDetail')
-//        -> click the actual rendered RecurringtasksActive link -> capture download
-// Instruments report-request statuses so we see exactly what 200s/500s.
+// Probe (read-only): v15 proved the real app nav warms the session (reports.cfm
+// -> default module -> serviceEvents, all 200). Now -- in that warmed session --
+// fetch RecurringtasksActive directly (+ navigate fallback) to see if loading
+// reports.cfm is the missing priming.
 
 import { chromium } from "playwright@1.40.0"
 import * as wmill from "windmill-client"
 import { parse } from "node-html-parser"
-import { readFile } from "fs/promises"
 
 export async function main() {
   const LOGIN_URL = await wmill.getVariable("f/ION/LOGIN_URL")
@@ -22,17 +20,9 @@ export async function main() {
     executablePath: "/usr/bin/chromium",
     args: ["--no-sandbox","--single-process","--no-zygote","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu"],
   })
-  const netlog: any[] = []
   try {
-    const context = await browser.newContext({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36", acceptDownloads: true })
-    let popupDownload: any = null
-    context.on("page", (pop: any) => {
-      pop.on("response", (res: any) => { const u = res.url(); if (/reports\/|Recurringtasks|serviceEvents/i.test(u)) netlog.push({ from: "popup", status: res.status(), url: u.replace("https://ionpoolcare.com","").slice(0,90) }) })
-      pop.on("download", (d: any) => { popupDownload = d })
-    })
+    const context = await browser.newContext({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36" })
     const page = await context.newPage()
-    page.on("response", (res: any) => { const u = res.url(); if (/reports\/|Recurringtasks|serviceEvents/i.test(u)) netlog.push({ from: "main", status: res.status(), url: u.replace("https://ionpoolcare.com","").slice(0,90) }) })
-
     await page.goto(LOGIN_URL)
     await page.locator("#txtUserName").fill(USERNAME)
     await page.locator("#txtPassword").fill(PASSWORD)
@@ -47,46 +37,36 @@ export async function main() {
     const today = new Date().toISOString().slice(0, 10)
     const out: any = {}
 
-    // STEP 1: load the Reports landing page the app way
+    // WARM the session the real app way
     await page.evaluate(() => { document.querySelectorAll('div.resizable.ui-draggable, div[id*="MyServiceWin"], div[id*="MyPrintWin"]').forEach(el => el.remove()) })
-    await page.evaluate(() => { /* @ts-ignore */ ColdFusionNavigate("/reports/reports.cfm", "pageContent") }).catch((e:any)=>{ out.reportsNavErr = String(e).slice(0,100) })
-    await page.waitForTimeout(3500)
-    out.hasRptDetail = await page.evaluate(() => !!document.getElementById("rptDetail"))
+    await page.evaluate(() => { /* @ts-ignore */ ColdFusionNavigate("/reports/reports.cfm", "pageContent") }).catch(()=>{})
+    await page.waitForTimeout(4000)
+    await page.evaluate((u: string) => { /* @ts-ignore */ ColdFusionNavigate(u, "rptDetail") }, `/reports/serviceEvents.cfm?office=0&tech=0&serviceType=0&Start=${today}&end=&set=1`).catch(()=>{})
+    await page.waitForTimeout(4000)
+    out.rptDetailHasLink = await page.evaluate(() => !!document.querySelector('a[href*="RecurringtasksActive"]'))
 
-    // STEP 2: load serviceEvents picker into rptDetail (sets session criteria the app way)
-    await page.evaluate((u: string) => { /* @ts-ignore */ ColdFusionNavigate(u, "rptDetail") }, `/reports/serviceEvents.cfm?office=0&tech=0&serviceType=0&Start=${today}&end=&set=1`).catch((e:any)=>{ out.seNavErr = String(e).slice(0,100) })
-    await page.waitForTimeout(3500)
+    const reportUrl = `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0`
 
-    // STEP 3: find the rendered RecurringtasksActive link
-    const link = await page.evaluate(() => {
-      const a = document.querySelector('a[href*="RecurringtasksActive"]') as HTMLAnchorElement | null
-      return a ? { found: true, href: a.getAttribute("href"), target: a.getAttribute("target") } : { found: false }
-    })
-    out.link = link
+    // Attempt A: in-browser fetch in the warmed session
+    const fetched = await page.evaluate(async (u: string) => {
+      const r = await fetch(u, { credentials: "include", headers: { Accept: "text/html, */*" } })
+      return { status: r.status, len: (await r.text()).length }
+    }, reportUrl)
+    out.fetch_status = fetched.status
+    out.fetch_len = fetched.len
 
-    // STEP 4: real-click it
-    if (link.found) {
-      const dlPromise = page.waitForEvent("download", { timeout: 18000 }).catch(() => null)
-      await page.click('a[href*="RecurringtasksActive"]', { force: true, timeout: 8000 }).catch((e:any)=>{ out.clickErr = String(e?.message||e).slice(0,100) })
-      const dl = (await dlPromise) || popupDownload
-      out.gotDownload = Boolean(dl)
-      if (dl) {
-        const p = await dl.path()
-        out.downloadFilename = dl.suggestedFilename()
-        if (p) {
-          const buf = await readFile(p)
-          out.byteLength = buf.length
-          const body = buf.subarray(0,2).toString("latin1") === "PK" ? null : buf.toString("utf8")
-          if (body) {
-            const root = parse(body); const rows = root.querySelectorAll("tr")
-            const hdr = rows.find((r:any)=> r.text.includes("Cust ID"))
-            out.dataRows = rows.length
-            out.headerFound = !!hdr
-          }
-        }
-      }
+    // If 200, re-fetch + parse the data
+    if (fetched.status === 200) {
+      const body = await page.evaluate(async (u: string) => (await fetch(u, { credentials: "include" })).text(), reportUrl)
+      const root = parse(body)
+      const rows = root.querySelectorAll("tr")
+      const hdrRow = rows.find((r:any) => r.text.includes("Cust ID"))
+      out.dataRows = rows.length
+      out.headerFound = !!hdrRow
+      if (hdrRow) out.header = hdrRow.querySelectorAll("td,th").map((c:any)=>c.text.replace(/\s+/g," ").trim())
+    } else {
+      out.fetch_preview = (await page.evaluate(async (u: string) => (await fetch(u, { credentials: "include" })).text(), reportUrl)).slice(0, 300)
     }
-    out.netlog = netlog
     return out
   } finally {
     await browser.close()
