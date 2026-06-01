@@ -1,29 +1,55 @@
 //bun-extra-requirements:
 //playwright@1.40.0
-//node-html-parser@6.1.13
 
-// Probe (read-only): replicate a real click of the "Recurring Task Detail -
-// Active Only" XLS link -- navigate from the authenticated page itself (natural
-// Referer) and capture the download.
-//   /reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0
+// Probe (read-only): instrument the FULL browser<->server exchange while driving
+// a real click of the "Recurring Task Detail - Active Only" report, to learn how
+// the browser fetches it (precursor requests? POST body? headers?) so we can
+// replicate it cold for the ION API. Logs every .cfm/report request + response.
 
 import { chromium } from "playwright@1.40.0"
-import * as wmill from "windmill-client"
-import { parse } from "node-html-parser"
 import { readFile } from "fs/promises"
 
 export async function main() {
-  const LOGIN_URL = await wmill.getVariable("f/ION/LOGIN_URL")
-  const USERNAME = await wmill.getVariable("f/ION/USERNAME")
-  const PASSWORD = await wmill.getVariable("f/ION/PASSWORD")
+  const LOGIN_URL = await (await import("windmill-client")).getVariable("f/ION/LOGIN_URL")
+  const USERNAME = await (await import("windmill-client")).getVariable("f/ION/USERNAME")
+  const PASSWORD = await (await import("windmill-client")).getVariable("f/ION/PASSWORD")
 
   const browser = await chromium.launch({
     executablePath: "/usr/bin/chromium",
     args: ["--no-sandbox","--single-process","--no-zygote","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu"],
   })
+  const netlog: any[] = []
+  const relevant = (u: string) => u.includes("ionpoolcare.com") && /(\/reports\/|taskList\.cfm|Recurringtasks|woReports)/i.test(u)
+
   try {
     const context = await browser.newContext({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", acceptDownloads: true })
+
+    const wire = (p: any, label: string) => {
+      p.on("request", (req: any) => {
+        const u = req.url()
+        if (!relevant(u)) return
+        const h = req.headers()
+        netlog.push({ ev: "req", from: label, method: req.method(), url: u.slice(0, 220),
+          referer: h["referer"], secFetchMode: h["sec-fetch-mode"], secFetchDest: h["sec-fetch-dest"],
+          accept: h["accept"]?.slice(0, 60), postData: req.postData()?.slice(0, 600) })
+      })
+      p.on("response", (res: any) => {
+        const u = res.url()
+        if (!relevant(u)) return
+        netlog.push({ ev: "res", from: label, status: res.status(), contentType: res.headers()["content-type"], url: u.slice(0, 220) })
+      })
+    }
+
+    let popupDownload: any = null
+    let popupContentPreview: string | null = null
+    context.on("page", async (pop: any) => {
+      wire(pop, "popup")
+      pop.on("download", (d: any) => { popupDownload = d })
+    })
+
     const page = await context.newPage()
+    wire(page, "main")
+
     await page.goto(LOGIN_URL)
     await page.locator("#txtUserName").fill(USERNAME)
     await page.locator("#txtPassword").fill(PASSWORD)
@@ -34,56 +60,49 @@ export async function main() {
     await page.locator("text=ION POOL CARE").click({ timeout: 5000 })
     await page.waitForLoadState("networkidle", { timeout: 45000 })
     const ionOrigin = new URL(page.url()).origin
-    const pageUrlAfterLogin = page.url()
     await page.waitForTimeout(2000)
 
-    const reportUrl = `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0`
+    // Drive UI to load the report-listing page the way the app does
+    await page.evaluate(() => {
+      // @ts-ignore
+      if (typeof ColdFusionNavigate === "function") ColdFusionNavigate("/tasks/taskList.cfm", "pageContent")
+    })
+    await page.waitForTimeout(4000)
 
-    // Real navigation from the authenticated page (natural Referer + navigate sec-fetch)
-    const dlPromise = page.waitForEvent("download", { timeout: 25000 }).catch(() => null)
-    let navErr: string | null = null
-    try {
-      await page.evaluate((u: string) => { window.location.assign(u) }, reportUrl)
-    } catch (e: any) { navErr = String(e?.message || e).slice(0, 150) }
-    const dl = await dlPromise
+    const linkInfo = await page.evaluate(() => {
+      const a = document.querySelector('a[href*="RecurringtasksActive"]') as HTMLAnchorElement | null
+      if (a) return { found: true, href: a.getAttribute("href"), target: a.getAttribute("target") }
+      const anchors = Array.from(document.querySelectorAll("a")).map(x => (x as HTMLAnchorElement).getAttribute("href") || "").filter(h => h.includes("reports") || h.includes(".cfm")).slice(0, 25)
+      return { found: false, bodyLen: document.body.innerHTML.length, reportishLinks: anchors }
+    })
 
-    const out: any = { reportUrl, pageUrlAfterLogin, gotDownload: Boolean(dl), navErr }
+    const dlPromise = page.waitForEvent("download", { timeout: 18000 }).catch(() => null)
+    const popupPromise = context.waitForEvent("page", { timeout: 18000 }).catch(() => null)
+    if (linkInfo.found) {
+      await page.evaluate(() => { (document.querySelector('a[href*="RecurringtasksActive"]') as HTMLElement)?.click() })
+    }
+    const mainDl = await dlPromise
+    const popup = mainDl ? null : await popupPromise
+    if (popup) {
+      await popup.waitForTimeout(3000).catch(() => {})
+      try { popupContentPreview = (await popup.content()).slice(0, 600) } catch {}
+    }
 
-    let body: string | null = null
+    const out: any = { ionOrigin, linkInfo, gotMainDownload: Boolean(mainDl), gotPopup: Boolean(popup), gotPopupDownload: Boolean(popupDownload) }
+    const dl = mainDl || popupDownload
     if (dl) {
       const p = await dl.path()
-      out.suggestedFilename = dl.suggestedFilename()
+      out.downloadFilename = dl.suggestedFilename()
       if (p) {
         const buf = await readFile(p)
         out.byteLength = buf.length
-        const isZip = buf.subarray(0, 2).toString("latin1") === "PK"
-        out.isBinaryXlsx = isZip
-        body = isZip ? null : buf.toString("utf8")
+        out.head = buf.subarray(0, 24).toString("latin1")
+        out.bodyPreview = buf.subarray(0, 2).toString("latin1") === "PK" ? "(binary xlsx)" : buf.toString("utf8").slice(0, 600)
       }
-    } else {
-      await page.waitForTimeout(2500)
-      try { body = await page.content() } catch {}
-      out.landedUrl = page.url()
-      out.byteLength = body ? body.length : 0
+    } else if (popupContentPreview) {
+      out.popupContentPreview = popupContentPreview
     }
-
-    if (body) {
-      const root = parse(body)
-      const tables = root.querySelectorAll("table")
-      let best: any = null, bestRows = 0
-      for (const t of tables) { const rows = t.querySelectorAll("tr").length; if (rows > bestRows) { bestRows = rows; best = t } }
-      out.tableCount = tables.length
-      if (best && bestRows > 1) {
-        const trs = best.querySelectorAll("tr")
-        const cell = (tr: any) => tr.querySelectorAll("th,td").map((c: any) => c.text.replace(/\s+/g, " ").trim())
-        out.dataTableRows = trs.length
-        out.headerRow = trs[0] ? cell(trs[0]) : []
-        out.columnCount = out.headerRow.length
-        out.sampleRows = trs.slice(1, 4).map(cell)
-      } else {
-        out.preview = body.slice(0, 900)
-      }
-    }
+    out.netlog = netlog
     return out
   } finally {
     await browser.close()
