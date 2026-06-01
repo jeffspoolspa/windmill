@@ -1,0 +1,68 @@
+summary: recurring_tasks (login if stale -> fetch active recurring tasks ->
+  upsert maintenance.tasks/task_schedules)
+description: Ongoing ION -> maintenance task sync (analog of ion-visits /
+  ion-work-orders). Step a calls the bulk ION endpoint (reuses the cached
+  session; chromium only if stale). Step b reconciles every active recurring
+  task into maintenance.tasks + maintenance.task_schedules keyed by ion_task_id,
+  inserts tasks for newly-onboarded customers, refreshes financial terms, and
+  soft-deactivates tasks no longer in the report. Defaults to dry_run=true
+  (rolls back). Run with dry_run=false to commit.
+value:
+  modules:
+    - id: a
+      summary: list_recurring_tasks (session reuse -> prime -> fetch -> normalize)
+      value:
+        type: script
+        input_transforms:
+          filters:
+            type: javascript
+            expr: flow_input.filters ?? {}
+        path: f/ION/api/list_recurring_tasks
+      continue_on_error: false
+      retry:
+        constant:
+          attempts: 0
+          seconds: 0
+        exponential:
+          attempts: 2
+          multiplier: 2
+          random_factor: 0
+          seconds: 10
+    - id: b
+      summary: upsert_tasks (reconcile into maintenance.tasks/task_schedules)
+      value:
+        type: script
+        input_transforms:
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run ?? true
+          source:
+            type: static
+            value: ion
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+          tasks:
+            type: javascript
+            expr: results.a
+        path: f/ION/_lib/upsert_tasks
+      continue_on_error: false
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - dry_run
+    - filters
+  properties:
+    dry_run:
+      type: boolean
+      description: If true (default), perform all writes in one transaction then ROLL
+        BACK and just report stats. Set false to commit.
+      default: true
+    filters:
+      type: object
+      description: Optional ION report filters (techid/OfficeID/serviceType). Empty =
+        all active tasks.
+      default: {}
+  required: []
