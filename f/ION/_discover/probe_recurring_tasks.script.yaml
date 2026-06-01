@@ -1,5 +1,4 @@
-summary: 'Probe v5: WO-style in-browser fetch of RecurringtasksActive (context +
-  cf params)'
+summary: 'Probe v6: faithful click (navigate from authed page) + download capture'
 description: ''
 lock: '!inline f/ION/_discover/probe_recurring_tasks.script.lock'
 has_on_behalf_of: false

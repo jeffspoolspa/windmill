@@ -2,16 +2,15 @@
 //playwright@1.40.0
 //node-html-parser@6.1.13
 
-// Probe (read-only): mirror the working work-orders report approach for the
-// "Recurring Task Detail - Active Only" report:
-//   1. login -> ION
-//   2. prime the tasks-tab context (loadExternalContent #csttasks taskList.cfm)
-//   3. in-browser fetch the report WITH ColdFusion _cf_* params
+// Probe (read-only): replicate a real click of the "Recurring Task Detail -
+// Active Only" XLS link -- navigate from the authenticated page itself (natural
+// Referer) and capture the download.
 //   /reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0
 
 import { chromium } from "playwright@1.40.0"
 import * as wmill from "windmill-client"
 import { parse } from "node-html-parser"
+import { readFile } from "fs/promises"
 
 export async function main() {
   const LOGIN_URL = await wmill.getVariable("f/ION/LOGIN_URL")
@@ -22,15 +21,9 @@ export async function main() {
     executablePath: "/usr/bin/chromium",
     args: ["--no-sandbox","--single-process","--no-zygote","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu"],
   })
-  let cfClientId: string | undefined
   try {
     const context = await browser.newContext({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", acceptDownloads: true })
     const page = await context.newPage()
-    page.on("request", (req: any) => {
-      if (cfClientId) return
-      const m = req.url().match(/_cf_clientid=([A-F0-9]{32})/i)
-      if (m) cfClientId = m[1]
-    })
     await page.goto(LOGIN_URL)
     await page.locator("#txtUserName").fill(USERNAME)
     await page.locator("#txtPassword").fill(PASSWORD)
@@ -41,46 +34,55 @@ export async function main() {
     await page.locator("text=ION POOL CARE").click({ timeout: 5000 })
     await page.waitForLoadState("networkidle", { timeout: 45000 })
     const ionOrigin = new URL(page.url()).origin
+    const pageUrlAfterLogin = page.url()
+    await page.waitForTimeout(2000)
 
-    // Prime the tasks-tab context (like the WO flow fetches its picker first)
+    const reportUrl = `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0`
+
+    // Real navigation from the authenticated page (natural Referer + navigate sec-fetch)
+    const dlPromise = page.waitForEvent("download", { timeout: 25000 }).catch(() => null)
+    let navErr: string | null = null
     try {
-      await page.evaluate(() => {
-        // @ts-ignore
-        if (typeof loadExternalContent === "function") loadExternalContent("#csttasks", "/tasks/taskList.cfm")
-      })
-    } catch {}
-    await page.waitForTimeout(3000)
+      await page.evaluate((u: string) => { window.location.assign(u) }, reportUrl)
+    } catch (e: any) { navErr = String(e?.message || e).slice(0, 150) }
+    const dl = await dlPromise
 
-    const params = new URLSearchParams({
-      techid: "0", OfficeID: "0", serviceType: "0",
-      _cf_nodebug: "true", _cf_nocache: "true", _cf_rc: "1",
-    })
-    if (cfClientId) params.set("_cf_clientid", cfClientId)
-    const reportUrl = `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?${params.toString()}`
+    const out: any = { reportUrl, pageUrlAfterLogin, gotDownload: Boolean(dl), navErr }
 
-    const r = await page.evaluate(async (u: string) => {
-      const res = await fetch(u, { credentials: "include", headers: { Accept: "text/html, */*" } })
-      return { status: res.status, contentType: res.headers.get("content-type"), body: await res.text() }
-    }, reportUrl)
-
-    const out: any = {
-      reportUrl, status: r.status, contentType: r.contentType,
-      byteLength: r.body.length, cfClientIdCaptured: Boolean(cfClientId),
-    }
-    const root = parse(r.body)
-    const tables = root.querySelectorAll("table")
-    let best: any = null, bestRows = 0
-    for (const t of tables) { const rows = t.querySelectorAll("tr").length; if (rows > bestRows) { bestRows = rows; best = t } }
-    out.tableCount = tables.length
-    if (best && bestRows > 1) {
-      const trs = best.querySelectorAll("tr")
-      const cell = (tr: any) => tr.querySelectorAll("th,td").map((c: any) => c.text.replace(/\s+/g, " ").trim())
-      out.dataTableRows = trs.length
-      out.headerRow = trs[0] ? cell(trs[0]) : []
-      out.columnCount = out.headerRow.length
-      out.sampleRows = trs.slice(1, 4).map(cell)
+    let body: string | null = null
+    if (dl) {
+      const p = await dl.path()
+      out.suggestedFilename = dl.suggestedFilename()
+      if (p) {
+        const buf = await readFile(p)
+        out.byteLength = buf.length
+        const isZip = buf.subarray(0, 2).toString("latin1") === "PK"
+        out.isBinaryXlsx = isZip
+        body = isZip ? null : buf.toString("utf8")
+      }
     } else {
-      out.preview = r.body.slice(0, 900)
+      await page.waitForTimeout(2500)
+      try { body = await page.content() } catch {}
+      out.landedUrl = page.url()
+      out.byteLength = body ? body.length : 0
+    }
+
+    if (body) {
+      const root = parse(body)
+      const tables = root.querySelectorAll("table")
+      let best: any = null, bestRows = 0
+      for (const t of tables) { const rows = t.querySelectorAll("tr").length; if (rows > bestRows) { bestRows = rows; best = t } }
+      out.tableCount = tables.length
+      if (best && bestRows > 1) {
+        const trs = best.querySelectorAll("tr")
+        const cell = (tr: any) => tr.querySelectorAll("th,td").map((c: any) => c.text.replace(/\s+/g, " ").trim())
+        out.dataTableRows = trs.length
+        out.headerRow = trs[0] ? cell(trs[0]) : []
+        out.columnCount = out.headerRow.length
+        out.sampleRows = trs.slice(1, 4).map(cell)
+      } else {
+        out.preview = body.slice(0, 900)
+      }
     }
     return out
   } finally {
