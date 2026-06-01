@@ -1,5 +1,5 @@
-summary: 'ION API: active recurring tasks - returns count + sample (bulk
-  consumers import the lib)'
+summary: 'ION API: active recurring tasks (getRecurringTasks); bulk consumers
+  import the lib'
 description: ''
 lock: '!inline f/ION/api/get_recurring_tasks.script.lock'
 has_on_behalf_of: false
