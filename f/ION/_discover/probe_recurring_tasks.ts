@@ -2,15 +2,13 @@
 //playwright@1.40.0
 //node-html-parser@6.1.13
 
-// Probe (read-only): the untried winning combo --
-//   1. fetch serviceEvents.cfm?...&set=1  (200, primes report criteria in session)
-//   2. NAVIGATE (download semantics, not XHR) to the RecurringtasksActive XLS link
-// This is the exact human flow: open reports page, then click the download link.
+// Probe (read-only): the one untested variant -- fetch RecurringtasksActive WITH
+// the SAME _cf_* params that make serviceEvents return 200. Prime serviceEvents
+// first, then in-browser fetch the xls with _cf_containerId + _cf_clientid + etc.
 
 import { chromium } from "playwright@1.40.0"
 import * as wmill from "windmill-client"
 import { parse } from "node-html-parser"
-import { readFile } from "fs/promises"
 
 export async function main() {
   const LOGIN_URL = await wmill.getVariable("f/ION/LOGIN_URL")
@@ -41,58 +39,47 @@ export async function main() {
     await page.waitForLoadState("networkidle", { timeout: 45000 })
     const ionOrigin = new URL(page.url()).origin
     await page.waitForTimeout(1500)
-
     const today = new Date().toISOString().slice(0, 10)
     const cid = cfClientId || ""
 
-    // STEP 1: prime picker (set criteria in CF session)
+    // prime
     const pickerUrl = `${ionOrigin}/reports/serviceEvents.cfm?office=0&tech=0&serviceType=0&Start=${today}&end=&set=1&_cf_containerId=rptDetail&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${cid}&_cf_rc=1`
-    const picker = await page.evaluate(async (u: string) => {
-      const r = await fetch(u, { credentials: "include", headers: { Accept: "*/*" } })
-      return { status: r.status }
-    }, pickerUrl)
+    const picker = await page.evaluate(async (u: string) => (await fetch(u, { credentials: "include", headers: { Accept: "*/*" } })).status, pickerUrl)
 
-    const out: any = { pickerStatus: picker.status, cfClientId: cid }
-
-    // STEP 2: NAVIGATE to the XLS download (not XHR)
-    const dataUrl = `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0`
-    out.dataUrl = dataUrl
-    const dlPromise = page.waitForEvent("download", { timeout: 20000 }).catch(() => null)
-    try { await page.evaluate((u: string) => { window.location.assign(u) }, dataUrl) } catch {}
-    const dl = await dlPromise
-    out.gotDownload = Boolean(dl)
-
-    if (dl) {
-      const p = await dl.path()
-      out.downloadFilename = dl.suggestedFilename()
-      if (p) {
-        const buf = await readFile(p)
-        out.byteLength = buf.length
-        const isZip = buf.subarray(0, 2).toString("latin1") === "PK"
-        out.isBinaryXlsx = isZip
-        const body = isZip ? null : buf.toString("utf8")
-        if (body) {
-          const root = parse(body)
-          const tables = root.querySelectorAll("table")
-          let best: any = null, bestRows = 0
-          for (const t of tables) { const rows = t.querySelectorAll("tr").length; if (rows > bestRows) { bestRows = rows; best = t } }
-          out.tableCount = tables.length
-          if (best && bestRows > 1) {
-            const trs = best.querySelectorAll("tr")
-            const cell = (tr: any) => tr.querySelectorAll("th,td").map((c: any) => c.text.replace(/\s+/g, " ").trim())
-            out.dataRows = trs.length
-            out.headerRow = trs[0] ? cell(trs[0]) : []
-            out.columnCount = out.headerRow.length
-            out.sampleRows = trs.slice(1, 4).map(cell)
-          } else { out.dataPreview = body.slice(0, 800) }
-        } else { out.note = "binary xlsx downloaded" }
-      }
-    } else {
-      await page.waitForTimeout(2000)
-      out.landedUrl = page.url()
-      try { out.bodyPreview = (await page.content()).slice(0, 600) } catch {}
+    // try several variants of the xls fetch in one run
+    const variants: Record<string, string> = {
+      bare: `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0`,
+      with_cf: `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0&_cf_containerId=rptDetail&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${cid}&_cf_rc=2`,
+      // some ION _xls reports use StartDate (serial) like the sibling reports
+      with_startdate: `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&StartDate=&EndDate=&serviceType=0&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${cid}&_cf_rc=3`,
     }
-    return out
+
+    const attempts: any[] = []
+    for (const [name, url] of Object.entries(variants)) {
+      const r = await page.evaluate(async (u: string) => {
+        const res = await fetch(u, { credentials: "include", headers: { Accept: "*/*" } })
+        return { status: res.status, contentType: res.headers.get("content-type"), len: (await res.text()).length }
+      }, url)
+      attempts.push({ name, url: url.slice(0, 140), status: r.status, contentType: r.contentType, len: r.len })
+    }
+
+    // for any 200, re-fetch and parse
+    let parsed: any = null
+    const ok = attempts.find((a) => a.status === 200)
+    if (ok) {
+      const full = await page.evaluate(async (u: string) => (await fetch(u, { credentials: "include", headers: { Accept: "*/*" } })).text(), variants[ok.name])
+      const root = parse(full)
+      const tables = root.querySelectorAll("table")
+      let best: any = null, bestRows = 0
+      for (const t of tables) { const rows = t.querySelectorAll("tr").length; if (rows > bestRows) { bestRows = rows; best = t } }
+      if (best) {
+        const trs = best.querySelectorAll("tr")
+        const cell = (tr: any) => tr.querySelectorAll("th,td").map((c: any) => c.text.replace(/\s+/g, " ").trim())
+        parsed = { rows: trs.length, header: trs[0] ? cell(trs[0]) : [], sample: trs.slice(1, 4).map(cell) }
+      } else { parsed = { preview: full.slice(0, 600) } }
+    }
+
+    return { pickerStatus: picker, cfClientId: cid, attempts, parsed }
   } finally {
     await browser.close()
   }
