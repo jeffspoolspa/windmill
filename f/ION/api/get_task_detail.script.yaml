@@ -1,0 +1,8 @@
+summary: 'ION API: full task detail (per-day tech + enums + notes) from the edit
+  form + ION employee-id->name roster'
+description: ''
+lock: '!inline f/ION/api/get_task_detail.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
