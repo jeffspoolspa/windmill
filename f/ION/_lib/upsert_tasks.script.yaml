@@ -1,0 +1,7 @@
+summary: 'Recurring-task sync: upsert ION RecurringTask rows into
+  maintenance.tasks/task_schedules (keyed by ion_task_id, dry_run default)'
+description: ''
+lock: '!inline f/ION/_lib/upsert_tasks.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
