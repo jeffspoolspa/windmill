@@ -1,8 +1,12 @@
 summary: recurring_tasks (login if stale -> fetch active recurring tasks ->
   upsert maintenance.tasks/task_schedules)
-description: 'Ongoing ION -> maintenance task sync. TEMP override: dry_run
-  forced false for a one-time user-authorized commit; will be restored to
-  flow_input.dry_run ?? true immediately after.'
+description: Ongoing ION -> maintenance task sync (analog of ion-visits /
+  ion-work-orders). Step a calls the bulk ION endpoint (reuses the cached
+  session; chromium only if stale). Step b reconciles every active recurring
+  task into maintenance.tasks + maintenance.task_schedules keyed by ion_task_id,
+  inserts tasks for newly-onboarded customers, refreshes financial terms, and
+  soft-closes tasks no longer in the report (ends_on = last visit). Defaults to
+  dry_run=true (rolls back). Run/schedule with dry_run=false to commit.
 value:
   modules:
     - id: a
@@ -30,8 +34,8 @@ value:
         type: script
         input_transforms:
           dry_run:
-            type: static
-            value: false
+            type: javascript
+            expr: flow_input.dry_run ?? true
           source:
             type: static
             value: ion
