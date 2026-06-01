@@ -1,4 +1,4 @@
-summary: 'Probe v11: RecurringtasksActive WITH full _cf_* params (mirror serviceEvents)'
+summary: 'Probe v12: control - replicate WO report flow with my technique'
 description: ''
 lock: '!inline f/ION/_discover/probe_recurring_tasks.script.lock'
 has_on_behalf_of: false

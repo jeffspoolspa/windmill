@@ -2,9 +2,10 @@
 //playwright@1.40.0
 //node-html-parser@6.1.13
 
-// Probe (read-only): the one untested variant -- fetch RecurringtasksActive WITH
-// the SAME _cf_* params that make serviceEvents return 200. Prime serviceEvents
-// first, then in-browser fetch the xls with _cf_containerId + _cf_clientid + etc.
+// CONTROL probe (read-only): replicate the PROVEN work-orders report flow with my
+// exact technique (woReports.cfm picker -> WorkOrderDetail link -> fetch). If this
+// returns WO data but RecurringtasksActive 500s, the issue is that report, not me.
+// Also re-tests RecurringtasksActive in the same session for a side-by-side.
 
 import { chromium } from "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -21,7 +22,7 @@ export async function main() {
   })
   let cfClientId: string | undefined
   try {
-    const context = await browser.newContext({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36", acceptDownloads: true })
+    const context = await browser.newContext({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36" })
     const page = await context.newPage()
     page.on("request", (req: any) => {
       if (cfClientId) return
@@ -39,47 +40,61 @@ export async function main() {
     await page.waitForLoadState("networkidle", { timeout: 45000 })
     const ionOrigin = new URL(page.url()).origin
     await page.waitForTimeout(1500)
-    const today = new Date().toISOString().slice(0, 10)
     const cid = cfClientId || ""
 
-    // prime
-    const pickerUrl = `${ionOrigin}/reports/serviceEvents.cfm?office=0&tech=0&serviceType=0&Start=${today}&end=&set=1&_cf_containerId=rptDetail&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${cid}&_cf_rc=1`
-    const picker = await page.evaluate(async (u: string) => (await fetch(u, { credentials: "include", headers: { Accept: "*/*" } })).status, pickerUrl)
+    const out: any = { cfClientId: cid }
 
-    // try several variants of the xls fetch in one run
-    const variants: Record<string, string> = {
-      bare: `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0`,
-      with_cf: `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0&_cf_containerId=rptDetail&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${cid}&_cf_rc=2`,
-      // some ION _xls reports use StartDate (serial) like the sibling reports
-      with_startdate: `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&StartDate=&EndDate=&serviceType=0&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${cid}&_cf_rc=3`,
+    // ===== CONTROL: WO report (proven flow from get_scheduled_wo) =====
+    const woParams = new URLSearchParams({
+      Office: "", Technician: "", ScheduleStart: "2026-05-01", ScheduleEnd: "",
+      WOType: "", WOTemplate: "", WOStatus: "", ScheduleStatus: "", ApprovalStatus: "",
+      CreatedStart: "", CreatedEnd: "", CompletedStart: "", CompletedEnd: "",
+      _cf_containerId: "rptDetail", _cf_nodebug: "true", _cf_nocache: "true", _cf_rc: "1",
+    })
+    if (cid) woParams.set("_cf_clientid", cid)
+    const woPickerUrl = `${ionOrigin}/reports/woReports.cfm?${woParams.toString()}`
+    const woPicker = await page.evaluate(async (u: string) => {
+      const r = await fetch(u, { credentials: "include", headers: { Accept: "text/html, */*" } })
+      return { status: r.status, body: await r.text() }
+    }, woPickerUrl)
+    out.wo_picker_status = woPicker.status
+    out.wo_picker_len = woPicker.body.length
+
+    const woRoot = parse(woPicker.body)
+    let woDetailHref: string | null = null
+    for (const a of woRoot.querySelectorAll("a")) {
+      const h = a.getAttribute("href") || ""
+      if (/WorkOrderDetail/i.test(h)) { woDetailHref = h; break }
     }
-
-    const attempts: any[] = []
-    for (const [name, url] of Object.entries(variants)) {
-      const r = await page.evaluate(async (u: string) => {
-        const res = await fetch(u, { credentials: "include", headers: { Accept: "*/*" } })
-        return { status: res.status, contentType: res.headers.get("content-type"), len: (await res.text()).length }
-      }, url)
-      attempts.push({ name, url: url.slice(0, 140), status: r.status, contentType: r.contentType, len: r.len })
-    }
-
-    // for any 200, re-fetch and parse
-    let parsed: any = null
-    const ok = attempts.find((a) => a.status === 200)
-    if (ok) {
-      const full = await page.evaluate(async (u: string) => (await fetch(u, { credentials: "include", headers: { Accept: "*/*" } })).text(), variants[ok.name])
-      const root = parse(full)
-      const tables = root.querySelectorAll("table")
+    out.wo_detail_href = woDetailHref ? woDetailHref.slice(0, 160) : null
+    if (woDetailHref) {
+      const woDataUrl = woDetailHref.startsWith("http") ? woDetailHref : `${ionOrigin}${woDetailHref.startsWith("/") ? "" : "/reports/"}${woDetailHref}`
+      const woData = await page.evaluate(async (u: string) => {
+        const r = await fetch(u, { credentials: "include", headers: { Accept: "text/html, */*" } })
+        return { status: r.status, body: await r.text() }
+      }, woDataUrl)
+      out.wo_data_status = woData.status
+      out.wo_data_len = woData.body.length
+      const dRoot = parse(woData.body)
+      const tables = dRoot.querySelectorAll("table")
       let best: any = null, bestRows = 0
       for (const t of tables) { const rows = t.querySelectorAll("tr").length; if (rows > bestRows) { bestRows = rows; best = t } }
       if (best) {
         const trs = best.querySelectorAll("tr")
-        const cell = (tr: any) => tr.querySelectorAll("th,td").map((c: any) => c.text.replace(/\s+/g, " ").trim())
-        parsed = { rows: trs.length, header: trs[0] ? cell(trs[0]) : [], sample: trs.slice(1, 4).map(cell) }
-      } else { parsed = { preview: full.slice(0, 600) } }
+        const cell = (tr: any) => tr.querySelectorAll("th,td").map((c: any) => c.text.replace(/\s+/g, " ").trim().slice(0, 30))
+        out.wo_data_rows = trs.length
+        out.wo_header_sample = (trs[0] ? cell(trs[0]) : []).slice(0, 12)
+      }
     }
 
-    return { pickerStatus: picker, cfClientId: cid, attempts, parsed }
+    // ===== SIDE-BY-SIDE: RecurringtasksActive in the same session =====
+    const rta = await page.evaluate(async (u: string) => {
+      const r = await fetch(u, { credentials: "include", headers: { Accept: "text/html, */*" } })
+      return { status: r.status }
+    }, `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0`)
+    out.recurringtasks_status = rta.status
+
+    return out
   } finally {
     await browser.close()
   }
