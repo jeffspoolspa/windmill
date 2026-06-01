@@ -1,5 +1,6 @@
 summary: 'Schedule day/tech derivation (#59): reconcile task_schedules
-  day_of_week/tech/frequency from taskList rows (dry_run default)'
+  day_of_week/tech/frequency from taskList rows (per-ion_task_id; dry_run
+  default)'
 description: ''
 lock: '!inline f/ION/_lib/upsert_schedules.script.lock'
 has_on_behalf_of: false
