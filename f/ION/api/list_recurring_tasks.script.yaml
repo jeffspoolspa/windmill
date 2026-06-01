@@ -1,0 +1,8 @@
+summary: 'ION API (bulk): full active-recurring-tasks array (~487 rows) for sync
+  consumers'
+description: ''
+lock: '!inline f/ION/api/list_recurring_tasks.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
