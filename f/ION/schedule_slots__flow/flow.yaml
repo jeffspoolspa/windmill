@@ -1,0 +1,84 @@
+summary: 'schedule_slots (#59): derive task_schedules day_of_week/tech/frequency
+  from taskList.cfm per customer)'
+description: "Fills the day_of_week/tech gap the active-tasks sync leaves. Step
+  a picks ION customer ids (only_dayless default = just customers with a dayless
+  active slot). Step b sequentially pulls each customer's taskList (day-of-week
+  from bolded weekly letters / Next-Service weekday for bi-weekly+monthly / all
+  days for daily; tech from Assigned To; A/B from week parity) -- SEQUENTIAL
+  because customerTabs sets one server-side customer per session. Step c
+  reconciles task_schedules keyed by ion_task_id: claims dayless slots, adds
+  missing day slots, refreshes tech/frequency; skips expired. dry_run default
+  rolls back."
+value:
+  modules:
+    - id: a
+      summary: target custids (dayless-only default)
+      value:
+        type: script
+        input_transforms:
+          only_dayless:
+            type: javascript
+            expr: flow_input.only_dayless ?? true
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        path: f/ION/_lib/schedule_target_custids
+      continue_on_error: false
+    - id: b
+      summary: sequential taskList fetch -> flat rows
+      value:
+        type: script
+        input_transforms:
+          cust_ids:
+            type: javascript
+            expr: results.a.cust_ids
+        path: f/ION/api/list_customer_tasks
+      continue_on_error: false
+      timeout:
+        type: static
+        value: 900
+    - id: c
+      summary: reconcile task_schedules day/tech/frequency
+      value:
+        type: script
+        input_transforms:
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run ?? true
+          full_reconcile:
+            type: javascript
+            expr: flow_input.full_reconcile ?? false
+          rows:
+            type: javascript
+            expr: results.b.rows
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        path: f/ION/_lib/upsert_schedules
+      continue_on_error: false
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - dry_run
+    - only_dayless
+    - full_reconcile
+  properties:
+    dry_run:
+      type: boolean
+      description: If true (default), do all writes in one transaction then ROLL BACK
+        and report stats. Set false to commit.
+      default: true
+    full_reconcile:
+      type: boolean
+      description: If true, also deactivate dated slots whose day is no longer in the
+        report. Only meaningful for a full re-derive.
+      default: false
+    only_dayless:
+      type: boolean
+      description: If true (default), only pull customers that have an active slot
+        with day_of_week NULL (the gap). False = full re-derive of all active
+        customers (~467, slower).
+      default: true
+  required: []
