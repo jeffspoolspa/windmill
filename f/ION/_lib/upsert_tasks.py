@@ -38,7 +38,10 @@ MULTI-TASK LOCATIONS (tasks_one_open_per_loc)
   A partial unique index allows only ONE open task (status active|paused) per
   service_location. So a NEW ion_task_id whose location already has an open task
   is a second contract at the same place -> we attach it as another schedule on
-  that existing task (the "merged" shape) rather than insert a second task.
+  that existing task (the "merged" shape) rather than insert a second task. This
+  also absorbs ION "task-id rotation": when ION re-issues a task at the same
+  address with a new Task ID, the new id attaches and the old slot deactivates,
+  so the task stays open (it is NOT a closure).
 
 MAPPING (report string -> column)
   billingType  -> billing_method: 'flat_rate_monthly' if 'FLAT' in upper else 'per_visit'
@@ -66,7 +69,8 @@ LIFECYCLE
 
 SAFETY
   Defaults to dry_run=True: performs every INSERT/UPDATE inside one transaction,
-  captures real rowcounts, then ROLLS BACK. Set dry_run=False to commit.
+  captures real rowcounts + example lists (new/attached/closed with names), then
+  ROLLS BACK. Set dry_run=False to commit.
 
 Public API:
     sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source='ion') -> stats
@@ -263,6 +267,9 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
         "new_slots_inserted": 0,
         "attached_slots_to_existing_task": 0,
         "new_resolved_by": defaultdict(int),
+        "new_task_examples": [],       # brand-new-location tasks
+        "attached_examples": [],       # 2nd-contract-at-loc (incl. ION task-id rotation)
+        "closed_examples": [],         # tasks soft-closed (no replacement in report)
         "unresolved_new": 0,
         "unresolved_examples": [],
         "deactivated_slots": 0,
@@ -383,6 +390,14 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                              ppv, flat, starts_on, ends_on, source),
                         )
                         stats["attached_slots_to_existing_task"] += 1
+                        if len(stats["attached_examples"]) < 60:
+                            stats["attached_examples"].append({
+                                "ion_task_id": ion_task_id,
+                                "customer": row.get("customerName"),
+                                "address": row.get("serviceAddress"),
+                                "service_type": row.get("serviceType"),
+                                "resolved_by": how,
+                            })
                     else:
                         cur.execute(
                             """INSERT INTO maintenance.tasks
@@ -398,6 +413,15 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                         # location later in the run attaches instead of double-inserting.
                         r["open_task_by_loc"][sl_id] = new_task_id
                         stats["new_tasks_inserted"] += 1
+                        if len(stats["new_task_examples"]) < 60:
+                            stats["new_task_examples"].append({
+                                "ion_task_id": ion_task_id,
+                                "customer": row.get("customerName"),
+                                "address": row.get("serviceAddress"),
+                                "city": row.get("city"),
+                                "service_type": row.get("serviceType"),
+                                "resolved_by": how,
+                            })
 
                         cur.execute(
                             """INSERT INTO maintenance.task_schedules
@@ -429,18 +453,36 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
 
                 # Tasks with no active slot left -> closed (allowed statuses:
                 # active|paused|closed). 'closed' also exits tasks_one_open_per_loc.
+                # CTE returns the closed rows joined to customer/address so the
+                # dry-run can show exactly which tasks would close (no replacement
+                # ion_task_id anywhere in the active report).
                 cur.execute(
-                    """UPDATE maintenance.tasks t
-                       SET status='closed', updated_at=now()
-                       WHERE t.external_source=%s
-                         AND t.status <> 'closed'
-                         AND NOT EXISTS (
-                           SELECT 1 FROM maintenance.task_schedules ts
-                           WHERE ts.task_id=t.id AND ts.active=true
-                         )""",
+                    """WITH closed AS (
+                           UPDATE maintenance.tasks t
+                           SET status='closed', updated_at=now()
+                           WHERE t.external_source=%s
+                             AND t.status <> 'closed'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM maintenance.task_schedules ts
+                               WHERE ts.task_id=t.id AND ts.active=true
+                             )
+                           RETURNING t.id, t.service_location_id,
+                                     t.external_data->>'service_type' AS service_type
+                       )
+                       SELECT cl.id::text, sl.street, c.display_name, cl.service_type
+                       FROM closed cl
+                       JOIN public.service_locations sl ON sl.id = cl.service_location_id
+                       JOIN public."Customers" c ON c.id = sl.account_id""",
                     (source,),
                 )
-                stats["deactivated_tasks"] = cur.rowcount
+                closed_rows = cur.fetchall()
+                stats["deactivated_tasks"] = len(closed_rows)
+                for _tid, street, display_name, service_type in closed_rows[:60]:
+                    stats["closed_examples"].append({
+                        "customer": display_name,
+                        "address": street,
+                        "service_type": service_type,
+                    })
 
         if dry_run:
             conn.rollback()
