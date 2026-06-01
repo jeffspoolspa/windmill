@@ -39,7 +39,7 @@ locks:
   f/ION/_discover/emit_session: 598e9b72e6298c53292e45e5df3aa50fed07f303ee7db9a0f8293827320b4c1c
   f/ION/_discover/parse_normalize_test: 59cb8da7c9ba546ccb4a54c51c18ef6ca6e1fe408229f37f69b6854ccb671159
   f/ION/_discover/probe_completed_logs: 92a319e6c6f252f7cfae36eb5a67eb20e51888717e86529f53416a9936452a25
-  f/ION/_discover/probe_recurring_tasks: d22f0644ecae507e667a43cb0d0f5faa8af08b12ca8603f628a6821fa75b5e81
+  f/ION/_discover/probe_recurring_tasks: 2e78a1fbe9f9db356f946ca33ff1c0483d16736eefbc9759ccc25ff84518aa74
   f/ION/_discover/timing_breakdown: dda83936276c376542510be429ad423311c4bdda8fa3f75ea95b1a56c08d4bcc
   f/ION/_lib/normalize: 9072bc8b9d53c710de2aecf0c130badbb5e192084dd6f360043b9757d1fd63dc
   f/ION/_lib/parser: 7edcdc89aa58fb5403da1599df85b8c4b0daaa4b2b40028d729ca1e9dcef1bd4

@@ -1,4 +1,4 @@
-summary: 'Probe v9: serviceEvents picker (set=1) then download link (read-only)'
+summary: 'Probe v10: prime picker (set=1) then NAVIGATE to xls download'
 description: ''
 lock: '!inline f/ION/_discover/probe_recurring_tasks.script.lock'
 has_on_behalf_of: false
