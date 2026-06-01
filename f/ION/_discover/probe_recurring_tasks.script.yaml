@@ -1,4 +1,5 @@
-summary: 'Probe v7: instrument browser exchange while driving real click of the report'
+summary: 'Probe v8: faithful navigation from authed page (natural Referer) +
+  capture sent headers'
 description: ''
 lock: '!inline f/ION/_discover/probe_recurring_tasks.script.lock'
 has_on_behalf_of: false
