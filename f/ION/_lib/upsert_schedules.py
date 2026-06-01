@@ -15,21 +15,22 @@ taskList.cfm DOES (Weekly -> bolded weekday letters; Bi-Weekly/Monthly ->
 weekday of Next Service + iso-week parity for A/B; Daily -> all days; plus the
 assigned tech). This fills those dayless slots and refreshes tech.
 
-KEY = ion_task_id (1:1 with a maintenance.task; rows carry it). For each task:
-  desired days = activeDays. Reconcile its active slots:
-    - a slot already on a desired day  -> update tech + frequency
-    - a dayless (day IS NULL) active slot -> CLAIM it for a desired day
-    - still-missing desired day         -> INSERT a new slot on that task
-  (Focused/dayless mode does NOT deactivate existing dated slots -- it only fills
-   gaps + refreshes tech, so it can't remove a legit day if taskList disagrees.
-   Full re-derive mode (full_reconcile=True) also deactivates dated slots whose
-   day is no longer in the report.)
-  expired tasks are skipped (the active-tasks sync closes them).
+KEY = ion_task_id (rows carry it). For each task's desired days:
+  - this ion_task_id already serves the day -> refresh tech (leave freq as-is)
+  - a dayless (day IS NULL) active slot of this ion_task_id -> CLAIM it for the day
+  - otherwise INSERT a new slot on the task
+UNIQUENESS GUARD: there is a partial unique index task_schedules_uniq_active on
+(task_id, day_of_week, frequency) WHERE active. A maintenance.task can bundle
+multiple ion_task_ids (merged multi-task locations), so before claiming/inserting
+a (day, frequency) we check it isn't already occupied on the TASK by another ION
+task; if it is, we SKIP it and flag it (slots_conflict_skipped) rather than
+violate the constraint. (expired tasks are skipped -- the active-tasks sync closes
+them.) Focused mode does NOT deactivate existing dated slots; full_reconcile does.
 
 TECH: public.employees.ion_username (TEXT[]) entries equal the taskList
 "Assigned To" string, but the route prefix drifts ("MNT-C KF, KOREY" vs stored
-"MNT-B KF, KOREY") -> match full string, else the route-stripped suffix
-("KF, KOREY"). "-A ASSIGN PEND"/"ASSIGN PEND" = unassigned -> null.
+"MNT-B KF, KOREY") -> match full string, else route-stripped suffix ("KF, KOREY").
+"-A ASSIGN PEND"/"ASSIGN PEND" = unassigned -> null.
 
 FREQUENCY: Weekly->weekly; Bi-Weekly-> biweekly_a if weekParity==0 else
 biweekly_b; Daily->daily; Monthly->monthly.
@@ -41,7 +42,6 @@ Public API:
 """
 
 from collections import defaultdict
-import psycopg2
 
 from f.ION._lib.upsert import _connect
 
@@ -54,8 +54,7 @@ def _route_stripped(s):
 
 
 def _build_tech_resolver(conn):
-    by_full = {}
-    by_suffix = {}
+    by_full, by_suffix = {}, {}
     with conn.cursor() as cur:
         cur.execute("SELECT id, ion_username FROM public.employees WHERE ion_username IS NOT NULL")
         for emp_id, usernames in cur.fetchall():
@@ -98,10 +97,12 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
         "skipped_expired": 0,
         "unmatched_iontask": 0,
         "unmatched_examples": [],
-        "slots_dayfilled": 0,       # claimed a dayless slot for a real day
-        "slots_inserted": 0,        # added a missing day slot
-        "slots_updated": 0,         # refreshed tech/frequency on an existing dated slot
-        "slots_deactivated": 0,     # surplus dayless / full_reconcile drops
+        "slots_dayfilled": 0,          # claimed a dayless slot for a real day
+        "slots_inserted": 0,           # added a missing day slot
+        "slots_updated": 0,            # refreshed tech on an existing dated slot
+        "slots_deactivated": 0,        # surplus dayless / full_reconcile drops
+        "slots_conflict_skipped": 0,   # (task,day,freq) already taken by another ion task
+        "conflict_examples": [],
         "tech_resolved": 0,
         "tech_unresolved": 0,
         "tech_unresolved_examples": [],
@@ -113,17 +114,20 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
     try:
         by_full, by_suffix = _build_tech_resolver(conn)
 
-        # existing slots per ion_task_id
+        # slots per ion_task_id (+ frequency) and task-level occupancy of (dow, freq)
         sched = {}
+        occupied = defaultdict(set)  # task_id -> {(dow, freq)} for ACTIVE dated slots
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT ion_task_id, id, task_id, day_of_week, active
+                SELECT ion_task_id, id, task_id, day_of_week, active, frequency
                 FROM maintenance.task_schedules
                 WHERE ion_task_id IS NOT NULL
             """)
-            for ion_task_id, sid, task_id, dow, active in cur.fetchall():
+            for ion_task_id, sid, task_id, dow, active, freq in cur.fetchall():
                 e = sched.setdefault(ion_task_id, {"task_id": task_id, "slots": []})
-                e["slots"].append({"id": sid, "dow": dow, "active": active})
+                e["slots"].append({"id": sid, "dow": dow, "active": active, "freq": freq})
+                if active and dow is not None:
+                    occupied[task_id].add((dow, freq))
 
         with conn.cursor() as cur:
             for row in rows:
@@ -151,32 +155,49 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
                 if freq:
                     stats["by_frequency"][freq] += 1
                 tech_id = _resolve_tech(by_full, by_suffix, row.get("assignedTo"))
-                if row.get("assignedTo") and "ASSIGN PEND" not in (row.get("assignedTo") or "").upper():
+                at = row.get("assignedTo") or ""
+                if at and "ASSIGN PEND" not in at.upper():
                     if tech_id is not None:
                         stats["tech_resolved"] += 1
                     else:
                         stats["tech_unresolved"] += 1
                         if len(stats["tech_unresolved_examples"]) < 15:
-                            stats["tech_unresolved_examples"].append(row.get("assignedTo"))
+                            stats["tech_unresolved_examples"].append(at)
 
                 task_id = entry["task_id"]
-                active_slots = [s for s in entry["slots"] if s["active"]]
-                days_present = {s["dow"] for s in active_slots if s["dow"] is not None}
-                dayless = [s for s in active_slots if s["dow"] is None]
+                own_active = [s for s in entry["slots"] if s["active"]]
+                own_days = {s["dow"] for s in own_active if s["dow"] is not None}
+                dayless = [s for s in own_active if s["dow"] is None]
+                occ = occupied[task_id]
+
+                def _flag_conflict(day, eff_freq):
+                    stats["slots_conflict_skipped"] += 1
+                    if len(stats["conflict_examples"]) < 15:
+                        stats["conflict_examples"].append({
+                            "ion_task_id": ion_task_id, "ion_cust_id": row.get("ionCustId"),
+                            "day": day, "freq": eff_freq,
+                        })
 
                 for day in desired:
-                    if day in days_present:
+                    if day in own_days:
+                        # this ion task already serves the day -> refresh tech only
                         cur.execute(
                             """UPDATE maintenance.task_schedules
                                SET tech_employee_id = COALESCE(%s, tech_employee_id),
-                                   frequency = COALESCE(%s, frequency),
                                    active = true, external_source=%s, updated_at=now()
                                WHERE ion_task_id=%s AND day_of_week=%s""",
-                            (tech_id, freq, source, ion_task_id, day),
+                            (tech_id, source, ion_task_id, day),
                         )
                         stats["slots_updated"] += cur.rowcount
-                    elif dayless:
-                        s = dayless.pop(0)
+                        continue
+
+                    if dayless:
+                        s = dayless[0]
+                        eff_freq = freq or s["freq"]
+                        if (day, eff_freq) in occ:
+                            _flag_conflict(day, eff_freq)
+                            continue
+                        dayless.pop(0)
                         cur.execute(
                             """UPDATE maintenance.task_schedules
                                SET day_of_week=%s,
@@ -187,8 +208,13 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
                             (day, tech_id, freq, source, s["id"]),
                         )
                         stats["slots_dayfilled"] += 1
-                        days_present.add(day)
+                        occ.add((day, eff_freq))
+                        own_days.add(day)
                     else:
+                        eff_freq = freq
+                        if (day, eff_freq) in occ:
+                            _flag_conflict(day, eff_freq)
+                            continue
                         cur.execute(
                             """INSERT INTO maintenance.task_schedules
                                  (task_id, ion_task_id, day_of_week, tech_employee_id,
@@ -197,18 +223,19 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
                             (task_id, ion_task_id, day, tech_id, freq, source),
                         )
                         stats["slots_inserted"] += 1
-                        days_present.add(day)
+                        occ.add((day, eff_freq))
+                        own_days.add(day)
 
-                # leftover dayless slots for this task are surplus -> deactivate
+                # leftover dayless slots for this ion task are surplus -> deactivate
                 for s in dayless:
                     cur.execute(
-                        """UPDATE maintenance.task_schedules SET active=false, updated_at=now()
-                           WHERE id=%s""", (s["id"],))
+                        "UPDATE maintenance.task_schedules SET active=false, updated_at=now() WHERE id=%s",
+                        (s["id"],),
+                    )
                     stats["slots_deactivated"] += cur.rowcount
 
                 if full_reconcile:
-                    # deactivate dated slots whose day is no longer in the report
-                    for s in active_slots:
+                    for s in own_active:
                         if s["dow"] is not None and s["dow"] not in desired:
                             cur.execute(
                                 """UPDATE maintenance.task_schedules SET active=false, updated_at=now()
