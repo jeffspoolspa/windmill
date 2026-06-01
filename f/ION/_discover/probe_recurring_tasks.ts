@@ -2,10 +2,9 @@
 //playwright@1.40.0
 //node-html-parser@6.1.13
 
-// Probe (read-only): net-export showed the working request is a genuine user-gesture
-// navigation (sec-fetch-user: ?1, sec-fetch-mode: navigate, accept: text/html). All
-// my prior attempts were fetch() or scripted navigations (no sec-fetch-user). Fix:
-// inject a real anchor and use Playwright's TRUSTED click -> sets sec-fetch-user: ?1.
+// Probe (read-only): trusted click is the fix (sec-fetch-user:?1), but ION overlays
+// blocked the injected anchor. Strip overlays, inject a top-most anchor, force-click
+// (still a real input gesture) -> navigation/download.
 
 import { chromium } from "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -34,24 +33,25 @@ export async function main() {
     await page.locator("text=ION POOL CARE").click({ timeout: 5000 })
     await page.waitForLoadState("networkidle", { timeout: 45000 })
     const ionOrigin = new URL(page.url()).origin
-    await page.waitForTimeout(1500)
+    await page.waitForTimeout(2000)
 
     const reportUrl = `${ionOrigin}/reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0`
 
-    // Inject a real anchor (no target so the download fires on this page)
+    // strip overlays/popups + inject a top-most full-screen anchor
     await page.evaluate((href: string) => {
+      document.querySelectorAll('div.resizable.ui-draggable, div[id*="MyServiceWin"], div[id*="MyPrintWin"], .ui-widget-overlay, .modal, .x-mask').forEach(el => el.remove())
       const a = document.createElement("a")
       a.id = "__dl_probe"
       a.href = href
-      a.textContent = "download-probe"
-      a.style.position = "fixed"; a.style.top = "0"; a.style.left = "0"; a.style.zIndex = "99999"
+      a.textContent = "DOWNLOAD PROBE"
+      a.style.cssText = "position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:2147483647;background:#fff;display:block;font-size:30px;"
       document.body.appendChild(a)
     }, reportUrl)
+    await page.waitForTimeout(500)
 
     const out: any = { reportUrl }
     const dlPromise = page.waitForEvent("download", { timeout: 20000 }).catch(() => null)
-    // TRUSTED click -> real input events -> sec-fetch-user: ?1
-    await page.click("#__dl_probe", { timeout: 8000 }).catch((e: any) => { out.clickErr = String(e?.message || e).slice(0, 120) })
+    await page.click("#__dl_probe", { force: true, timeout: 8000 }).catch((e: any) => { out.clickErr = String(e?.message || e).slice(0, 120) })
     const dl = await dlPromise
     out.gotDownload = Boolean(dl)
 
@@ -81,9 +81,9 @@ export async function main() {
         } else { out.note = "binary xlsx downloaded" }
       }
     } else {
-      await page.waitForTimeout(2000)
+      await page.waitForTimeout(1500)
       out.landedUrl = page.url()
-      try { out.bodyPreview = (await page.content()).slice(0, 500) } catch {}
+      try { out.bodyPreview = (await page.content()).slice(0, 400) } catch {}
     }
     return out
   } finally {
