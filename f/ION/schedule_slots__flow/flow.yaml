@@ -1,8 +1,14 @@
 summary: 'schedule_slots (#59): derive task_schedules day_of_week/tech/frequency
   from taskList.cfm per customer)'
-description: 'Schedule-slot derivation. TEMP override: step c dry_run forced
-  false for a one-time user-authorized commit of the dayless fix; restored to
-  flow_input.dry_run ?? true immediately after.'
+description: "Fills the day_of_week/tech gap the active-tasks sync leaves. Step
+  a picks ION customer ids (only_dayless default = just customers with a dayless
+  active slot). Step b sequentially pulls each customer's taskList (day from
+  bolded weekly letters / Next-Service weekday for bi-weekly+monthly / all days
+  for daily; tech from Assigned To; A/B from week parity) -- SEQUENTIAL because
+  customerTabs sets one server-side current-customer per session. Step c
+  reconciles task_schedules keyed by ion_task_id: claims dayless slots, adds
+  missing day slots, refreshes tech/frequency; skips expired. Defaults to
+  dry_run=true. Run/schedule with dry_run=false to commit."
 value:
   modules:
     - id: a
@@ -37,8 +43,8 @@ value:
         type: script
         input_transforms:
           dry_run:
-            type: static
-            value: false
+            type: javascript
+            expr: flow_input.dry_run ?? true
           full_reconcile:
             type: javascript
             expr: flow_input.full_reconcile ?? false
