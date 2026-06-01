@@ -3,13 +3,8 @@
 //node-html-parser@6.1.13
 
 // Probe: fetch ION's "Recurring Task Detail - Active Only" report and report
-// its structure, so we can map it into maintenance.tasks / task_schedules for
-// the recurring task sync. Read-only.
-//
-// Endpoint (from /tasks/taskList.cfm "Service Events Reports" page):
+// its structure (read-only). Captures the body preview even on error.
 //   /reports/_xls/RecurringtasksActive.cfm?techid=0&OfficeID=0&serviceType=0
-//   = "Customer and Task details for all active recurring tasks" (XLS export)
-// Detects HTML-table-as-xls (typical for ColdFusion _xls) vs binary xlsx.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -39,6 +34,7 @@ export async function main() {
     contentType,
     byteLength: buf.length,
     format: isZipXlsx ? "binary_xlsx" : looksHtml ? "html_table" : "unknown",
+    preview: isZipXlsx ? "(binary)" : text.slice(0, 2000),
   }
 
   if (looksHtml && !isZipXlsx) {
@@ -53,18 +49,16 @@ export async function main() {
         best = t
       }
     }
+    result.tableCount = tables.length
     if (best) {
       const trs = best.querySelectorAll("tr")
       const cellText = (tr: any) =>
         tr.querySelectorAll("th,td").map((c: any) => c.text.replace(/\s+/g, " ").trim())
-      result.tableCount = tables.length
       result.dataTableRows = trs.length
       result.headerRow = trs[0] ? cellText(trs[0]) : []
       result.columnCount = result.headerRow.length
       result.sampleRows = trs.slice(1, 6).map(cellText)
     }
-  } else {
-    result.preview = text.slice(0, 500)
   }
 
   return result
