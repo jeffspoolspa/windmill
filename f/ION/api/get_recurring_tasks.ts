@@ -1,11 +1,11 @@
 //bun-extra-requirements:
 //playwright@1.40.0
 
-// ION API endpoint: get all active recurring tasks (typed).
-// Reusable data-retrieval call: wmill.run_script("f/ION/api/get_recurring_tasks")
-// returns clean typed rows, hiding ION's session-priming + HTML scraping.
-// Today logs in per run; NEXT = cached background session (ADR 002). Chromium-tagged
-// because it may need to log in; the data path itself is pure HTTP.
+// ION API endpoint: active recurring tasks. Returns a count + small sample so the
+// inline result stays light (the full set is ~487 rows). BULK consumers (e.g. the
+// task sync) should import { primeReportsContext, fetchRecurringTasks } from
+// "/f/ION/_lib/reports" and process the array in-process. Today logs in per run;
+// NEXT = cached background session (ADR 002). Chromium-tagged for the login step.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -21,5 +21,5 @@ export async function main() {
   const session = await loginToIon(ion)
   await primeReportsContext(session)
   const tasks = await fetchRecurringTasks(session)
-  return { count: tasks.length, tasks }
+  return { count: tasks.length, sample: tasks.slice(0, 2) }
 }
