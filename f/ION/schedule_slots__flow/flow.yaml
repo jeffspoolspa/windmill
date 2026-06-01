@@ -1,14 +1,8 @@
 summary: 'schedule_slots (#59): derive task_schedules day_of_week/tech/frequency
   from taskList.cfm per customer)'
-description: "Fills the day_of_week/tech gap the active-tasks sync leaves. Step
-  a picks ION customer ids (only_dayless default = just customers with a dayless
-  active slot). Step b sequentially pulls each customer's taskList (day-of-week
-  from bolded weekly letters / Next-Service weekday for bi-weekly+monthly / all
-  days for daily; tech from Assigned To; A/B from week parity) -- SEQUENTIAL
-  because customerTabs sets one server-side customer per session. Step c
-  reconciles task_schedules keyed by ion_task_id: claims dayless slots, adds
-  missing day slots, refreshes tech/frequency; skips expired. dry_run default
-  rolls back."
+description: 'Schedule-slot derivation. TEMP override: step c dry_run forced
+  false for a one-time user-authorized commit of the dayless fix; restored to
+  flow_input.dry_run ?? true immediately after.'
 value:
   modules:
     - id: a
@@ -43,8 +37,8 @@ value:
         type: script
         input_transforms:
           dry_run:
-            type: javascript
-            expr: flow_input.dry_run ?? true
+            type: static
+            value: false
           full_reconcile:
             type: javascript
             expr: flow_input.full_reconcile ?? false
@@ -72,13 +66,12 @@ schema:
       default: true
     full_reconcile:
       type: boolean
-      description: If true, also deactivate dated slots whose day is no longer in the
-        report. Only meaningful for a full re-derive.
+      description: If true, also deactivate dated slots no longer in the report. Only
+        for a full re-derive.
       default: false
     only_dayless:
       type: boolean
-      description: If true (default), only pull customers that have an active slot
-        with day_of_week NULL (the gap). False = full re-derive of all active
-        customers (~467, slower).
+      description: If true (default), only customers with a dayless active slot. False
+        = full re-derive of all active customers.
       default: true
   required: []
