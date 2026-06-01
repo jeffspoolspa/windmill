@@ -58,8 +58,9 @@ LIFECYCLE
                              task if one exists, else INSERT task + one minimal
                              schedule (no day/tech)
   - ion_task_id absent from the report -> soft-deactivate: slot.active=false,
-                             ends_on; then task.status='inactive' once it has no
-                             active slot left. (Carter: mark inactive, never delete.)
+                             ends_on; then task.status='closed' once it has no
+                             active slot left. (Carter: mark closed, never delete.
+                             'closed' also frees the loc from tasks_one_open_per_loc.)
   (*external_data/starts_on refreshed only for un-merged tasks; merged tasks get
     status/updated_at only, since one report row can't own a merged row's metadata.)
 
@@ -426,12 +427,13 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                 )
                 stats["deactivated_slots"] = cur.rowcount
 
-                # Tasks with no active slot left -> inactive.
+                # Tasks with no active slot left -> closed (allowed statuses:
+                # active|paused|closed). 'closed' also exits tasks_one_open_per_loc.
                 cur.execute(
                     """UPDATE maintenance.tasks t
-                       SET status='inactive', updated_at=now()
+                       SET status='closed', updated_at=now()
                        WHERE t.external_source=%s
-                         AND t.status <> 'inactive'
+                         AND t.status <> 'closed'
                          AND NOT EXISTS (
                            SELECT 1 FROM maintenance.task_schedules ts
                            WHERE ts.task_id=t.id AND ts.active=true
