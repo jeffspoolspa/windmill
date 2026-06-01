@@ -1,8 +1,11 @@
 summary: 'relink_visits: backfill task_id + task_schedule_id on existing
   maintenance.visits from clean tasks/schedules'
-description: 'Visit re-link backfill. TEMP override: dry_run forced false for a
-  one-time user-authorized commit; restored to flow_input.dry_run ?? true
-  immediately after.'
+description: Re-resolves task_id (the location's open task) + task_schedule_id
+  (best day+tech+price slot) over existing visits now that tasks/schedules are
+  clean. Fill-only by default (won't overwrite existing links). Visits on a
+  non-scheduled weekday are left unlinked at the slot grain (off-cadence -- a
+  real signal). dry_run default rolls back. overwrite=true also re-resolves
+  existing slot links; since=ISO date limits to recent visits.
 value:
   modules:
     - id: a
@@ -11,8 +14,8 @@ value:
         type: script
         input_transforms:
           dry_run:
-            type: static
-            value: false
+            type: javascript
+            expr: flow_input.dry_run ?? true
           overwrite:
             type: javascript
             expr: flow_input.overwrite ?? false
