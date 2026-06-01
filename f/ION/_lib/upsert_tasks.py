@@ -1,5 +1,5 @@
-## requirements:
-## psycopg2-binary
+# requirements:
+# psycopg2-binary
 
 """
 f/ION/_lib/upsert_tasks
@@ -34,6 +34,12 @@ WHAT THE REPORT CANNOT SUPPLY (so this sync never touches it on existing rows)
   one task row (their slots legitimately disagree on price/frequency) -- matching
   by ion_task_id only ever updates the right slots.
 
+MULTI-TASK LOCATIONS (tasks_one_open_per_loc)
+  A partial unique index allows only ONE open task (status active|paused) per
+  service_location. So a NEW ion_task_id whose location already has an open task
+  is a second contract at the same place -> we attach it as another schedule on
+  that existing task (the "merged" shape) rather than insert a second task.
+
 MAPPING (report string -> column)
   billingType  -> billing_method: 'flat_rate_monthly' if 'FLAT' in upper else 'per_visit'
                   ("Flat Rate (list consumables)" is the only flat variant; the
@@ -48,9 +54,9 @@ MAPPING (report string -> column)
 LIFECYCLE
   - existing ion_task_id  -> update task (status='active', dates, external_data*)
                              + update its slots' financial terms
-  - new ion_task_id       -> resolve service_location_id (ion_cust_id map, then
-                             address+name, then address-only-if-unique) and
-                             INSERT task + one minimal schedule (no day/tech)
+  - new ion_task_id       -> resolve service_location_id; attach to the loc's open
+                             task if one exists, else INSERT task + one minimal
+                             schedule (no day/tech)
   - ion_task_id absent from the report -> soft-deactivate: slot.active=false,
                              ends_on; then task.status='inactive' once it has no
                              active slot left. (Carter: mark inactive, never delete.)
@@ -129,11 +135,12 @@ def parse_ion_date(s):
 def _build_task_resolvers(conn):
     """
     Returns:
-      sl_by_addr_name : {(norm_addr, norm_name): sl_id}
-      sl_by_addr_only : {norm_addr: [sl_id, ...]}
-      sl_by_ion_cust  : {ion_cust_id: sl_id}   (from existing tasks' external_data)
-      sched_by_iontask: {ion_task_id: {"task_id":.., "schedule_ids":[..]}}
-      merged_task_ids : set(task_id) that bundle >1 ion_task_id (don't refresh metadata)
+      sl_by_addr_name  : {(norm_addr, norm_name): sl_id}
+      sl_by_addr_only  : {norm_addr: [sl_id, ...]}
+      sl_by_ion_cust   : {ion_cust_id: sl_id}   (from existing tasks' external_data)
+      sched_by_iontask : {ion_task_id: {"task_id":.., "schedule_ids":[..]}}
+      merged_task_ids  : set(task_id) that bundle >1 ion_task_id (don't refresh metadata)
+      open_task_by_loc : {service_location_id: open task_id}
     """
     sl_by_addr_name = {}
     sl_by_addr_only = defaultdict(list)
@@ -183,12 +190,26 @@ def _build_task_resolvers(conn):
 
     merged_task_ids = {t for t, ids in iontasks_per_task.items() if len(ids) > 1}
 
+    # service_location_id -> open task_id. The partial unique index
+    # tasks_one_open_per_loc allows only ONE task with status in (active,paused)
+    # per location, so a NEW ion_task_id whose location already has an open task
+    # must attach as another SCHEDULE on that task, not insert a second task.
+    open_task_by_loc = {}
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT service_location_id, id FROM maintenance.tasks
+            WHERE status IN ('active','paused')
+        """)
+        for sl_id, task_id in cur.fetchall():
+            open_task_by_loc.setdefault(sl_id, task_id)
+
     return {
         "sl_by_addr_name": sl_by_addr_name,
         "sl_by_addr_only": sl_by_addr_only,
         "sl_by_ion_cust": sl_by_ion_cust,
         "sched_by_iontask": sched_by_iontask,
         "merged_task_ids": merged_task_ids,
+        "open_task_by_loc": open_task_by_loc,
     }
 
 
@@ -239,6 +260,7 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
         "updated_slots": 0,
         "new_tasks_inserted": 0,
         "new_slots_inserted": 0,
+        "attached_slots_to_existing_task": 0,
         "new_resolved_by": defaultdict(int),
         "unresolved_new": 0,
         "unresolved_examples": [],
@@ -341,29 +363,52 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                         continue
 
                     stats["new_resolved_by"][how] += 1
-                    cur.execute(
-                        """INSERT INTO maintenance.tasks
-                             (service_location_id, status, starts_on, ends_on,
-                              external_source, external_data)
-                           VALUES (%s, 'active', COALESCE(%s, CURRENT_DATE), %s, %s, %s::jsonb)
-                           RETURNING id""",
-                        (sl_id, starts_on, ends_on, source,
-                         json.dumps(_build_external_data(row))),
-                    )
-                    new_task_id = cur.fetchone()[0]
-                    stats["new_tasks_inserted"] += 1
 
-                    cur.execute(
-                        """INSERT INTO maintenance.task_schedules
-                             (task_id, ion_task_id, frequency, billing_method,
-                              price_per_visit_cents, flat_rate_monthly_cents,
-                              active, starts_on, ends_on, external_source)
-                           VALUES (%s, %s, %s, %s, %s, %s, true,
-                                   COALESCE(%s, CURRENT_DATE), %s, %s)""",
-                        (new_task_id, ion_task_id, freq, billing_method,
-                         ppv, flat, starts_on, ends_on, source),
-                    )
-                    stats["new_slots_inserted"] += 1
+                    # tasks_one_open_per_loc: only ONE open task per location.
+                    # If this location already has an open task, this ION task is
+                    # a second contract at the same place -> attach it as another
+                    # schedule on that task (the "merged" multi-task-location shape)
+                    # rather than inserting a second (constraint-violating) task.
+                    target_task_id = r["open_task_by_loc"].get(sl_id)
+                    if target_task_id is not None:
+                        cur.execute(
+                            """INSERT INTO maintenance.task_schedules
+                                 (task_id, ion_task_id, frequency, billing_method,
+                                  price_per_visit_cents, flat_rate_monthly_cents,
+                                  active, starts_on, ends_on, external_source)
+                               VALUES (%s, %s, %s, %s, %s, %s, true,
+                                       COALESCE(%s, CURRENT_DATE), %s, %s)""",
+                            (target_task_id, ion_task_id, freq, billing_method,
+                             ppv, flat, starts_on, ends_on, source),
+                        )
+                        stats["attached_slots_to_existing_task"] += 1
+                    else:
+                        cur.execute(
+                            """INSERT INTO maintenance.tasks
+                                 (service_location_id, status, starts_on, ends_on,
+                                  external_source, external_data)
+                               VALUES (%s, 'active', COALESCE(%s, CURRENT_DATE), %s, %s, %s::jsonb)
+                               RETURNING id""",
+                            (sl_id, starts_on, ends_on, source,
+                             json.dumps(_build_external_data(row))),
+                        )
+                        new_task_id = cur.fetchone()[0]
+                        # Register so a SECOND new ion_task_id at this same (new)
+                        # location later in the run attaches instead of double-inserting.
+                        r["open_task_by_loc"][sl_id] = new_task_id
+                        stats["new_tasks_inserted"] += 1
+
+                        cur.execute(
+                            """INSERT INTO maintenance.task_schedules
+                                 (task_id, ion_task_id, frequency, billing_method,
+                                  price_per_visit_cents, flat_rate_monthly_cents,
+                                  active, starts_on, ends_on, external_source)
+                               VALUES (%s, %s, %s, %s, %s, %s, true,
+                                       COALESCE(%s, CURRENT_DATE), %s, %s)""",
+                            (new_task_id, ion_task_id, freq, billing_method,
+                             ppv, flat, starts_on, ends_on, source),
+                        )
+                        stats["new_slots_inserted"] += 1
 
             # -- soft-deactivate everything ion-sourced that's gone from the report --
             # Slots first.
