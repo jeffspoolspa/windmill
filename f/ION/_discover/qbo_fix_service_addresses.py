@@ -1,4 +1,5 @@
 # requirements:
+# wmill
 # requests
 
 # One-off QBO customer cleanup: align ShipAddr (service address) to ION's service
@@ -14,8 +15,6 @@ import wmill
 
 QBO_RES = "u/carter/quickbooks_api"
 
-# qbo_customer_id -> change. 'street' rewrites the street line to ION's service addr.
-# 'typo' replaces a substring anywhere in the address (PARRISH 'CICLE'->'CIRCLE').
 UPDATES = {
     "4072": {"street": "116 LINWOOD COURT"},   # HEATON: ION services 116 Linwood (QBO had 116 CARGO LANE)
     "20":   {"street": "69 THORNHILL DR"},      # DEZEREAUX: ION says 69 THORNHILL DR (QBO had 69 THORNHILL ROAD)
