@@ -1,0 +1,7 @@
+summary: 'Capture-nonactive step 1: service_locations that still have task-less
+  visits (targets to pull full ION taskList for)'
+description: ''
+lock: '!inline f/ION/_lib/capture_targets.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
