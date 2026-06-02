@@ -1,0 +1,7 @@
+summary: 'Throwaway probe: do ION service logs emit separate rows per task per
+  day for WINDING RIVER?'
+description: ''
+lock: '!inline f/ION/_discover/_probe_wr.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
