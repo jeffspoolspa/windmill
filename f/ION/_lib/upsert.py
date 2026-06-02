@@ -12,20 +12,19 @@ Layer 3 of the ION ingest pipeline:
 
 What it does:
   1. Loads in-memory FK resolvers ONCE per run (Customers + service_locations,
-     employees.ion_username, public.items by name).
+     employees.ion_username, public.items by name, active tasks+rates per sl).
   2. For each canonical row:
        - Resolves service_location_id by (normalized_address, normalized_name).
-         If the address is unique we accept name mismatch; otherwise require both.
        - Resolves actual_tech_id by ion_username.
        - Get-or-create pool_id by (service_location_id, pool_name).
-       - Combines visit_date + start_time/end_time strings into timestamps.
-       - Derives visit_type and billing_method from ION strings.
-  3. UPSERT visits via UNIQUE (service_location_id, scheduled_date, pool_id, service_type)
-     -- one visit per pool per service type per day (multi-pool communities log a
-     separate ION service event per pool; the older (loc, scheduled_date) grain
-     collapsed them and under-counted).
+       - Attributes the visit to the location's task whose RATE matches the
+         visit price (multi-contract communities), then the (day, tech) slot.
+       - Combines visit_date + start/end time into timestamps; derives
+         visit_type + billing_method.
+  3. UPSERT visits via UNIQUE (service_location_id, scheduled_date, pool_id,
+     service_type) -- one visit per pool per service type per day.
   4. DELETE chem_readings + consumables_usage + visit_tasks for those visit_ids,
-     then INSERT. (Cleaner than partial-unique upserts; idempotent on re-runs.)
+     then INSERT. (Idempotent on re-runs.)
 
 Public API:
     upsert_canonical(canonical_rows, supabase_connection) -> stats dict
@@ -155,51 +154,87 @@ def build_resolvers(conn):
         for item_id, item_name in cur.fetchall():
             items_by_name[item_name.upper().strip()] = item_id
 
-    # Active task per service_location + their schedule slots.
-    # Pre-loading these avoids a per-row query.
-    task_by_sl = {}  # service_location_id -> task_uuid
-    schedules_by_task = defaultdict(list)  # task_uuid -> [(task_schedule_id, dow, tech_id)]
+    # Active tasks per service_location, WITH their rate/billing so a per-pool
+    # visit can attribute to the RIGHT task at a multi-contract location
+    # (e.g. WINDING RIVER = a $85 POOL MAINTENANCE task + $50 CHEMICAL TESTING
+    # tasks). Keyed by sl -> [task meta]; each meta carries the (max) per-visit
+    # rate, flat amount, billing_method, and its (day, tech) schedule slots.
+    tasks_by_sl = defaultdict(list)
+    task_meta = {}  # task_id -> meta dict (also the element stored in tasks_by_sl)
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT t.id, t.service_location_id, ts.id, ts.day_of_week, ts.tech_employee_id
+            SELECT t.id, t.service_location_id,
+                   ts.id, ts.day_of_week, ts.tech_employee_id,
+                   ts.billing_method, ts.price_per_visit_cents, ts.flat_rate_monthly_cents
             FROM maintenance.tasks t
             LEFT JOIN maintenance.task_schedules ts ON ts.task_id = t.id AND ts.active = true
             WHERE t.status IN ('active','paused')
         """)
-        for task_id, sl_id, sched_id, dow, tech_id in cur.fetchall():
-            # Multiple tasks per sl shouldn't happen given the partial unique
-            # index, but we're defensive — first wins.
-            if sl_id not in task_by_sl:
-                task_by_sl[sl_id] = task_id
+        for task_id, sl_id, sched_id, dow, tech_id, bm, rate, flat in cur.fetchall():
+            m = task_meta.get(task_id)
+            if m is None:
+                m = {"task_id": task_id, "rate": None, "flat": None,
+                     "billing_method": None, "schedules": []}
+                task_meta[task_id] = m
+                tasks_by_sl[sl_id].append(m)
+            if rate is not None and (m["rate"] is None or rate > m["rate"]):
+                m["rate"] = rate
+            if flat is not None and m["flat"] is None:
+                m["flat"] = flat
+            if bm and not m["billing_method"]:
+                m["billing_method"] = bm
             if sched_id is not None:
-                schedules_by_task[task_id].append((sched_id, dow, tech_id))
+                m["schedules"].append((sched_id, dow, tech_id))
 
     return {
         "sl_by_addr_name": sl_by_addr_name,
         "sl_by_addr_only": sl_by_addr_only,
         "tech_by_username": tech_by_username,
         "items_by_name": items_by_name,
-        "task_by_sl": task_by_sl,
-        "schedules_by_task": dict(schedules_by_task),
+        "tasks_by_sl": dict(tasks_by_sl),
     }
 
 
-def resolve_task_and_schedule(resolvers, service_location_id, visit_date, actual_tech_id):
+def _choose_task(candidates, price_cents, billing_method):
+    """Pick which of a location's active tasks a visit belongs to.
+
+    Single task -> it. Multi-contract location -> attribute by RATE so each
+    visit lands on the task billed at its price (a $85 POOL MAINTENANCE visit ->
+    the $85 task; a $50 CHEMICAL TESTING visit -> a $50 task). Same-rate ties are
+    arbitrary but harmless: the customer-month expected (sum of rate x visits) is
+    identical whichever same-rate task wins.
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    if billing_method == "flat_rate_monthly":
+        flats = [c for c in candidates if c["billing_method"] == "flat_rate_monthly"]
+        return flats[0] if flats else candidates[0]
+    pool = [c for c in candidates if c["billing_method"] != "flat_rate_monthly"] or candidates
+    exact = [c for c in pool if c["rate"] is not None and c["rate"] == price_cents]
+    if exact:
+        return exact[0]
+    return min(pool, key=lambda c: abs((c["rate"] or 0) - (price_cents or 0)))
+
+
+def resolve_task_and_schedule(resolvers, service_location_id, visit_date, actual_tech_id,
+                              price_cents=None, billing_method=None):
     """Returns (task_id, task_schedule_id, scheduled_tech_id) or all None if no task.
 
-    Match strategy for schedule slot:
-      1. task_schedules with matching day_of_week AND tech_employee_id == actual_tech
-         (the tech actually did their normally-scheduled visit)
-      2. task_schedules with matching day_of_week (any tech) — when there was a
-         reassignment, this still surfaces the slot the visit "belonged to"
-      3. None — visit happened but doesn't map to any active schedule slot
-         (could be a make-up visit, QC, etc.)
+    Step 1: pick the task at this location whose rate matches the visit (handles
+    multi-contract communities). Step 2: pick the (day, tech) schedule slot:
+      1. matching day_of_week AND tech_employee_id == actual_tech
+      2. matching day_of_week (any tech) — reassignment case
+      3. None — off-schedule (make-up, QC, etc.)
     """
-    task_id = resolvers["task_by_sl"].get(service_location_id)
-    if task_id is None:
+    candidates = resolvers["tasks_by_sl"].get(service_location_id, [])
+    chosen = _choose_task(candidates, price_cents, billing_method)
+    if chosen is None:
         return None, None, None
+    task_id = chosen["task_id"]
 
-    schedules = resolvers["schedules_by_task"].get(task_id, [])
+    schedules = chosen["schedules"]
     if not schedules:
         return task_id, None, None
 
@@ -254,8 +289,6 @@ def combine_datetime(d, time_str):
             return None
     try:
         t = datetime.strptime(time_str.strip(), "%I:%M %p").time()
-        # No tz attached — Postgres column is timestamptz with default tz
-        # AT TIME ZONE 'America/New_York' could be applied in SQL later if needed.
         return datetime.combine(d, t).isoformat()
     except (ValueError, TypeError):
         return None
@@ -308,9 +341,9 @@ def get_or_create_pool(conn, service_location_id, pool_name, source="ion"):
 def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
     """Take canonical-shaped rows from f/ION/_lib/normalize and write to maintenance.*
 
-    Idempotency: visits use UPSERT on (service_location_id, scheduled_date, pool_id,
+    Idempotency: visits UPSERT on (service_location_id, scheduled_date, pool_id,
     service_type). chem_readings + consumables_usage + visit_tasks are
-    DELETE-then-INSERT for the touched visit_ids to avoid partial-unique edge cases.
+    DELETE-then-INSERT for the touched visit_ids.
     """
     conn = _connect(supabase_connection)
     try:
@@ -329,9 +362,8 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             "visit_tasks_inserted": 0,
         }
 
-        # Build prepared visit rows + indexable links to readings/consumables
         visit_buffer = []   # list of dicts ready to insert
-        per_row_extras = []  # parallel to visit_buffer: {chem, consumables}
+        per_row_extras = []  # parallel to visit_buffer
 
         for row in canonical_rows:
             v = row.get("visits", {}) or {}
@@ -340,9 +372,6 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             consumables = row.get("consumables_usage_rows", []) or []
             visit_tasks = row.get("visit_tasks_rows", []) or []
 
-            # ION's "Address1" is the customer name as a ship-to label;
-            # "Address2" is the actual street. Try Address2 first; fall back
-            # to Address1 if Address2 is empty.
             primary_addr = v.get("_address2") or v.get("_address1")
             secondary_addr = v.get("_address1") if primary_addr == v.get("_address2") else None
 
@@ -381,13 +410,9 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             if was_created:
                 stats["pools_created"] += 1
 
-            # Task + schedule resolution. Determines:
-            #   task_id          — which recurring contract this visit belongs to
-            #   task_schedule_id — which (day, tech) slot it fills
-            #   scheduled_tech_id — who SHOULD have done it per the schedule
-            # If actual_tech_id != scheduled_tech_id, it's a reassignment.
+            # Task + schedule resolution (rate-matched at multi-contract locations).
             task_id, task_schedule_id, scheduled_tech = resolve_task_and_schedule(
-                resolvers, sl_id, visit_date, tech_id
+                resolvers, sl_id, visit_date, tech_id, price_cents, billing_method
             )
             if task_id is not None:
                 stats.setdefault("tasks_linked", 0)
@@ -471,10 +496,6 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                 visit_ids.append(cur.fetchone()[0])
                 stats["visits_upserted"] += 1
 
-        # DELETE existing chem + consumables + visit_tasks for these visits,
-        # then INSERT. Same DELETE-then-INSERT idempotency pattern across all
-        # three — re-running an ingestion for the same visit_ids replaces
-        # the per-visit detail rather than appending duplicates.
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM maintenance.chem_readings WHERE visit_id = ANY(%s::uuid[])",
@@ -555,9 +576,6 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                 stats["consumables_inserted"] = len(cons_rows)
 
         # Insert visit_tasks (one row per checked-or-unchecked task per visit).
-        # Canonical task_name comes from f/ION/_lib/normalize.resolve_task_alias,
-        # which maps raw ION column headers (Brsh, Vac, Cell, ...) to
-        # snake_case canonical names.
         task_rows = []
         for visit_id, extras in zip(visit_ids, per_row_extras):
             pool_id = extras["pool_id"]
@@ -585,7 +603,6 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
 
         conn.commit()
 
-        # Make defaultdict JSON-friendly
         stats["consumables_unresolved_items"] = dict(
             sorted(stats["consumables_unresolved_items"].items(), key=lambda kv: -kv[1])[:20]
         )

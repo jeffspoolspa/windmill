@@ -1,6 +1,6 @@
 summary: ION canonical upsert
-description: 'v5: per-pool visit grain (service_location_id, scheduled_date,
-  pool_id, service_type)'
+description: 'v6: per-pool grain + rate-based per-ion-task attribution
+  (multi-contract communities)'
 lock: '!inline f/ION/_lib/upsert.script.lock'
 has_on_behalf_of: false
 kind: script
