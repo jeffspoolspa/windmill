@@ -1,8 +1,14 @@
 summary: 'capture_nonactive_tasks: sync expired/one-time ION tasks for
   task-less-visit customers + link visits (every visit gets a task)'
-description: 'Capture non-active ION tasks. TEMP override: step c dry_run forced
-  false for a one-time user-authorized commit; restored to flow_input.dry_run ??
-  true immediately after.'
+description: "Makes every visit have a task. Step a finds service_locations with
+  task-less visits. Step b resolves each to its ION customer (customerlist
+  search, street match) and pulls the FULL taskList (active + expired/one-time
+  -- what #58's active-only sync skips). Step c creates the missing
+  maintenance.tasks (expired->closed, active->active) + schedule slots and links
+  the location's task-less visits to the task whose [starts,ends] window
+  contains the visit date (STRICT -- no fuzzy fallback; duplicate-twin
+  SHIPWATCH/CHANEY stay unmatched for the merge fix). dry_run default rolls
+  back."
 value:
   modules:
     - id: a
@@ -34,8 +40,8 @@ value:
         type: script
         input_transforms:
           dry_run:
-            type: static
-            value: false
+            type: javascript
+            expr: flow_input.dry_run ?? true
           rows:
             type: javascript
             expr: results.b.rows
