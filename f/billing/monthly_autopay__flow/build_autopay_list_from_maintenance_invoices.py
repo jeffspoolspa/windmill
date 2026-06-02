@@ -13,9 +13,11 @@ def main(
     Invoice-driven autopay list builder.
     Pulls ALL unpaid maintenance invoices (current + prior months) for each
     ACTIVE autopay customer (billing.autopay_customers.is_active = true).
-    The charge method is resolved here from billing.customer_payment_methods:
-    the pinned method (autopay_customers.payment_method_id) if it is still
-    active, otherwise the most-recently-added active method (qbo_created_at).
+    The charge method is the one LINKED on the autopay record
+    (autopay_customers.payment_method_id -> customer_payment_methods). It is
+    NOT resolved at run time: whatever is linked is what gets charged, until it
+    is changed manually. Customers with no linked method (payment_method_id IS
+    NULL) fall through to a live QBO lookup in the charge step (module d1).
     """
     month_name = datetime.strptime(billing_month, "%Y-%m").strftime("%B %Y")
 
@@ -35,21 +37,14 @@ def main(
 
         base_query = """
             SELECT mi.qbo_customer_id, mi.customer_name,
-                chosen.qbo_payment_method_id, chosen.type, chosen.card_brand, chosen.last_four,
+                linked.qbo_payment_method_id, linked.type, linked.card_brand, linked.last_four,
                 ac.email, ac.payment_status, ac.consecutive_declines,
                 mi.qbo_invoice_id, mi.doc_number, mi.invoice_total, mi.balance_due,
-                mi.billing_month, chosen.pm_row_id
+                mi.billing_month, linked.id
             FROM billing_audit.maintenance_invoices mi
             JOIN billing.autopay_customers ac ON mi.qbo_customer_id = ac.qbo_customer_id
-            LEFT JOIN LATERAL (
-                SELECT pm.id AS pm_row_id, pm.qbo_payment_method_id, pm.type,
-                       pm.card_brand, pm.last_four
-                FROM billing.customer_payment_methods pm
-                WHERE pm.qbo_customer_id = ac.qbo_customer_id AND pm.is_active
-                ORDER BY (pm.id = ac.payment_method_id) DESC,
-                         pm.qbo_created_at DESC, pm.is_default DESC, pm.id DESC
-                LIMIT 1
-            ) chosen ON true
+            LEFT JOIN billing.customer_payment_methods linked
+                ON linked.id = ac.payment_method_id
             WHERE ac.is_active = true
               AND COALESCE(mi.balance_due, mi.invoice_total) > 0
         """
@@ -166,7 +161,7 @@ def main(
         "test_mode": test_mode, "total_customers": len(customers),
         "good_standing": good_count, "payment_issue_customers": issue_count,
         "customers_with_outstanding_maint": customers_with_outstanding,
-        "customers_without_resolved_method": no_method_count,
+        "customers_without_linked_method": no_method_count,
         "skipped_already_processed": len(skipped_terminal),
         "skipped_terminal_details": skipped_terminal[:10],
         "customers": customers

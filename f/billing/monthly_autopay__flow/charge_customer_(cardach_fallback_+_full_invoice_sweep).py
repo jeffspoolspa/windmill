@@ -213,7 +213,7 @@ def main(customer: dict, billing_month: str, access_token: str, realm_id: str, d
             active_bank = {"id": rm["qbo_payment_method_id"], "accountNumber": rm.get("last_four") or "", "bankName": rm.get("card_brand") or "Bank", "verificationStatus": "VERIFIED", "default": True}
         else:
             active_card = {"id": rm["qbo_payment_method_id"], "cardType": rm.get("card_brand") or "Card", "number": rm.get("last_four") or "", "expMonth": "", "expYear": "", "status": "ACTIVE", "default": True}
-        result["payment_method_source"] = "table_newest_active"
+        result["payment_method_source"] = "table_linked"
         result["notes"].append(f"Method from payment-methods table: {rm.get('card_brand') or rm.get('kind')} ending {rm.get('last_four')}")
     else:
         # No synced active method in the table -> fall back to live QBO lookup
