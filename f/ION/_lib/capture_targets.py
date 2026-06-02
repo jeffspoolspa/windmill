@@ -14,7 +14,10 @@ then create the missing maintenance.tasks and link the visits (step b + c).
 from f.ION._lib.upsert import _connect
 
 
-def main(supabase_connection):
+def main(supabase_connection, limit=0):
+    """Task-less-visit service_locations, highest visit-count first. limit>0 caps
+    the batch (chunk the per-customer ION capture under step b's 900s timeout;
+    committed batches drop out of the gap so re-running advances to the next set)."""
     conn = _connect(supabase_connection)
     try:
         with conn.cursor() as cur:
@@ -27,7 +30,8 @@ def main(supabase_connection):
                 WHERE v.task_id IS NULL
                 GROUP BY 1,2,3,4,5
                 ORDER BY count(*) DESC
-            """)
+                %s
+            """ % ("LIMIT %d" % int(limit) if limit and int(limit) > 0 else ""))
             targets = [{
                 "service_location_id": r[0], "name": r[1], "street": r[2], "city": r[3],
                 "account_id": r[4], "visits": r[5],

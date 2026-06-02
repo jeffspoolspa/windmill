@@ -45,7 +45,7 @@ locks:
   f/ION/_discover/probe_completed_logs: 92a319e6c6f252f7cfae36eb5a67eb20e51888717e86529f53416a9936452a25
   f/ION/_discover/probe_recurring_tasks: 5b88ad0bcc8ead436d0e05eb5116ca7dcbfbc89c4ba20f032d2601dd0d8f6839
   f/ION/_discover/timing_breakdown: dda83936276c376542510be429ad423311c4bdda8fa3f75ea95b1a56c08d4bcc
-  f/ION/_lib/capture_targets: 6015c6063b9a8ab04ef98ade5479116d17c30bbb980eb072fcc501301e1ce25f
+  f/ION/_lib/capture_targets: 495706c5c7e6596274fa9204bb62de122041dab119f2a0544bc580472f80a7a3
   f/ION/_lib/link_visits_by_event: c4ce449d71b9be88e14ab21120ae1bcdc09836c4020961a9320442f623f0f9f8
   f/ION/_lib/merge_dup_customers: 8a2c49caa387d6a714eccc3ef46838d5d067c6e114090c7d60ce0f78160ab8b0
   f/ION/_lib/normalize: 9072bc8b9d53c710de2aecf0c130badbb5e192084dd6f360043b9757d1fd63dc
