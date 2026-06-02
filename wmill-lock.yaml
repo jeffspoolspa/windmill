@@ -48,6 +48,7 @@ locks:
   f/ION/_lib/schedule_target_custids: 75348fb36a03b552defb359bfa880df1cccb08faff7a5a81d76c66c36dd0ecc3
   f/ION/_lib/session: c2db4050a7798e510588f948cadd75696b148dac8925f0b40a83b02c72f601fc
   f/ION/_lib/upsert: e469192ab7bfcef2c9e848f0f3a27281fed3cc67cc2e994ec852622cc500a724
+  f/ION/_lib/upsert_nonactive_tasks: 9521c15c88adfb3eca9626d28f1224e2876c5a1f4936ce3243986fc8cf4007a3
   f/ION/_lib/upsert_schedules: 9b30afb1238001583ee55466e8dd8b61515c8e56a7ef3626fca54820ca1d4d85
   f/ION/_lib/upsert_tasks: 74373b9d647d2968f9a0840012179e8ec4860344231b635186394205a046d9f0
   f/ION/api/get_customer_tasks: 5f42381db02071b3753b534c2dac5464ba14be26de453219205dc374762e0fc1
