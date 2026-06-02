@@ -1,0 +1,62 @@
+summary: 'capture_nonactive_tasks: sync expired/one-time ION tasks for
+  task-less-visit customers + link visits (every visit gets a task)'
+description: "Makes every visit have a task. Step a finds service_locations with
+  task-less visits. Step b resolves each to its ION customer (customerlist
+  search, street match) and pulls the FULL taskList (active + expired/one-time
+  -- what #58's active-only sync skips). Step c creates the missing
+  maintenance.tasks (expired->closed, active->active) + schedule slots and links
+  the location's task-less visits by date window. dry_run default rolls back."
+value:
+  modules:
+    - id: a
+      summary: task-less-visit targets
+      value:
+        type: script
+        input_transforms:
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        path: f/ION/_lib/capture_targets
+      continue_on_error: false
+    - id: b
+      summary: resolve ion customerid + full taskList
+      value:
+        type: script
+        input_transforms:
+          targets:
+            type: javascript
+            expr: results.a.targets
+        path: f/ION/api/resolve_customer_tasks
+      continue_on_error: false
+      timeout:
+        type: static
+        value: 900
+    - id: c
+      summary: create non-active tasks + link visits
+      value:
+        type: script
+        input_transforms:
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run ?? true
+          rows:
+            type: javascript
+            expr: results.b.rows
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        path: f/ION/_lib/upsert_nonactive_tasks
+      continue_on_error: false
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - dry_run
+  properties:
+    dry_run:
+      type: boolean
+      description: If true (default), do all writes in one transaction then ROLL BACK
+        and report stats. Set false to commit.
+      default: true
+  required: []
