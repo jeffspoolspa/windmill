@@ -1,0 +1,8 @@
+summary: 'Throwaway: dump raw CompletedLogDetail columns for WINDING RIVER 05-25
+  to find the NON-SERVICEABLE field'
+description: ''
+lock: '!inline f/ION/_discover/_probe_nonservice.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
