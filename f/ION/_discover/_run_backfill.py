@@ -14,8 +14,8 @@ Edit WINDOW + PROBE_ONLY, redeploy, run. Deletable after the backfill is done.
 
 import f.ION._discover.backfill_visits as bf
 
-START_MONTH = "2026-01"
-END_MONTH = "2026-03"
+START_MONTH = "2025-01"
+END_MONTH = "2025-06"
 PROBE_ONLY = False  # real upsert
 
 
