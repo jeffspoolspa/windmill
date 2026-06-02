@@ -13,4 +13,4 @@ requests==2.34.2
 soupsieve==2.8.4
 typing-extensions==4.15.0
 urllib3==2.7.0
-wmill==1.713.1
+wmill==1.714.0

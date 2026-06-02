@@ -1,5 +1,5 @@
 summary: 'Deliberate no-arg runner: real backfill of maintenance.visits for a
-  baked window (async via runScriptByPath)'
+  baked window'
 description: ''
 lock: '!inline f/ION/_discover/_run_backfill.script.lock'
 has_on_behalf_of: false
