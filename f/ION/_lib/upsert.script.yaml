@@ -1,5 +1,6 @@
 summary: ION canonical upsert
-description: 'v4: links visits to task + task_schedule + scheduled_tech_id'
+description: 'v5: per-pool visit grain (service_location_id, scheduled_date,
+  pool_id, service_type)'
 lock: '!inline f/ION/_lib/upsert.script.lock'
 has_on_behalf_of: false
 kind: script

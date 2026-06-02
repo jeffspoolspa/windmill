@@ -20,9 +20,12 @@ What it does:
        - Get-or-create pool_id by (service_location_id, pool_name).
        - Combines visit_date + start_time/end_time strings into timestamps.
        - Derives visit_type and billing_method from ION strings.
-  3. UPSERT visits via UNIQUE (service_location_id, scheduled_date).
-  4. DELETE chem_readings + consumables_usage for those visit_ids, then INSERT.
-     (Cleaner than partial-unique upserts; idempotent on re-runs.)
+  3. UPSERT visits via UNIQUE (service_location_id, scheduled_date, pool_id, service_type)
+     -- one visit per pool per service type per day (multi-pool communities log a
+     separate ION service event per pool; the older (loc, scheduled_date) grain
+     collapsed them and under-counted).
+  4. DELETE chem_readings + consumables_usage + visit_tasks for those visit_ids,
+     then INSERT. (Cleaner than partial-unique upserts; idempotent on re-runs.)
 
 Public API:
     upsert_canonical(canonical_rows, supabase_connection) -> stats dict
@@ -305,9 +308,9 @@ def get_or_create_pool(conn, service_location_id, pool_name, source="ion"):
 def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
     """Take canonical-shaped rows from f/ION/_lib/normalize and write to maintenance.*
 
-    Idempotency: visits use UPSERT on (service_location_id, scheduled_date).
-    chem_readings + consumables_usage are DELETE-then-INSERT for the touched
-    visit_ids to avoid partial-unique edge cases.
+    Idempotency: visits use UPSERT on (service_location_id, scheduled_date, pool_id,
+    service_type). chem_readings + consumables_usage + visit_tasks are
+    DELETE-then-INSERT for the touched visit_ids to avoid partial-unique edge cases.
     """
     conn = _connect(supabase_connection)
     try:
@@ -398,6 +401,8 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
 
             visit_buffer.append({
                 "service_location_id": sl_id,
+                "pool_id": pool_id,
+                "service_type": v.get("_service_type"),
                 "task_id": task_id,
                 "task_schedule_id": task_schedule_id,
                 "scheduled_date": visit_date,
@@ -433,18 +438,18 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                 cur.execute(
                     """
                     INSERT INTO maintenance.visits
-                      (service_location_id, task_id, task_schedule_id,
+                      (service_location_id, pool_id, service_type, task_id, task_schedule_id,
                        scheduled_date, visit_date,
                        scheduled_tech_id, actual_tech_id, started_at, ended_at,
                        status, visit_type, price_cents, billing_method,
                        office, notes, external_source)
                     VALUES
-                      (%(service_location_id)s, %(task_id)s, %(task_schedule_id)s,
+                      (%(service_location_id)s, %(pool_id)s, %(service_type)s, %(task_id)s, %(task_schedule_id)s,
                        %(scheduled_date)s, %(visit_date)s,
                        %(scheduled_tech_id)s, %(actual_tech_id)s, %(started_at)s, %(ended_at)s,
                        %(status)s, %(visit_type)s, %(price_cents)s, %(billing_method)s,
                        %(office)s, %(notes)s, %(external_source)s)
-                    ON CONFLICT (service_location_id, scheduled_date) DO UPDATE SET
+                    ON CONFLICT (service_location_id, scheduled_date, pool_id, service_type) DO UPDATE SET
                       task_id             = COALESCE(EXCLUDED.task_id, maintenance.visits.task_id),
                       task_schedule_id    = COALESCE(EXCLUDED.task_schedule_id, maintenance.visits.task_schedule_id),
                       visit_date          = EXCLUDED.visit_date,
