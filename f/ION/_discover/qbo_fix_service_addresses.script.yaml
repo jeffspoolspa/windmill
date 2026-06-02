@@ -1,0 +1,7 @@
+summary: Clean up mislinked QBO customer ShipAddr (align to ION service
+  address). dry_run default.
+description: ''
+lock: '!inline f/ION/_discover/qbo_fix_service_addresses.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
