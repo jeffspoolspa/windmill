@@ -1,7 +1,8 @@
-summary: 'Probe ion home/customerlogs.cfm: does it return EventID/task ids per
-  log row (vs per-log addLog)?'
+summary: 'Probe ion home/customerlogs.cfm (global daily logs): structure, date
+  param, per-row EventID/task id + customer'
 description: ''
 lock: '!inline f/ION/_discover/probe_customerlogs.script.lock'
 has_on_behalf_of: false
 kind: script
 schema: null
+tag: chromium
