@@ -26,12 +26,16 @@ Per (customer, billing_month) we set, on every matching task_billing_period row:
   reconciled_at         now()
   notes                 short diff summary; flags partial_coverage + multi_invoice
 
+BILLING-COVERAGE GATE: a closed month is only reconciled once its monthly billing
+run has fired (>= min_coverage of the month's promise-customers have a month-end
+maintenance invoice). Running on the 1st, May has ~no invoices yet -> May is
+SKIPPED (left visits_accruing), not false-flagged as 'missed'.
+
 COVERAGE CAVEAT: maintenance.visits currently starts 2026-04-06, so APRIL is a
 PARTIAL month (week 1 missing) -> per_visit April promises undercount by ~1 visit
 and will read as mismatch; flat_rate_monthly April promises are unaffected (full
-month). Rows in PARTIAL_MONTHS get a 'partial_coverage' note. The current/future
-month (no invoice yet) is left untouched as 'visits_accruing' -- only months that
-have closed (billing_month < this month) are reconciled.
+month). Rows in PARTIAL_MONTHS get a 'partial_coverage' note. Only closed months
+(billing_month < this month) are considered.
 
 SAFETY: dry_run=True default -> UPDATE in a transaction, gather the summary, then
 ROLLBACK. Set dry_run=False to commit.
@@ -106,7 +110,8 @@ def _parse_invoice(line_items):
     return labor_cents, cons
 
 
-def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01):
+def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
+         min_coverage=0.5):
     conn = _connect(supabase_connection)
     try:
         # ---- load the customer-month maintenance invoices ----
@@ -135,11 +140,34 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01):
                 for k, v in (cons or {}).items():
                     g["cons"][k] = g["cons"].get(k, 0) + float(v)
 
-        # ---- reconcile each customer-month ----
+        # ---- billing-coverage gate: only reconcile months whose monthly billing
+        #      run has actually fired. A closed month with almost no month-end
+        #      maintenance invoices isn't "missed" -- it just hasn't been billed
+        #      yet (e.g. running this on the 1st before the month's run). Leave
+        #      those promises untouched (status stays visits_accruing). ----
+        prom_cust = {}
+        for (cust, month) in groups:
+            prom_cust.setdefault(month, set()).add(cust)
+        inv_cust = {}
+        for (cust, month) in inv:
+            inv_cust.setdefault(month, set()).add(cust)
+        coverage = {}
+        reconcilable = set()
+        for month, custs in prom_cust.items():
+            covered = len(custs & inv_cust.get(month, set()))
+            cov = covered / len(custs) if custs else 0.0
+            coverage[month.strftime("%Y-%m")] = round(cov, 3)
+            if cov >= min_coverage:
+                reconcilable.add(month)
+        skipped_months = sorted(m.strftime("%Y-%m") for m in prom_cust if m not in reconcilable)
+
+        # ---- reconcile each customer-month (in a billed month) ----
         updates = []
         summary = {}  # month -> status -> count
         tot = {"expected": 0, "invoiced": 0}
         for (cust, month), g in groups.items():
+            if month not in reconcilable:
+                continue  # month not billed yet -> leave as visits_accruing
             partial = month in PARTIAL_MONTHS
             iv = inv.get((cust, month))
             note_bits = []
@@ -202,6 +230,8 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01):
             "total_expected_usd": round(tot["expected"] / 100.0, 2),
             "total_invoiced_usd": round(tot["invoiced"] / 100.0, 2),
             "by_month_status": by_month,
+            "month_coverage": coverage,
+            "skipped_unbilled_months": skipped_months,
         }
     except Exception:
         conn.rollback()
