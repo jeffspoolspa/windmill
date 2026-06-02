@@ -1,0 +1,7 @@
+summary: Build task_billing_periods (write-ahead invoice promises) from
+  maintenance.visits
+description: ''
+lock: '!inline f/billing_audit/build_task_billing_periods.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
