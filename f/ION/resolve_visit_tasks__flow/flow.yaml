@@ -1,0 +1,110 @@
+summary: 'Durable visit->task resolver: simple 1:1 by logic; complex via
+  authoritative ION log EventID (pull missing tasks)'
+description: "Group May visits by customer (step a). Simple customers (every
+  visit exactly 1 candidate task: same customer + active-at-log-date + same
+  service family) get linked 1:1 by logic. Complex customers (any visit 0 or 2+
+  candidates -- green-pool/QC with no task, multi-pool communities) take the
+  authoritative ION-log path: pull the customer's full task list (c), create
+  missing task ids (d), read each log's EventID (e), and set visit.task_id by
+  EventID (f). One ION pass per complex customer = 100% certainty without
+  per-visit lookups. dry_run=true rolls back DB writes (ION reads still run, so
+  it validates discovery)."
+value:
+  modules:
+    - id: a
+      summary: classify visits simple/complex
+      value:
+        type: script
+        input_transforms:
+          billing_month:
+            type: static
+            value: 2026-05
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        path: f/ION/_lib/resolve_visit_targets
+    - id: b
+      summary: apply simple 1:1 + null complex
+      value:
+        type: script
+        input_transforms:
+          complex_targets:
+            type: javascript
+            expr: results.a.complex_targets
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run ?? true
+          simple_assignments:
+            type: javascript
+            expr: results.a.simple_assignments
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        path: f/ION/_lib/apply_simple_null_complex
+    - id: c
+      summary: pull complex customers' full task lists from ION
+      value:
+        type: script
+        input_transforms:
+          targets:
+            type: javascript
+            expr: Array.from(new
+              Map(results.a.complex_targets.map(t=>[t.service_location_id,{service_location_id:t.service_location_id,name:t.name,street:t.street}])).values())
+        path: f/ION/api/resolve_customer_tasks
+      timeout:
+        type: static
+        value: 900
+    - id: d
+      summary: upsert missing tasks (pull task ids)
+      value:
+        type: script
+        input_transforms:
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run ?? true
+          rows:
+            type: javascript
+            expr: results.c.rows
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        path: f/ION/_lib/upsert_nonactive_tasks
+    - id: e
+      summary: 'per complex visit: log -> EventID'
+      value:
+        type: script
+        input_transforms:
+          visits:
+            type: javascript
+            expr: results.a.complex_targets
+        path: f/ION/api/resolve_visit_tasks_via_log
+      timeout:
+        type: static
+        value: 900
+    - id: f
+      summary: link visit.task_id by EventID
+      value:
+        type: script
+        input_transforms:
+          dry_run:
+            type: javascript
+            expr: flow_input.dry_run ?? true
+          links:
+            type: javascript
+            expr: results.e.links
+          supabase_connection:
+            type: static
+            value: $res:u/carter/supabase
+        path: f/ION/_lib/link_visits_by_event
+has_on_behalf_of: false
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  order:
+    - dry_run
+  properties:
+    dry_run:
+      type: boolean
+      description: true (default) rolls back all DB writes; ION reads still run.
+      default: true
+  required: []
