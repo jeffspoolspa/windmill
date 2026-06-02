@@ -1,0 +1,11 @@
+summary: Resolve ground-truth EventIDs for rate-ambiguous locations (loglist -> addLog)
+description: 'Step 2 of the EventID correction. For each ambiguous target
+  {service_location_id, ion_customerid, start_date, end_date}: prime
+  customerTabs, pull loglist, addLog each log in window -> {service_location_id,
+  scheduled_date, timein, event_id, serviceable}. Sequential (session customer
+  context). Reuses the cached ION session.'
+lock: '!inline f/ION/api/resolve_ambiguous_eventids.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
