@@ -1,8 +1,12 @@
 summary: 'link_visits_via_log: authoritative visit->task linker via ION service
   log (loglist->LogID->addLog->EventID)'
-description: 'Authoritative log-based visit->task linker. TEMP: step c dry_run
-  forced false for a one-time user-authorized commit; restored to
-  flow_input.dry_run ?? true immediately after.'
+description: 'Fallback linker for visits the day/window resolver misses. Step a
+  = task-less visits (+ion_cust hint). Step b = per visit: resolve ION customer,
+  fetch loglist (date->LogID), open addLog.cfm?LogID -> EventID (ground-truth
+  task id ION recorded on the service log). Step c = set visit.task_id to the
+  task whose ion_task_id = EventID. dry_run default rolls back. sl_mismatch
+  flags links whose task lives on a different service_location (junk-sl
+  strandings -- separate cleanup).'
 value:
   modules:
     - id: a
@@ -34,8 +38,8 @@ value:
         type: script
         input_transforms:
           dry_run:
-            type: static
-            value: false
+            type: javascript
+            expr: flow_input.dry_run ?? true
           links:
             type: javascript
             expr: results.b.links
