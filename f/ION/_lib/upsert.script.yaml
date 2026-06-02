@@ -1,6 +1,8 @@
-summary: ION canonical upsert
-description: 'v7: per-service visit grain (loc, date, service_type) - service
-  bodies bill together; rate-based task attribution'
+summary: ION canonical upsert (per-log grain, ion_task_id + is_serviceable)
+description: 'v8: visit grain = one row per ION log (sl, date, service_type,
+  pool_id, started_at). Carries ion_task_id (rate-attributed; provisional at
+  rate-ambiguous locations) + is_serviceable. Billable count computed at the
+  promise level as distinct serviceable days per task.'
 lock: '!inline f/ION/_lib/upsert.script.lock'
 has_on_behalf_of: false
 kind: script
