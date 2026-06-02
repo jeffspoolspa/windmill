@@ -43,6 +43,7 @@ locks:
   f/ION/_discover/_probe_wr2: 4cc444be5e47c203bd7f0d701405b2e1edbf8ba9705bfbb1ee10ada63613a965
   f/ION/_discover/_run_backfill: 553dc9c4aa18bc018d30ebc418605ff6ecbe620a68665a07d89364762cac66a8
   f/ION/_discover/_run_may_reingest: 31194f9722763abbab201a9fa3435442f4d54b1e04b4f2607698ce5aa475a324
+  f/ION/_discover/_run_wr_commit: ce608e0a35732c09a54ee13bad95a323ba7be3124e2840e2a5955d05ba42a678
   f/ION/_discover/_run_wr_eventid_correct: a37b8bd60d36746e9e3c0b9416fdef637c8b2824c95776bdb3b81a1de51aabff
   f/ION/_discover/backfill_visits: 9ecc1d8e6d0a7ad40ce6ce0b724a3a3bf9c00eff99135288d5cc3f9e95a5ed19
   f/ION/_discover/diagnose_unresolved: 970bb7726625741c55c612dec8cd516913db45a0eb0cc8c030580914a3b3b920
