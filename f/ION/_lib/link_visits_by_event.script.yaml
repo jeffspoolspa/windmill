@@ -1,0 +1,7 @@
+summary: 'Log-linker step 3: set visit.task_id = task whose ion_task_id =
+  EventID from the service log (dry_run default)'
+description: ''
+lock: '!inline f/ION/_lib/link_visits_by_event.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
