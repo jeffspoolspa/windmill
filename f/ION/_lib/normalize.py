@@ -102,6 +102,44 @@ def _yes_no_to_bool(v):
     return None
 
 
+# ─── Non-serviceable detection (the "+1" fix) ───────────────────────────────────
+# ION logs some service events that it does NOT bill: holidays, no-access, skips.
+# Carter confirmed these are NON-SERVICEABLE visits. The bulk CompletedLogDetail
+# report has NO explicit serviceable/status column, but non-serviceable rows are
+# identifiable by ZERO DURATION:
+#   - Start == End  (e.g. "10:56 AM" == "10:56 AM" — the tech clocked no time)
+#   - Actual == 0   (actual minutes on site is zero)
+# Note: Price can still be non-zero ($50) on these rows, so a price>0 filter MISSES
+# them — that is exactly the over-count that produced the WINDING RIVER "+1"
+# (05-25 Memorial Day "Holiday" CHEMICAL TESTING logs). ION/QBO correctly do not
+# charge them; our code was counting them as billable. PROOF: excluding the
+# zero-duration 05-25 logs makes WINDING RIVER tasks 5333857 (21->20) and
+# 5333849 (8->7) reconcile EXACTLY to the $3,305 invoice.
+#
+# Conservative rule: a row is non-serviceable ONLY when we have positive evidence
+# of zero duration. Missing/blank times are NOT treated as non-serviceable (absence
+# of data != evidence of a skip) — those stay serviceable so we never silently drop
+# a real visit we simply lack a clock time for.
+
+def _is_serviceable(flat: dict) -> bool:
+    """Return False for zero-duration (non-serviceable) ION log rows, True otherwise.
+
+    Reads the raw ION report fields (pre-mapping): 'Start', 'End', 'Actual'.
+    """
+    start = (str(flat.get("Start") or "")).strip()
+    end = (str(flat.get("End") or "")).strip()
+    actual = _parse_float(flat.get("Actual"))
+
+    # Evidence 1: clock shows no time on site (start time == end time, both present).
+    if start and end and start == end:
+        return False
+    # Evidence 2: actual minutes explicitly zero (independent corroboration; some
+    # rows carry Actual without usable Start/End).
+    if actual is not None and actual == 0:
+        return False
+    return True
+
+
 TRANSFORMS = {
     "identity":             _identity,
     "parse_float":          _parse_float,
@@ -301,6 +339,13 @@ def normalize_row(
             bad_transform.append((source_field, m.get("transform")))
             continue
         canonical[m["canonical_table"]][m["canonical_field"]] = transformed
+
+    # Non-serviceable flag (zero-duration logs ION doesn't bill). Computed from the
+    # raw report fields, attached to the visit so the upsert can persist it and the
+    # promise builder can exclude it from billable_visit_count. Defaults to True
+    # (serviceable) — we only flip to False on positive zero-duration evidence.
+    if "visits" in canonical or any(m["canonical_table"] == "visits" for m in mapping_index.values()):
+        canonical["visits"]["is_serviceable"] = _is_serviceable(flat)
 
     # Tasks: apply local alias map (TASK_ALIASES), convert Yes/No → boolean,
     # emit as visit_tasks_rows for the upsert step. Pattern mirrors how

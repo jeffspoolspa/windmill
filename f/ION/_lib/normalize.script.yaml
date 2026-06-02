@@ -1,9 +1,8 @@
-summary: Normalize parser-output ION dicts to canonical-shaped dicts using
-  mappings from public.app_config
-description: "Layer 2 of the ION ingest pipeline: parser -> normalize -> upsert.
-  Reads field mappings from app_config (key='ion_field_mappings'), applies
-  transforms via a registry, tracks unmapped fields and merges them back into
-  app_config so the UI can show what's missing."
+summary: Normalize parser-output ION dicts to canonical-shaped dicts (with
+  non-serviceable detection)
+description: Layer 2 of the ION ingest pipeline. Reads field mappings from
+  app_config, applies transforms, flags non-serviceable (zero-duration) logs via
+  is_serviceable, tracks unmapped fields.
 lock: '!inline f/ION/_lib/normalize.script.lock'
 has_on_behalf_of: false
 kind: script
