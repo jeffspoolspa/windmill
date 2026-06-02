@@ -10,19 +10,20 @@ Layer 3 of the ION ingest pipeline:
     UPSERT   ->  maintenance.visits / chem_readings / consumables_usage / visit_tasks
                   + auto-create public.pools
 
-v8 — visit grain = ONE ROW PER ION LOG, natural key
-(service_location_id, scheduled_date, service_type, pool_id, started_at). This
-preserves every per-pool log AND morning/afternoon same-service logs (which differ
-only by start time). ion_task_id is an ATTRIBUTE (rate-attributed here; provisional
-at rate-ambiguous locations, fixed by the EventID correction pass). is_serviceable
-comes from normalize (zero-duration logs ION doesn't bill). The BILLABLE count is
-computed at the promise level as COUNT(DISTINCT scheduled_date) FILTER (is_serviceable)
-per task — so multiple logs/pools on one task-day collapse to one billable visit.
+v9 — visit grain = ONE ROW PER ION LOG, natural key
+(service_location_id, scheduled_date, service_type, pool_id, started_at). ion_task_id
+is an attribute (rate-attributed; provisional at rate-ambiguous locations, fixed by
+the EventID correction pass). is_serviceable from normalize. Billable count is a
+promise-level COUNT(DISTINCT date) FILTER (is_serviceable). The service_location
+resolver is 4-tier (exact addr+name -> unique addr -> fuzzy name at shared addr ->
+unique-name fallback) so ION report identity drift vs our QBO-synced records (name
+spellings, street typos, contact-vs-account names) no longer drops visits.
 
 Public API:
     upsert_canonical(canonical_rows, supabase_connection) -> stats dict
 """
 
+import difflib
 import json
 import re
 from collections import defaultdict
@@ -116,6 +117,8 @@ def expand_ion_username_variants(stored):
 def build_resolvers(conn):
     sl_by_addr_name = {}
     sl_by_addr_only = defaultdict(list)
+    sl_name_by_id = {}
+    sl_by_name = defaultdict(set)  # n_name -> {sl_id}; for the unique-name fallback
     with conn.cursor() as cur:
         cur.execute("""
             SELECT sl.id, sl.street, c.display_name
@@ -124,12 +127,15 @@ def build_resolvers(conn):
             WHERE sl.is_active
         """)
         for sl_id, street, display_name in cur.fetchall():
+            n_name = normalize_customer_name(display_name or "")
+            if n_name:
+                sl_by_name[n_name].add(sl_id)
             n_addr = normalize_address(street or "")
             if not n_addr:
                 continue
-            n_name = normalize_customer_name(display_name or "")
             sl_by_addr_name[(n_addr, n_name)] = sl_id
             sl_by_addr_only[n_addr].append(sl_id)
+            sl_name_by_id[sl_id] = n_name
 
     tech_by_username = {}
     with conn.cursor() as cur:
@@ -151,7 +157,7 @@ def build_resolvers(conn):
     # visit can attribute to the RIGHT task at a multi-contract location
     # (e.g. WINDING RIVER = a $85 POOL MAINTENANCE task + $50 CHEMICAL TESTING
     # tasks). Keyed by sl -> [task meta]; each meta carries the (max) per-visit
-    # rate, flat amount, billing_method, ion_task_id, and (day, tech) slots.
+    # rate, flat amount, billing_method, and its (day, tech) schedule slots.
     tasks_by_sl = defaultdict(list)
     task_meta = {}  # task_id -> meta dict (also the element stored in tasks_by_sl)
     with conn.cursor() as cur:
@@ -198,6 +204,8 @@ def build_resolvers(conn):
     return {
         "sl_by_addr_name": sl_by_addr_name,
         "sl_by_addr_only": sl_by_addr_only,
+        "sl_name_by_id": sl_name_by_id,
+        "sl_by_name": {k: list(v) for k, v in sl_by_name.items()},
         "tech_by_username": tech_by_username,
         "items_by_name": items_by_name,
         "tasks_by_sl": dict(tasks_by_sl),
@@ -275,11 +283,43 @@ def resolve_service_location_id(resolvers, addr, name):
     if not n_addr:
         return None
     n_name = normalize_customer_name(name or "")
-    if (n_addr, n_name) in resolvers["sl_by_addr_name"]:
+    if n_name and (n_addr, n_name) in resolvers["sl_by_addr_name"]:
         return resolvers["sl_by_addr_name"][(n_addr, n_name)]
     candidates = resolvers["sl_by_addr_only"].get(n_addr, [])
     if len(candidates) == 1:
         return candidates[0]
+    # NAME-DRIFT TOLERANCE (Carter's choice, 2026-06-02): when an ION report address
+    # maps to MULTIPLE service_locations (shared address / family / co-located), the
+    # exact (addr, name) match can fail because ION's report spells the customer name
+    # slightly differently than our QBO-synced display_name (LEICHART vs LEICHERT,
+    # LESLIER vs LESLIE, STACIE vs STACY, the "- 210"/"- SSI" suffixes, ...). We can't
+    # durably fix display_name (QBO sync reverts it), so we pick the candidate whose
+    # name is the CLEAR closest match. Conservative: require a high absolute score AND
+    # a clear margin over the runner-up so we never silently mis-attribute a genuinely
+    # different co-located customer. Skip "deleted"-named dup rows.
+    if len(candidates) > 1 and n_name:
+        names = resolvers.get("sl_name_by_id", {})
+        scored = []
+        for sl_id in candidates:
+            cn = names.get(sl_id, "")
+            if not cn or "deleted" in cn.lower():
+                continue
+            scored.append((difflib.SequenceMatcher(None, n_name, cn).ratio(), sl_id))
+        scored.sort(reverse=True)
+        if scored and scored[0][0] >= 0.75 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.15):
+            return scored[0][1]
+
+    # TIER 4 — unique-name fallback: the address couldn't place this visit (typo on
+    # ION's side e.g. Taylor "534" vs real "4534", or on QBO's side e.g. PARRISH
+    # "CICLE", or a 2nd property with no sl e.g. Johnson). Neither is durably fixable
+    # in our mirror (QBO sync overwrites both street + display_name). If the report's
+    # customer name (>=2 tokens) matches EXACTLY ONE active service_location globally,
+    # attribute the visit to it. Conservative: exact normalized-name + global
+    # uniqueness only -> high confidence it's that customer.
+    if n_name and len(n_name.split()) >= 2:
+        by_name = resolvers.get("sl_by_name", {}).get(n_name, [])
+        if len(by_name) == 1:
+            return by_name[0]
     return None  # ambiguous or unknown
 
 
@@ -402,6 +442,16 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                 sl_id = resolve_service_location_id(
                     resolvers, secondary_addr, v.get("_customer_name")
                 )
+            if sl_id is None:
+                # SJC-style: ION's "Customer" column can be a CONTACT name (e.g.
+                # "Winters, Karen") while "Address1" carries the account/ship-to label
+                # that matches our display_name ("SJC PROPERTIES"). Try Address1 as the
+                # name before giving up.
+                a1 = v.get("_address1")
+                if a1 and a1 != v.get("_customer_name"):
+                    sl_id = resolve_service_location_id(resolvers, primary_addr, a1)
+                    if sl_id is None and secondary_addr:
+                        sl_id = resolve_service_location_id(resolvers, secondary_addr, a1)
             if sl_id is None:
                 stats["rows_unresolved_sl"] += 1
                 if len(stats["rows_unresolved_examples"]) < 10:

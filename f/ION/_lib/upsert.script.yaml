@@ -1,8 +1,8 @@
-summary: ION canonical upsert (per-log grain, ion_task_id + is_serviceable)
-description: 'v8: visit grain = one row per ION log (sl, date, service_type,
-  pool_id, started_at). Carries ion_task_id (rate-attributed; provisional at
-  rate-ambiguous locations) + is_serviceable. Billable count computed at the
-  promise level as distinct serviceable days per task.'
+summary: ION canonical upsert (per-log grain, ion_task_id + is_serviceable,
+  4-tier sl resolver)
+description: 'v9: adds name-drift tolerance (fuzzy name at shared addresses) +
+  unique-name fallback (address typos) + Address1-as-name (SJC-style contact) so
+  ION report identity drift vs QBO-synced records no longer drops visits.'
 lock: '!inline f/ION/_lib/upsert.script.lock'
 has_on_behalf_of: false
 kind: script
