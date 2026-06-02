@@ -1,4 +1,5 @@
 # requirements:
+# wmill
 # requests
 # beautifulsoup4
 # psycopg2-binary
