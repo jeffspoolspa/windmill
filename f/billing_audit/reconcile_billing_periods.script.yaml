@@ -1,0 +1,7 @@
+summary: Reconcile task_billing_periods promises against QBO month-end
+  maintenance invoices
+description: ''
+lock: '!inline f/billing_audit/reconcile_billing_periods.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
