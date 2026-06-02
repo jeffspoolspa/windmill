@@ -1,0 +1,7 @@
+summary: 'Resolver step 1: group visits by customer; classify simple(1:1) vs
+  complex(0/2+ candidates) vs canonical tasks'
+description: ''
+lock: '!inline f/ION/_lib/resolve_visit_targets.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
