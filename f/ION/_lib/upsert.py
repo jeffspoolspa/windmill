@@ -10,14 +10,14 @@ Layer 3 of the ION ingest pipeline:
     UPSERT   ->  maintenance.visits / chem_readings / consumables_usage / visit_tasks
                   + auto-create public.pools
 
-v9 — visit grain = ONE ROW PER ION LOG, natural key
+v10 — visit grain = ONE ROW PER ION LOG, natural key
 (service_location_id, scheduled_date, service_type, pool_id, started_at). ion_task_id
 is an attribute (rate-attributed; provisional at rate-ambiguous locations, fixed by
 the EventID correction pass). is_serviceable from normalize. Billable count is a
 promise-level COUNT(DISTINCT date) FILTER (is_serviceable). The service_location
 resolver is 4-tier (exact addr+name -> unique addr -> fuzzy name at shared addr ->
-unique-name fallback) so ION report identity drift vs our QBO-synced records (name
-spellings, street typos, contact-vs-account names) no longer drops visits.
+unique-name fallback). Task attribution INCLUDES closed tasks (ION bills every
+completed log even after a task expires) and picks by the task's active date-window.
 
 Public API:
     upsert_canonical(canonical_rows, supabase_connection) -> stats dict
@@ -158,21 +158,30 @@ def build_resolvers(conn):
     # (e.g. WINDING RIVER = a $85 POOL MAINTENANCE task + $50 CHEMICAL TESTING
     # tasks). Keyed by sl -> [task meta]; each meta carries the (max) per-visit
     # rate, flat amount, billing_method, and its (day, tech) schedule slots.
+    # Include CLOSED tasks too: ION bills every completed service log, so a task
+    # that expired mid-month still produces an invoice for its completed visits
+    # (Carter, 2026-06-02). We attribute each visit to the task whose active
+    # window covers the visit date (see _choose_task), falling back to rate. Rate
+    # comes from ANY schedule (a closed task's slots are deactivated); the (day,tech)
+    # slots used for schedule matching are taken from ACTIVE schedules only.
     tasks_by_sl = defaultdict(list)
     task_meta = {}  # task_id -> meta dict (also the element stored in tasks_by_sl)
     with conn.cursor() as cur:
         cur.execute("""
             SELECT t.id, t.service_location_id, COALESCE(t.ion_task_id, ts.ion_task_id),
-                   ts.id, ts.day_of_week, ts.tech_employee_id,
+                   t.status, t.starts_on, t.ends_on,
+                   ts.id, ts.active, ts.day_of_week, ts.tech_employee_id,
                    ts.billing_method, ts.price_per_visit_cents, ts.flat_rate_monthly_cents
             FROM maintenance.tasks t
-            LEFT JOIN maintenance.task_schedules ts ON ts.task_id = t.id AND ts.active = true
-            WHERE t.status IN ('active','paused')
+            LEFT JOIN maintenance.task_schedules ts ON ts.task_id = t.id
+            WHERE t.status IN ('active','paused','closed')
         """)
-        for task_id, sl_id, ion_task_id, sched_id, dow, tech_id, bm, rate, flat in cur.fetchall():
+        for (task_id, sl_id, ion_task_id, status, starts_on, ends_on,
+             sched_id, sched_active, dow, tech_id, bm, rate, flat) in cur.fetchall():
             m = task_meta.get(task_id)
             if m is None:
-                m = {"task_id": task_id, "ion_task_id": ion_task_id, "rate": None,
+                m = {"task_id": task_id, "ion_task_id": ion_task_id, "status": status,
+                     "starts_on": starts_on, "ends_on": ends_on, "rate": None,
                      "flat": None, "billing_method": None, "schedules": []}
                 task_meta[task_id] = m
                 tasks_by_sl[sl_id].append(m)
@@ -184,20 +193,21 @@ def build_resolvers(conn):
                 m["flat"] = flat
             if bm and not m["billing_method"]:
                 m["billing_method"] = bm
-            if sched_id is not None:
+            if sched_id is not None and sched_active:
                 m["schedules"].append((sched_id, dow, tech_id))
 
-    # Rate-ambiguous locations: a service_location with >1 active task at the SAME
+    # Rate-ambiguous locations: a service_location with >1 ACTIVE task at the SAME
     # per-visit rate (e.g. WINDING RIVER's two $50 chem tasks + two $85 tasks). The
     # bulk report can't tell these apart (identical service type + price) -> the
     # rate resolver picks ONE arbitrarily here, and the EventID correction pass
     # (f/ION/_lib/correct_ambiguous_visits) fixes task_id/ion_task_id afterward.
-    # Flagged so the upsert can record which visits are provisional.
+    # Closed tasks are date-window-separated so they don't count toward ambiguity.
     ambiguous_sl = set()
     for sl_id, metas in tasks_by_sl.items():
         rates_seen = defaultdict(int)
         for m in metas:
-            rates_seen[(m["rate"], m["billing_method"])] += 1
+            if m["status"] in ("active", "paused"):
+                rates_seen[(m["rate"], m["billing_method"])] += 1
         if any(n > 1 for n in rates_seen.values()):
             ambiguous_sl.add(sl_id)
 
@@ -213,43 +223,56 @@ def build_resolvers(conn):
     }
 
 
-def _choose_task(candidates, price_cents, billing_method):
-    """Pick which of a location's active tasks a visit belongs to.
+def _choose_task(candidates, price_cents, billing_method, visit_date=None):
+    """Pick which of a location's tasks a visit belongs to.
 
-    Single task -> it. Multi-contract location -> attribute by RATE so each
-    visit lands on the task billed at its price (a $85 POOL MAINTENANCE visit ->
-    the $85 task; a $50 CHEMICAL TESTING visit -> a $50 task). Same-rate ties are
-    arbitrary but harmless: the customer-month expected (sum of rate x visits) is
-    identical whichever same-rate task wins.
+    Step A (date window): prefer tasks whose active window covers the visit date.
+    This routes a current visit to the location's CURRENTLY-active task, and a visit
+    from before a task expired to that (now-closed) task -- ION bills every completed
+    log, so an expired-mid-month task still owns its completed visits. starts_on/
+    ends_on may be None (open-ended). If no task covers the date, fall back to all.
+
+    Step B (rate): among the date-eligible tasks, attribute by RATE so each visit
+    lands on the task billed at its price (a $85 visit -> the $85 task). Same-rate
+    ties are arbitrary but harmless for the customer-month total; the EventID pass
+    splits genuinely-ambiguous same-rate active tasks (WINDING RIVER).
     """
     if not candidates:
         return None
-    if len(candidates) == 1:
-        return candidates[0]
+    pool = candidates
+    if visit_date is not None:
+        covering = [c for c in candidates
+                    if (c.get("starts_on") is None or c["starts_on"] <= visit_date)
+                    and (c.get("ends_on") is None or visit_date <= c["ends_on"])]
+        if covering:
+            pool = covering
+    if len(pool) == 1:
+        return pool[0]
     if billing_method == "flat_rate_monthly":
-        flats = [c for c in candidates if c["billing_method"] == "flat_rate_monthly"]
-        return flats[0] if flats else candidates[0]
-    pool = [c for c in candidates if c["billing_method"] != "flat_rate_monthly"] or candidates
-    exact = [c for c in pool if c["rate"] is not None and c["rate"] == price_cents]
+        flats = [c for c in pool if c["billing_method"] == "flat_rate_monthly"]
+        return flats[0] if flats else pool[0]
+    nonflat = [c for c in pool if c["billing_method"] != "flat_rate_monthly"] or pool
+    exact = [c for c in nonflat if c["rate"] is not None and c["rate"] == price_cents]
     if exact:
         return exact[0]
-    return min(pool, key=lambda c: abs((c["rate"] or 0) - (price_cents or 0)))
+    return min(nonflat, key=lambda c: abs((c["rate"] or 0) - (price_cents or 0)))
 
 
 def resolve_task_and_schedule(resolvers, service_location_id, visit_date, actual_tech_id,
                               price_cents=None, billing_method=None):
     """Returns (task_id, task_schedule_id, scheduled_tech_id, ion_task_id) or all None.
 
-    Step 1: pick the task at this location whose rate matches the visit (handles
-    multi-contract communities). At rate-AMBIGUOUS locations (>1 task at the same
-    rate, e.g. WINDING RIVER) this pick is provisional — the EventID correction
-    pass fixes it later. Step 2: pick the (day, tech) schedule slot:
+    Step 1: pick the task at this location whose date-window covers the visit + whose
+    rate matches (handles multi-contract communities + expired-mid-month tasks). At
+    rate-AMBIGUOUS locations (>1 active task at the same rate, e.g. WINDING RIVER)
+    this pick is provisional -- the EventID correction pass fixes it later. Step 2:
+    pick the (day, tech) schedule slot:
       1. matching day_of_week AND tech_employee_id == actual_tech
-      2. matching day_of_week (any tech) — reassignment case
-      3. None — off-schedule (make-up, QC, etc.)
+      2. matching day_of_week (any tech) -- reassignment case
+      3. None -- off-schedule (make-up, QC, etc.)
     """
     candidates = resolvers["tasks_by_sl"].get(service_location_id, [])
-    chosen = _choose_task(candidates, price_cents, billing_method)
+    chosen = _choose_task(candidates, price_cents, billing_method, visit_date)
     if chosen is None:
         return None, None, None, None
     task_id = chosen["task_id"]
