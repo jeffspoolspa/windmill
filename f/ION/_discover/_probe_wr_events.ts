@@ -28,7 +28,6 @@ export async function main() {
     headers: { ...H, "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest", Referer: `${o}/main.cfm`, Origin: o },
     body, redirect: "manual",
   }).then(r => r.text())
-  const fld = (root: any, name: string) => (root.querySelector(`input[name="${name}"]`)?.getAttribute("value") ?? "")
 
   const cid = "2367390"
   await get(`/customers/customerTabs.cfm?customerid=${cid}`)
@@ -41,18 +40,24 @@ export async function main() {
   }
   const may = entries.filter(e => e.date >= "2026-05-01" && e.date <= "2026-05-31")
 
-  // per (EventID) -> per (TaskInvoiceID) -> sorted distinct dates
-  const out: Record<string, Record<string, Set<string>>> = {}
+  // For task 5333857 logs: capture candidate billable/serviceable fields + price.
+  const re = /charge|servic|skip|complete|status|billable|price|amount|reason|nocharge|nobill|tasktype|eventtype|completed/i
+  const per: any[] = []
   for (const e of may) {
     const root = parse(await get(`/tasks/addLog.cfm?LogID=${e.logId}&Source=ServiceLog`))
-    const ev = fld(root, "EventID") || "none"
-    const inv = fld(root, "TaskInvoiceID") || "NULL"
-    ;((out[ev] ??= {})[inv] ??= new Set()).add(e.date)
+    const ev = root.querySelector('input[name="EventID"]')?.getAttribute("value") || ""
+    if (ev !== "5333857") continue
+    const f: Record<string, string> = {}
+    for (const inp of root.querySelectorAll("input,select,textarea")) {
+      const n = inp.getAttribute("name"); if (!n || !re.test(n)) continue
+      // for select, read selected option text; else value
+      let v = inp.getAttribute("value") || ""
+      if (inp.tagName === "SELECT") {
+        const sel = inp.querySelector("option[selected]"); v = sel ? (sel.text || sel.getAttribute("value") || "") : (inp.querySelector("option")?.text || "")
+      }
+      f[n] = String(v).slice(0, 30)
+    }
+    per.push({ date: e.date, logId: e.logId, fields: f })
   }
-  const result: Record<string, Record<string, string[]>> = {}
-  for (const [ev, byInv] of Object.entries(out)) {
-    result[ev] = {}
-    for (const [inv, ds] of Object.entries(byInv)) result[ev][inv] = [...ds].sort()
-  }
-  return { ion_customerid: cid, may_log_entries: may.length, event_to_invoice_to_dates: result }
+  return { task: "5333857", count: per.length, per_log: per }
 }

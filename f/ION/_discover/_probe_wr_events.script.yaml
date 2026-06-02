@@ -1,5 +1,5 @@
-summary: 'Throwaway: WINDING RIVER May per-visit EventID + TaskInvoiceID (cutoff
-  vs unbilled investigation)'
+summary: 'Throwaway: dump 5333857 per-log fields to find the
+  non-billed/non-serviceable visit discriminator'
 description: ''
 lock: '!inline f/ION/_discover/_probe_wr_events.script.lock'
 has_on_behalf_of: false
