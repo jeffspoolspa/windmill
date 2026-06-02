@@ -1,5 +1,5 @@
-summary: 'Throwaway: WINDING RIVER May EventID dates per task + addLog field
-  dump (cutoff vs missync investigation)'
+summary: 'Throwaway: WINDING RIVER May per-visit EventID + TaskInvoiceID (cutoff
+  vs unbilled investigation)'
 description: ''
 lock: '!inline f/ION/_discover/_probe_wr_events.script.lock'
 has_on_behalf_of: false
