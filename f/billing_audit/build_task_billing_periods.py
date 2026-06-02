@@ -8,8 +8,11 @@ Populate billing_audit.task_billing_periods (the write-ahead invoice promises),
 one row per (task, billing_month), from the now-clean maintenance.visits.
 
 Per task-month it accrues:
-  visit_count            all visits with task_id in the month
-  billable_visit_count   visits with price > 0
+  visit_count            distinct service DAYS with task_id in the month
+  billable_visit_count   distinct service DAYS that are serviceable (is_serviceable)
+                         and priced > 0 -- one billable visit per task-day, so
+                         multiple ION logs/pools on one day collapse to one, and
+                         non-serviceable (holiday/skip) days are excluded
   expected_labor_cents   flat_rate_monthly task -> the task's flat monthly amount;
                          per_visit task -> per_visit_rate_cents * billable_visit_count
                          (the POOL MAINTENANCE labor rate x billed visits -- NOT
@@ -45,13 +48,20 @@ WITH task_terms AS (
   GROUP BY t.id, t.service_location_id, c.qbo_customer_id
 ),
 vis AS (
-  SELECT v.task_id, date_trunc('month', v.visit_date)::date AS billing_month,
-         count(*) AS visit_count,
-         count(*) FILTER (WHERE COALESCE(v.price_cents,0) > 0) AS billable_visit_count,
-         COALESCE(sum(v.price_cents), 0) AS sum_price_cents
+  -- Billable grain = one billable visit per (task, DAY). Multiple ION logs on the
+  -- same task-day (e.g. several pools serviced under one task) collapse to ONE
+  -- billable day via COUNT(DISTINCT scheduled_date). Non-serviceable logs (holiday /
+  -- no-access / skip, is_serviceable=false) are excluded -- that closes the "+1"
+  -- over-count proven on WINDING RIVER. price>0 additionally drops $0 courtesy logs.
+  SELECT v.task_id, date_trunc('month', v.scheduled_date)::date AS billing_month,
+         count(DISTINCT v.scheduled_date) AS visit_count,
+         count(DISTINCT v.scheduled_date)
+           FILTER (WHERE v.is_serviceable AND COALESCE(v.price_cents,0) > 0)
+           AS billable_visit_count,
+         COALESCE(sum(v.price_cents) FILTER (WHERE v.is_serviceable), 0) AS sum_price_cents
   FROM maintenance.visits v
-  WHERE v.task_id IS NOT NULL AND v.visit_date IS NOT NULL
-  GROUP BY v.task_id, date_trunc('month', v.visit_date)
+  WHERE v.task_id IS NOT NULL AND v.scheduled_date IS NOT NULL
+  GROUP BY v.task_id, date_trunc('month', v.scheduled_date)
 ),
 cons AS (
   SELECT task_id, billing_month, jsonb_object_agg(item_name, qty) AS consumables

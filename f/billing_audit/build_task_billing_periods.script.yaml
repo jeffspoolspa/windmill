@@ -1,6 +1,8 @@
 summary: Build task_billing_periods (write-ahead invoice promises) from
   maintenance.visits
-description: ''
+description: billable_visit_count = COUNT(DISTINCT scheduled_date) FILTER
+  (is_serviceable AND price>0) per task; expected = rate x that (flat
+  unchanged). Closes the +1 over-count and multi-log/pool over-count.
 lock: '!inline f/billing_audit/build_task_billing_periods.script.lock'
 has_on_behalf_of: false
 kind: script
