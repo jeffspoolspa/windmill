@@ -7,8 +7,9 @@ description: "Makes every visit have a task. Step a finds service_locations with
   maintenance.tasks (expired->closed, active->active) + schedule slots and links
   the location's task-less visits to the task whose [starts,ends] window
   contains the visit date (STRICT -- no fuzzy fallback; duplicate-twin
-  SHIPWATCH/CHANEY stay unmatched for the merge fix). dry_run default rolls
-  back."
+  SHIPWATCH/CHANEY stay unmatched for the merge fix). TEMP: dry_run default
+  flipped to false for the 2026-06-02 backfill capture commit; restore to true
+  after."
 value:
   modules:
     - id: a
@@ -41,7 +42,7 @@ value:
         input_transforms:
           dry_run:
             type: javascript
-            expr: flow_input.dry_run ?? true
+            expr: flow_input.dry_run ?? false
           rows:
             type: javascript
             expr: results.b.rows
