@@ -1,5 +1,5 @@
-summary: 'Probe ion home/customerlogs.cfm (global daily logs): structure, date
-  param, per-row EventID/task id + customer'
+summary: 'Probe customerlogs.cfm filter submit (qdatesel=date): does it return
+  log rows with EventID/task id + customer?'
 description: ''
 lock: '!inline f/ION/_discover/probe_customerlogs.script.lock'
 has_on_behalf_of: false
