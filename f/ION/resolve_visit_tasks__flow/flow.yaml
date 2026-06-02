@@ -1,14 +1,12 @@
 summary: 'Durable visit->task resolver: simple 1:1 by logic; complex via
-  authoritative ION log EventID (pull missing tasks)'
-description: "Group May visits by customer (step a). Simple customers (every
-  visit exactly 1 candidate task: same customer + active-at-log-date + same
-  service family) get linked 1:1 by logic. Complex customers (any visit 0 or 2+
-  candidates -- green-pool/QC with no task, multi-pool communities) take the
-  authoritative ION-log path: pull the customer's full task list (c), create
-  missing task ids (d), read each log's EventID (e), and set visit.task_id by
-  EventID (f). One ION pass per complex customer = 100% certainty without
-  per-visit lookups. dry_run=true rolls back DB writes (ION reads still run, so
-  it validates discovery)."
+  complete task-list pull + authoritative log EventID'
+description: "Group May visits by customer (a). SIMPLE customers (every visit
+  exactly 1 candidate) linked 1:1 by logic (b). COMPLEX customers (any 0/2+
+  candidate, multi-pool) take the authoritative path: null their visits (b),
+  PULL the customer's FULL ION task list and complete the task table FIRST
+  (c+d), read each log's EventID (e), then OVERWRITE visit.task_id by EventID --
+  ground truth (f). Pulling the full task list first guarantees every EventID
+  resolves to a task we have. dry_run default FALSE (commits)."
 value:
   modules:
     - id: a
@@ -33,7 +31,7 @@ value:
             expr: results.a.complex_targets
           dry_run:
             type: javascript
-            expr: flow_input.dry_run ?? true
+            expr: flow_input.dry_run ?? false
           simple_assignments:
             type: javascript
             expr: results.a.simple_assignments
@@ -42,7 +40,7 @@ value:
             value: $res:u/carter/supabase
         path: f/ION/_lib/apply_simple_null_complex
     - id: c
-      summary: pull complex customers' full task lists from ION
+      summary: pull complex customers' FULL task lists from ION
       value:
         type: script
         input_transforms:
@@ -55,13 +53,13 @@ value:
         type: static
         value: 900
     - id: d
-      summary: upsert missing tasks (pull task ids)
+      summary: 'complete task table: upsert missing tasks'
       value:
         type: script
         input_transforms:
           dry_run:
             type: javascript
-            expr: flow_input.dry_run ?? true
+            expr: flow_input.dry_run ?? false
           rows:
             type: javascript
             expr: results.c.rows
@@ -82,20 +80,20 @@ value:
         type: static
         value: 900
     - id: f
-      summary: link visit.task_id by EventID
+      summary: AUTHORITATIVE link visit.task_id by EventID (overwrite)
       value:
         type: script
         input_transforms:
           dry_run:
             type: javascript
-            expr: flow_input.dry_run ?? true
+            expr: flow_input.dry_run ?? false
           links:
             type: javascript
             expr: results.e.links
           supabase_connection:
             type: static
             value: $res:u/carter/supabase
-        path: f/ION/_lib/link_visits_by_event
+        path: f/ION/_lib/apply_event_links
 has_on_behalf_of: false
 schema:
   $schema: https://json-schema.org/draft/2020-12/schema
@@ -105,6 +103,6 @@ schema:
   properties:
     dry_run:
       type: boolean
-      description: true (default) rolls back all DB writes; ION reads still run.
-      default: true
+      description: false commits. Set true to roll back DB writes (ION reads still run).
+      default: false
   required: []
