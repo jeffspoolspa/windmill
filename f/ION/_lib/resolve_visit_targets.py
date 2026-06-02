@@ -19,14 +19,10 @@ tasks) -> ALL of that customer's visits go to the authoritative ION-log path
 have gets pulled in. Pure logic can't tell one-task-many-pools from
 task-per-pool; only the per-log EventID is authoritative.
 
-Returns:
-  simple_assignments : [{visit_id, ion_task_id, task_id}]   (link directly)
-  complex_targets    : [{visit_id, service_location_id, name, street,
-                         scheduled_date, ion_cust_hint}]     (feed step b)
-  stats              : counts for observability
-dry_run is irrelevant here (read-only classification).
+Returns simple_assignments + complex_targets + stats. Read-only.
 """
 
+import wmill
 from f.ION._lib.upsert import _connect
 
 FAM = (r'(?:POOL MAINTENANCE|FLAT RATE|CHEMICAL TESTING|SPA CLEAN|FOUNTAIN CLEAN'
@@ -58,7 +54,6 @@ SELECT v.visit_id, v.service_location_id, v.name, v.street,
 FROM v
 """
 
-# ion_task_id -> a maintenance.tasks.id (prefer active schedule) for direct linking
 TASK_MAP = """
 SELECT DISTINCT ON (ts.ion_task_id) ts.ion_task_id, ts.task_id::text
 FROM maintenance.task_schedules ts
@@ -67,7 +62,9 @@ ORDER BY ts.ion_task_id, ts.active DESC, ts.updated_at DESC
 """
 
 
-def main(supabase_connection, billing_month: str = "2026-05"):
+def main(supabase_connection=None, billing_month: str = "2026-05"):
+    if supabase_connection is None:
+        supabase_connection = wmill.get_resource("u/carter/supabase")
     month = (billing_month + "-01") if billing_month else None
     conn = _connect(supabase_connection)
     try:
@@ -78,7 +75,6 @@ def main(supabase_connection, billing_month: str = "2026-05"):
             cols = [d[0] for d in cur.description]
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
 
-        # group by customer; a customer is complex if ANY visit is not exactly 1:1
         by_cust = {}
         for r in rows:
             by_cust.setdefault(r["qbo"], []).append(r)
