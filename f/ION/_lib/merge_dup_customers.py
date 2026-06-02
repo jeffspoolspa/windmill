@@ -13,7 +13,9 @@ duplicate twin.
 Per pair {canonical_sl, dup_sl, dup_account, dup_qbo_id}:
   DB (one transaction):
     1. move maintenance.tasks  dup_sl -> canonical_sl
-    2. move maintenance.visits dup_sl -> canonical_sl
+    2. dedup VISITS: delete the dup's visits (+ chem/consumables/visit_tasks children)
+       whose scheduled_date already exists on canonical (same service event recorded
+       under both twins -- visits_uniq_loc_scheduled); move the rest to canonical_sl
     3. link canonical's now task-less visits to its open task (by date window)
     4. deactivate the duplicate service_location (is_active=false)
     5. deactivate the duplicate Customers account (is_active=false)
@@ -80,7 +82,7 @@ def _qbo_deactivate(headers, realm, qbo_id, sync_token):
 def merge(pairs, supabase_connection, dry_run=True, deactivate_in_qbo=True):
     conn = _connect(supabase_connection)
     stats = {
-        "pairs": len(pairs), "tasks_moved": 0, "visits_moved": 0, "visits_linked": 0,
+        "pairs": len(pairs), "tasks_moved": 0, "visits_moved": 0, "dup_visits_deleted": 0, "visits_linked": 0,
         "sls_deactivated": 0, "accounts_deactivated": 0, "errors": [], "qbo": [],
         "dry_run": dry_run, "deactivate_in_qbo": deactivate_in_qbo, "committed": False,
     }
@@ -101,6 +103,21 @@ def merge(pairs, supabase_connection, dry_run=True, deactivate_in_qbo=True):
 
                 cur.execute("UPDATE maintenance.tasks SET service_location_id=%s, updated_at=now() WHERE service_location_id=%s", (can_sl, dup_sl))
                 stats["tasks_moved"] += cur.rowcount
+
+                # Duplicate VISITS: where canonical already has a visit on the same
+                # scheduled_date, the dup's row is the same service event recorded
+                # twice (visits_uniq_loc_scheduled) -> delete it + its children; move
+                # the non-colliding rest to canonical.
+                collide = ("service_location_id=%s AND scheduled_date IN "
+                           "(SELECT scheduled_date FROM maintenance.visits WHERE service_location_id=%s)")
+                for child in ("chem_readings", "consumables_usage", "visit_tasks"):
+                    cur.execute(
+                        f"DELETE FROM maintenance.{child} WHERE visit_id IN "
+                        f"(SELECT id FROM maintenance.visits WHERE {collide})",
+                        (dup_sl, can_sl),
+                    )
+                cur.execute(f"DELETE FROM maintenance.visits WHERE {collide}", (dup_sl, can_sl))
+                stats["dup_visits_deleted"] += cur.rowcount
                 cur.execute("UPDATE maintenance.visits SET service_location_id=%s, updated_at=now() WHERE service_location_id=%s", (can_sl, dup_sl))
                 stats["visits_moved"] += cur.rowcount
 

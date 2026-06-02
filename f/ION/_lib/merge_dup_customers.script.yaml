@@ -1,5 +1,5 @@
 summary: Merge a duplicate customer pair onto the canonical (QBO-invoiced)
-  record + deactivate the dup in QBO (dry_run default)
+  record + dedup visits + deactivate the dup in QBO (dry_run default)
 description: ''
 lock: '!inline f/ION/_lib/merge_dup_customers.script.lock'
 has_on_behalf_of: false
