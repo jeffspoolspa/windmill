@@ -12,11 +12,12 @@ def main(
     """
     Invoice-driven autopay list builder.
     Pulls ALL unpaid maintenance invoices (current + prior months) for each
-    autopay customer.  Only maintenance invoices are included (sourced from
-    billing_audit.maintenance_invoices).
+    ACTIVE autopay customer (billing.autopay_customers.is_active = true).
+    The charge method is resolved here from billing.customer_payment_methods:
+    the pinned method (autopay_customers.payment_method_id) if it is still
+    active, otherwise the most-recently-added active method (qbo_created_at).
     """
     month_name = datetime.strptime(billing_month, "%Y-%m").strftime("%B %Y")
-    billing_month_date = f"{billing_month}-01"
 
     db = wmill.get_resource("u/carter/supabase")
     conn = psycopg2.connect(
@@ -32,16 +33,25 @@ def main(
     try:
         cur = conn.cursor()
 
-        # Pull ALL unpaid maintenance invoices across every billing month
         base_query = """
             SELECT mi.qbo_customer_id, mi.customer_name,
-                ac.payment_method, ac.card_type, ac.last_four, ac.email,
-                ac.payment_status, ac.consecutive_declines,
+                chosen.qbo_payment_method_id, chosen.type, chosen.card_brand, chosen.last_four,
+                ac.email, ac.payment_status, ac.consecutive_declines,
                 mi.qbo_invoice_id, mi.doc_number, mi.invoice_total, mi.balance_due,
-                mi.billing_month
+                mi.billing_month, chosen.pm_row_id
             FROM billing_audit.maintenance_invoices mi
             JOIN billing.autopay_customers ac ON mi.qbo_customer_id = ac.qbo_customer_id
-            WHERE COALESCE(mi.balance_due, mi.invoice_total) > 0
+            LEFT JOIN LATERAL (
+                SELECT pm.id AS pm_row_id, pm.qbo_payment_method_id, pm.type,
+                       pm.card_brand, pm.last_four
+                FROM billing.customer_payment_methods pm
+                WHERE pm.qbo_customer_id = ac.qbo_customer_id AND pm.is_active
+                ORDER BY (pm.id = ac.payment_method_id) DESC,
+                         pm.qbo_created_at DESC, pm.is_default DESC, pm.id DESC
+                LIMIT 1
+            ) chosen ON true
+            WHERE ac.is_active = true
+              AND COALESCE(mi.balance_due, mi.invoice_total) > 0
         """
 
         if test_mode and test_qbo_customer_id:
@@ -56,19 +66,32 @@ def main(
         for row in rows:
             qbo_id = row[0]
             if qbo_id not in customer_map:
+                pm_qbo_id = row[2]
+                pm_type = row[3]
+                pm_kind = "ach" if pm_type == "ach" else "card"
+                resolved_method = None
+                if pm_qbo_id:
+                    resolved_method = {
+                        "pm_row_id": str(row[14]) if row[14] else None,
+                        "qbo_payment_method_id": pm_qbo_id,
+                        "kind": pm_kind,
+                        "card_brand": row[4],
+                        "last_four": row[5],
+                    }
                 customer_map[qbo_id] = {
                     "qbo_customer_id": qbo_id, "name": row[1],
-                    "payment_method": row[2], "card_type": row[3],
-                    "last_four": row[4], "email": row[5],
-                    "payment_status": row[6], "consecutive_declines": row[7],
+                    "resolved_method": resolved_method,
+                    "payment_method": (pm_kind if pm_qbo_id else None),
+                    "card_type": row[4], "last_four": row[5], "email": row[6],
+                    "payment_status": row[7], "consecutive_declines": row[8],
                     "maint_invoices": []
                 }
-            inv_billing_month = str(row[12])  # e.g. '2026-02-01'
-            inv_month_str = inv_billing_month[:7]  # e.g. '2026-02'
+            inv_billing_month = str(row[13])
+            inv_month_str = inv_billing_month[:7]
             customer_map[qbo_id]["maint_invoices"].append({
-                "qbo_invoice_id": row[8], "doc_number": row[9],
-                "invoice_total": float(row[10]) if row[10] else 0,
-                "balance_due": float(row[11]) if row[11] else 0,
+                "qbo_invoice_id": row[9], "doc_number": row[10],
+                "invoice_total": float(row[11]) if row[11] else 0,
+                "balance_due": float(row[12]) if row[12] else 0,
                 "billing_month": inv_month_str
             })
 
@@ -94,14 +117,14 @@ def main(
                     cur.execute("""
                         UPDATE billing.autopay_transactions
                         SET status = 'pending', dry_run = %s, billing_run_id = %s,
+                            payment_method = %s, card_type = %s, last_four = %s,
                             error_step = NULL, error_message = NULL, charge_error = NULL,
                             updated_at = now()
                         WHERE id = %s::uuid RETURNING id
-                    """, (dry_run, billing_run_id, existing_id))
+                    """, (dry_run, billing_run_id, cust["payment_method"],
+                          cust["card_type"], cust["last_four"], existing_id))
                     txn_id = existing_id
             else:
-                maint_total = sum(inv["balance_due"] for inv in cust["maint_invoices"])
-                # Separate current month vs outstanding for tracking
                 current_month_total = sum(inv["balance_due"] for inv in cust["maint_invoices"] if inv["billing_month"] == billing_month)
                 outstanding_total = sum(inv["balance_due"] for inv in cust["maint_invoices"] if inv["billing_month"] != billing_month)
                 outstanding_count = sum(1 for inv in cust["maint_invoices"] if inv["billing_month"] != billing_month)
@@ -120,6 +143,7 @@ def main(
 
             customers.append({
                 "qbo_customer_id": qbo_id, "name": cust["name"],
+                "resolved_method": cust["resolved_method"],
                 "payment_method": cust["payment_method"], "card_type": cust["card_type"],
                 "last_four": cust["last_four"], "email": cust["email"],
                 "payment_status": cust["payment_status"],
@@ -135,12 +159,14 @@ def main(
     good_count = len([c for c in customers if c["payment_status"] == "good"])
     issue_count = len([c for c in customers if c["payment_status"] != "good"])
     customers_with_outstanding = len([c for c in customers if any(inv["billing_month"] != billing_month for inv in c["maint_invoices"])])
+    no_method_count = len([c for c in customers if not c["resolved_method"]])
 
     return {
         "billing_month": billing_month, "month_display": month_name,
         "test_mode": test_mode, "total_customers": len(customers),
         "good_standing": good_count, "payment_issue_customers": issue_count,
         "customers_with_outstanding_maint": customers_with_outstanding,
+        "customers_without_resolved_method": no_method_count,
         "skipped_already_processed": len(skipped_terminal),
         "skipped_terminal_details": skipped_terminal[:10],
         "customers": customers
