@@ -31,8 +31,8 @@ from datetime import date as _date
 import json
 
 from f.ION._lib.upsert import _connect
-from f.ION._lib.upsert_tasks import parse_ion_date, map_frequency
-from f.ION._lib.upsert_schedules import _build_tech_resolver, _resolve_tech
+from f.ION._lib.upsert_tasks import parse_ion_date
+from f.ION._lib.upsert_schedules import _build_tech_resolver, _resolve_tech, _map_frequency
 
 
 def _d(iso):
@@ -94,7 +94,7 @@ def capture(rows, supabase_connection, dry_run=True, source="ion"):
                     desc = (t.get("description") or "")
                     starts = _d(parse_ion_date(t.get("taskStarts")))
                     ends = _d(parse_ion_date(t.get("taskExpires")))
-                    freq = map_frequency(t.get("recurrence"), t.get("weekParity"))
+                    freq = _map_frequency(t.get("recurrence"), t.get("weekParity"))
                     tech = _resolve_tech(by_full, by_suffix, t.get("assignedTo"))
                     ext = {
                         "ion_cust_id": row.get("ion_customerid") or "",
