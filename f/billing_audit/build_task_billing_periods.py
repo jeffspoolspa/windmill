@@ -11,7 +11,12 @@ Per task-month it accrues:
   visit_count            all visits with task_id in the month
   billable_visit_count   visits with price > 0
   expected_labor_cents   flat_rate_monthly task -> the task's flat monthly amount;
-                         per_visit task -> SUM(visit price_cents) in the month
+                         per_visit task -> per_visit_rate_cents * billable_visit_count
+                         (the POOL MAINTENANCE labor rate x billed visits -- NOT
+                         SUM(visit price_cents); a visit's price_cents is the FULL
+                         visit charge incl. chemicals/repairs, so summing it would
+                         overstate LABOR ~67% and double-count consumables, which
+                         we reconcile separately by quantity)
   consumables            {item_name: total_quantity} from consumables_usage
   qbo_customer_id / service_location_id / billing_method / rates  (task terms)
   status = 'visits_accruing'  (invoice match + reconcile come later)
@@ -68,7 +73,7 @@ SELECT vis.task_id, vis.billing_month, tt.qbo_customer_id, tt.service_location_i
        tt.per_visit_rate_cents, tt.flat_rate_monthly_cents, vis.visit_count, vis.billable_visit_count,
        CASE WHEN tt.billing_method = 'flat_rate_monthly'
             THEN COALESCE(tt.flat_rate_monthly_cents, 0)
-            ELSE vis.sum_price_cents END AS expected_labor_cents,
+            ELSE COALESCE(tt.per_visit_rate_cents, 0) * vis.billable_visit_count END AS expected_labor_cents,
        cons.consumables, 'visits_accruing'
 FROM vis
 JOIN task_terms tt ON tt.task_id = vis.task_id
