@@ -1,0 +1,10 @@
+summary: 'Diagnostic: every May ION visit row that fails to resolve to a
+  service_location, with why'
+description: Fetches May report, parses+normalizes, and for each row that the
+  resolver can't place, reports the raw customer/address + how many active sls
+  share the normalized address + the candidate display_names (to see name
+  mismatches). Read-only. Delete after.
+lock: '!inline f/ION/_discover/_diag_unresolved.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
