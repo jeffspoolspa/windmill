@@ -9,8 +9,10 @@ the ACTUAL QBO maintenance invoices, and stamp the result back on each promise.
 
 Match rule (confirmed with Carter + empirically, 2026-06-02):
   - A maintenance invoice is DATED THE LAST DAY OF THE MONTH and carries a
-    maintenance-LABOR line: item_name matching POOL MAINTENANCE* / HALF HOUR
-    MAINTENANCE / FLAT RATE. Chemicals are separate GENERIC CHEMICALS:* lines.
+    maintenance-LABOR line. LABOR services = POOL MAINTENANCE* / HALF HOUR
+    MAINTENANCE / FLAT RATE / CHEMICAL TESTING / GREEN POOL / SPA CLEAN /
+    QUALITY CONTROL (all 'Services:' labor lines, e.g. CHEMICAL TESTING =
+    "LABOR TO TEST AND BALANCE"). Chemicals are separate GENERIC CHEMICALS:* lines.
   - Grain is ~1 month-end invoice PER CUSTOMER (a few multi-pool customers have
     >1). So we reconcile at (qbo_customer_id, billing_month): roll the month's
     promises up to the customer, compare to the customer's month-end invoice(s),
@@ -28,14 +30,11 @@ Per (customer, billing_month) we set, on every matching task_billing_period row:
 
 BILLING-COVERAGE GATE: a closed month is only reconciled once its monthly billing
 run has fired (>= min_coverage of the month's promise-customers have a month-end
-maintenance invoice). Running on the 1st, May has ~no invoices yet -> May is
-SKIPPED (left visits_accruing), not false-flagged as 'missed'.
+maintenance invoice). Unbilled/in-progress months are left as visits_accruing.
 
-COVERAGE CAVEAT: maintenance.visits currently starts 2026-04-06, so APRIL is a
-PARTIAL month (week 1 missing) -> per_visit April promises undercount by ~1 visit
-and will read as mismatch; flat_rate_monthly April promises are unaffected (full
-month). Rows in PARTIAL_MONTHS get a 'partial_coverage' note. Only closed months
-(billing_month < this month) are considered.
+COVERAGE CAVEAT: maintenance.visits starts 2026-04-06, so APRIL is a PARTIAL
+month (week 1 missing); rows in PARTIAL_MONTHS get a 'partial_coverage' note. Only
+closed months (billing_month < this month) are considered.
 
 SAFETY: dry_run=True default -> UPDATE in a transaction, gather the summary, then
 ROLLBACK. Set dry_run=False to commit.
@@ -44,7 +43,8 @@ ROLLBACK. Set dry_run=False to commit.
 import datetime
 from f.ION._lib.upsert import _connect
 
-LABOR_PATTERNS = ("POOL MAINTENANCE", "HALF HOUR MAINTENANCE", "FLAT RATE")
+LABOR_PATTERNS = ("POOL MAINTENANCE", "HALF HOUR MAINTENANCE", "FLAT RATE",
+                  "CHEMICAL TESTING", "GREEN POOL", "SPA CLEAN", "QUALITY CONTROL")
 PARTIAL_MONTHS = {datetime.date(2026, 4, 1)}  # visits sync started 2026-04-06
 
 FETCH_PROMISES = """
