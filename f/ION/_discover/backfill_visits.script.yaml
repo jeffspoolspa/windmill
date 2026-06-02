@@ -1,0 +1,7 @@
+summary: Chunked historical backfill of maintenance.visits (monthly windows via
+  parse_normalize_test)
+description: ''
+lock: '!inline f/ION/_discover/backfill_visits.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
