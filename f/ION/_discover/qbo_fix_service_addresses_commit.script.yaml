@@ -1,0 +1,6 @@
+summary: Run qbo_fix_service_addresses with dry_run=False (commit)
+description: ''
+lock: '!inline f/ION/_discover/qbo_fix_service_addresses_commit.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
