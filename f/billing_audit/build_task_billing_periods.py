@@ -9,27 +9,19 @@ one row per (task, billing_month), from the now-clean maintenance.visits.
 
 Per task-month it accrues:
   visit_count            distinct service DAYS with task_id in the month
-  billable_visit_count   distinct service DAYS that are serviceable (is_serviceable)
-                         and priced > 0 -- one billable visit per task-day, so
-                         multiple ION logs/pools on one day collapse to one, and
-                         non-serviceable (holiday/skip) days are excluded
-  expected_labor_cents   flat_rate_monthly task -> the task's flat monthly amount;
-                         per_visit task -> per_visit_rate_cents * billable_visit_count
-                         (the POOL MAINTENANCE labor rate x billed visits -- NOT
-                         SUM(visit price_cents); a visit's price_cents is the FULL
-                         visit charge incl. chemicals/repairs, so summing it would
-                         overstate LABOR ~67% and double-count consumables, which
-                         we reconcile separately by quantity)
+  billable_visit_count   distinct serviceable, priced>0, NON-QC service days
+  expected_labor_cents   flat_rate_monthly -> flat monthly amount;
+                         per_visit WITH a contracted rate -> rate x billable days;
+                         per_visit NO rate (one-time/lump-sum: GREEN POOL, ONE TIME
+                          CLEAN, captured closed jobs) -> SUM of serviceable prices
   consumables            {item_name: total_quantity} from consumables_usage
-  qbo_customer_id / service_location_id / billing_method / rates  (task terms)
-  status = 'visits_accruing'  (invoice match + reconcile come later)
+  status = 'visits_accruing'
 
-Idempotent UPSERT on (task_id, billing_month): re-running refreshes the accrual
-fields but never clobbers qbo_invoice_id / status / labor_ok / consumables_ok /
-reconciled_at (set by the later invoice-match + reconcile step).
+KNOWN RESIDUAL: flat tasks with ZERO visits in a month are not emitted (this builder
+is visit-driven); a few community accounts have a 2nd flat task with no logs that
+still bills -> follow-up (emit active flat tasks regardless of visits).
 
-SAFETY: dry_run=True default -> upsert in a transaction, gather the summary, then
-ROLLBACK. Set dry_run=False to commit.
+SAFETY: dry_run=True default -> rolls back. Set dry_run=False to commit.
 """
 
 from f.ION._lib.upsert import _connect
@@ -48,17 +40,20 @@ WITH task_terms AS (
   GROUP BY t.id, t.service_location_id, c.qbo_customer_id
 ),
 vis AS (
-  -- Billable grain = one billable visit per (task, DAY). Multiple ION logs on the
-  -- same task-day (e.g. several pools serviced under one task) collapse to ONE
-  -- billable day via COUNT(DISTINCT scheduled_date). Non-serviceable logs (holiday /
-  -- no-access / skip, is_serviceable=false) are excluded -- that closes the "+1"
-  -- over-count proven on WINDING RIVER. price>0 additionally drops $0 courtesy logs.
+  -- One billable visit per (task, DAY): multiple ION logs/pools on one day collapse
+  -- via COUNT(DISTINCT scheduled_date). Excluded from billable labor: non-serviceable
+  -- (holiday/skip), $0 courtesy logs, and QUALITY CONTROL (non-billable labor per
+  -- Carter; its consumables still bill). sum_price_cents = the billable logs' own
+  -- prices -> expected fallback for one-time/no-rate tasks.
   SELECT v.task_id, date_trunc('month', v.scheduled_date)::date AS billing_month,
          count(DISTINCT v.scheduled_date) AS visit_count,
          count(DISTINCT v.scheduled_date)
-           FILTER (WHERE v.is_serviceable AND COALESCE(v.price_cents,0) > 0)
+           FILTER (WHERE v.is_serviceable AND COALESCE(v.price_cents,0) > 0
+                     AND COALESCE(v.service_type,'') NOT ILIKE '%QUALITY CONTROL%')
            AS billable_visit_count,
-         COALESCE(sum(v.price_cents) FILTER (WHERE v.is_serviceable), 0) AS sum_price_cents
+         COALESCE(sum(v.price_cents) FILTER (
+           WHERE v.is_serviceable AND COALESCE(v.price_cents,0) > 0
+             AND COALESCE(v.service_type,'') NOT ILIKE '%QUALITY CONTROL%'), 0) AS sum_price_cents
   FROM maintenance.visits v
   WHERE v.task_id IS NOT NULL AND v.scheduled_date IS NOT NULL
   GROUP BY v.task_id, date_trunc('month', v.scheduled_date)
@@ -83,7 +78,9 @@ SELECT vis.task_id, vis.billing_month, tt.qbo_customer_id, tt.service_location_i
        tt.per_visit_rate_cents, tt.flat_rate_monthly_cents, vis.visit_count, vis.billable_visit_count,
        CASE WHEN tt.billing_method = 'flat_rate_monthly'
             THEN COALESCE(tt.flat_rate_monthly_cents, 0)
-            ELSE COALESCE(tt.per_visit_rate_cents, 0) * vis.billable_visit_count END AS expected_labor_cents,
+            WHEN tt.per_visit_rate_cents IS NOT NULL
+            THEN tt.per_visit_rate_cents * vis.billable_visit_count
+            ELSE vis.sum_price_cents END AS expected_labor_cents,
        cons.consumables, 'visits_accruing'
 FROM vis
 JOIN task_terms tt ON tt.task_id = vis.task_id
