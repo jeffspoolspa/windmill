@@ -9,15 +9,17 @@ the service_locations that STILL have task-less visits after the recurring-task
 sync + relink. For each we pull the customer's FULL ION taskList (incl. expired /
 one-time / blank-address tasks that #58 -- active-recurring only -- didn't sync),
 then create the missing maintenance.tasks and link the visits (step b + c).
+
+Batched (default limit=80, highest visit-count first) so the per-customer ION
+capture in step b stays under its 900s timeout. Committed batches drop out of the
+task-less set, so re-running the flow naturally advances to the next batch. Pass
+limit=0 for all targets at once.
 """
 
 from f.ION._lib.upsert import _connect
 
 
-def main(supabase_connection, limit=0):
-    """Task-less-visit service_locations, highest visit-count first. limit>0 caps
-    the batch (chunk the per-customer ION capture under step b's 900s timeout;
-    committed batches drop out of the gap so re-running advances to the next set)."""
+def main(supabase_connection, limit=80):
     conn = _connect(supabase_connection)
     try:
         with conn.cursor() as cur:
