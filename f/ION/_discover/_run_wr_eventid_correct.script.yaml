@@ -1,0 +1,8 @@
+summary: 'Throwaway: EventID-correct WINDING RIVER May (resolve loglist->addLog
+  + apply). dry_run default.'
+description: Self-contained resolve+correct for WINDING RIVER (sl 8493) May.
+  no-args = dry_run. Delete after validation.
+lock: '!inline f/ION/_discover/_run_wr_eventid_correct.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
