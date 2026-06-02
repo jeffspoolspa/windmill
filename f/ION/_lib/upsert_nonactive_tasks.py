@@ -16,9 +16,11 @@ tasks_one_open_per_loc -- these are historical/one-time anyway). This is how the
 one-time cleans / green-pool / expired-maintenance jobs (which #58's active-only
 sync skips) get represented so every visit has a task.
 
-VISIT LINK: a task-less visit at the location links to the captured task whose
-[starts_on, ends_on] window contains the visit_date (latest-starting wins; single
-captured task is the fallback). Schedule slot matched by weekday when present.
+VISIT LINK (STRICT): a task-less visit at the location links to the captured task
+whose [starts_on, ends_on] window CONTAINS the visit_date (latest-starting wins).
+No fuzzy fallback -- visits outside every captured window stay unmatched (e.g.
+duplicate-twin SHIPWATCH/CHANEY, whose ACTIVE task lives on the OTHER service_
+location; those are fixed by the merge, never mis-attributed here).
 
 SAFETY: dry_run=True default -> all writes in one transaction, then ROLLBACK.
 
@@ -148,9 +150,12 @@ def capture(rows, supabase_connection, dry_run=True, source="ion"):
                         if s and vdate >= s and (e is None or vdate <= e):
                             if best is None or (ct["starts"] or _date.min) > (best["starts"] or _date.min):
                                 best = ct
-                    if best is None and len(created) == 1:
-                        best = created[0]
                     if best is None:
+                        # strict: a visit must fall inside a captured task's
+                        # [starts,ends] window. No fuzzy fallback -- visits outside
+                        # all windows (e.g. duplicate-twin SHIPWATCH/CHANEY, whose
+                        # active task is on the OTHER sl) stay unmatched for the
+                        # merge fix, never mis-attributed to an unrelated side-task.
                         stats["visits_unmatched_window"] += 1
                         continue
                     cur.execute(
