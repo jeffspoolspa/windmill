@@ -1,0 +1,10 @@
+summary: Correct ion_task_id/task_id on rate-ambiguous visits using ground-truth
+  EventIDs
+description: Step 3 of the EventID correction. Takes {service_location_id,
+  scheduled_date, timein, event_id, serviceable} from resolve_ambiguous_eventids
+  and stamps the real ion_task_id + task_id + is_serviceable onto the matching
+  per-log visits (aligned by sl+date+started_at). dry_run rolls back.
+lock: '!inline f/ION/_lib/correct_ambiguous_visits.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
