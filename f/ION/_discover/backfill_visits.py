@@ -44,8 +44,10 @@ def _month_windows(start_month, end_month):
     return out
 
 
-def main(supabase_connection, start_month="2025-01", end_month="2026-03",
+def main(supabase_connection=None, start_month="2025-01", end_month="2026-03",
          probe_only=True, write_unmapped=False):
+    if supabase_connection is None:
+        supabase_connection = wmill.get_resource("u/carter/supabase")
     raw = wmill.get_variable("f/ION/session_cache")
     session = json.loads(raw)
 
