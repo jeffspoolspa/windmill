@@ -34,7 +34,6 @@ export async function main() {
     body, redirect: "manual",
   }).then(r => r.text())
 
-  // 1. resolve WINDING RIVER customer id
   const listHtml = await get(`/customers/customerlist.cfm?officeid=0&techid=0&routeid=0&search=${encodeURIComponent("WINDING RIVER")}&reset=1`)
   let cid: string | null = null
   for (const a of parse(listHtml).querySelectorAll('a[href*="customerTabs"]')) {
@@ -44,7 +43,6 @@ export async function main() {
   }
   if (!cid) return { error: "no WINDING RIVER customer found" }
 
-  // 2. loglist -> entries (date, LogID)
   await get(`/customers/customerTabs.cfm?customerid=${cid}`)
   const logHtml = await post(`/customers/logs/loglist.cfm`, "limit=400")
   const entries: { date: string; logId: string }[] = []
@@ -55,7 +53,6 @@ export async function main() {
   }
   const may = entries.filter(e => e.date >= "2026-05-01" && e.date <= "2026-05-31")
 
-  // 3. EventID per LogID
   const byEvent: Record<string, { logs: number; dates: Set<string> }> = {}
   for (const e of may) {
     const ah = await get(`/tasks/addLog.cfm?LogID=${e.logId}&Source=ServiceLog`)
