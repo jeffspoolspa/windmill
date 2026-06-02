@@ -1,5 +1,5 @@
-summary: 'Throwaway: pull WINDING RIVER May service-log EventIDs, tally distinct
-  (EventID,date) per task vs invoice'
+summary: 'Throwaway: WINDING RIVER May EventID dates per task + addLog field
+  dump (cutoff vs missync investigation)'
 description: ''
 lock: '!inline f/ION/_discover/_probe_wr_events.script.lock'
 has_on_behalf_of: false

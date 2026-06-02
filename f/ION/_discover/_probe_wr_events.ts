@@ -2,10 +2,6 @@
 //node-html-parser@6.1.13
 //playwright@1.40.0
 
-// Throwaway proof: for WINDING RIVER, pull every May service-log entry's EventID
-// (the authoritative ION task id) and tally distinct (EventID, date) per task --
-// the true billable-visit count -- to compare against the invoice lines.
-
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
 import { parse } from "node-html-parser"
@@ -34,15 +30,7 @@ export async function main() {
     body, redirect: "manual",
   }).then(r => r.text())
 
-  const listHtml = await get(`/customers/customerlist.cfm?officeid=0&techid=0&routeid=0&search=${encodeURIComponent("WINDING RIVER")}&reset=1`)
-  let cid: string | null = null
-  for (const a of parse(listHtml).querySelectorAll('a[href*="customerTabs"]')) {
-    const m = (a.getAttribute("href") || "").match(/customerid=(\d+)/)
-    if (m && up(a.text).includes("WINDING RIVER")) { cid = m[1]; break }
-    if (m && !cid) cid = m[1]
-  }
-  if (!cid) return { error: "no WINDING RIVER customer found" }
-
+  const cid = "2367390"  // WINDING RIVER (from prior probe)
   await get(`/customers/customerTabs.cfm?customerid=${cid}`)
   const logHtml = await post(`/customers/logs/loglist.cfm`, "limit=400")
   const entries: { date: string; logId: string }[] = []
@@ -53,26 +41,28 @@ export async function main() {
   }
   const may = entries.filter(e => e.date >= "2026-05-01" && e.date <= "2026-05-31")
 
-  const byEvent: Record<string, { logs: number; dates: Set<string> }> = {}
+  // also: dump all input field name->value of the FIRST May addLog page (look for invoice/billed refs)
+  let addLogFields: Record<string, string> = {}
+  if (may.length) {
+    const ah = await get(`/tasks/addLog.cfm?LogID=${may[0].logId}&Source=ServiceLog`)
+    for (const inp of parse(ah).querySelectorAll("input,select")) {
+      const n = inp.getAttribute("name"); if (!n) continue
+      const v = inp.getAttribute("value") || ""
+      if (/invoice|bill|sync|qbo|posted|status|charge/i.test(n)) addLogFields[n] = v.slice(0, 40)
+    }
+  }
+
+  const byEvent: Record<string, string[]> = {}
   for (const e of may) {
     const ah = await get(`/tasks/addLog.cfm?LogID=${e.logId}&Source=ServiceLog`)
     const inp = parse(ah).querySelector('input[name="EventID"]')
     const ev = (inp?.getAttribute("value") || "none")
-    ;(byEvent[ev] ??= { logs: 0, dates: new Set() })
-    byEvent[ev].logs++
-    byEvent[ev].dates.add(e.date)
+    ;(byEvent[ev] ??= []).push(e.date)
   }
-
-  const tally: Record<string, { log_entries: number; distinct_days: number }> = {}
-  let totalDistinct = 0
-  for (const [ev, d] of Object.entries(byEvent)) {
-    tally[ev] = { log_entries: d.logs, distinct_days: d.dates.size }
-    totalDistinct += d.dates.size
+  const dates_by_event: Record<string, string[]> = {}
+  for (const [ev, ds] of Object.entries(byEvent)) {
+    dates_by_event[ev] = [...new Set(ds)].sort()
   }
-  return {
-    ion_customerid: cid,
-    may_log_entries: may.length,
-    distinct_event_date_pairs: totalDistinct,
-    by_event_id: tally,
-  }
+  return { ion_customerid: cid, may_log_entries: may.length, dates_by_event,
+           addlog_billing_fields: addLogFields }
 }
