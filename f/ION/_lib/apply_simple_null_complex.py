@@ -10,9 +10,8 @@ Takes the classifier output (resolve_visit_targets):
   - complex_targets [{visit_id, ...}] -> NULL their task_id/ion_task_id so the
     authoritative ION-log linker (resolve_visit_tasks_via_log + link_visits_by_event)
     can re-set them from the EventID (link_visits_by_event only writes where
-    task_id IS NULL). Capturing the customers' missing tasks (upsert_nonactive_tasks)
-    runs between this and the log-link.
-
+    task_id IS NULL).
+visit_id/task_id arrive as TEXT (classifier did id::text) -> cast to uuid here.
 SAFETY: dry_run=True default -> rollback.
 """
 
@@ -31,7 +30,8 @@ def main(simple_assignments, complex_targets, supabase_connection=None, dry_run:
                 if not a.get("task_id"):
                     continue
                 cur.execute(
-                    "UPDATE maintenance.visits SET ion_task_id=%s, task_id=%s, updated_at=now() WHERE id=%s",
+                    "UPDATE maintenance.visits SET ion_task_id=%s, task_id=%s::uuid, updated_at=now() "
+                    "WHERE id=%s::uuid",
                     (a.get("ion_task_id"), a["task_id"], a["visit_id"]),
                 )
                 applied += cur.rowcount
@@ -39,7 +39,8 @@ def main(simple_assignments, complex_targets, supabase_connection=None, dry_run:
             nulled = 0
             if cids:
                 cur.execute(
-                    "UPDATE maintenance.visits SET task_id=NULL, ion_task_id=NULL, updated_at=now() WHERE id = ANY(%s)",
+                    "UPDATE maintenance.visits SET task_id=NULL, ion_task_id=NULL, updated_at=now() "
+                    "WHERE id = ANY(%s::uuid[])",
                     (cids,),
                 )
                 nulled = cur.rowcount
