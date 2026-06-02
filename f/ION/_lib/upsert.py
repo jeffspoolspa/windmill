@@ -10,21 +10,13 @@ Layer 3 of the ION ingest pipeline:
     UPSERT   ->  maintenance.visits / chem_readings / consumables_usage / visit_tasks
                   + auto-create public.pools
 
-What it does:
-  1. Loads in-memory FK resolvers ONCE per run (Customers + service_locations,
-     employees.ion_username, public.items by name, active tasks+rates per sl).
-  2. For each canonical row:
-       - Resolves service_location_id by (normalized_address, normalized_name).
-       - Resolves actual_tech_id by ion_username.
-       - Get-or-create pool_id by (service_location_id, pool_name).
-       - Attributes the visit to the location's task whose RATE matches the
-         visit price (multi-contract communities), then the (day, tech) slot.
-       - Combines visit_date + start/end time into timestamps; derives
-         visit_type + billing_method.
-  3. UPSERT visits via UNIQUE (service_location_id, scheduled_date, pool_id,
-     service_type) -- one visit per pool per service type per day.
-  4. DELETE chem_readings + consumables_usage + visit_tasks for those visit_ids,
-     then INSERT. (Idempotent on re-runs.)
+Visit grain = (service_location_id, scheduled_date, service_type): ONE billable
+visit per service per day. Multiple service bodies (pools) serviced under the
+same service on the same day bill together as one visit (they collapse onto one
+visit_id; per-pool chem/consumables/visit_tasks still attach via pool_id).
+Different services (POOL MAINTENANCE vs CHEMICAL TESTING) on the same day stay
+separate billable visits. Each visit attributes to the location task whose
+schedule RATE matches the visit price (multi-contract communities).
 
 Public API:
     upsert_canonical(canonical_rows, supabase_connection) -> stats dict
@@ -154,13 +146,10 @@ def build_resolvers(conn):
         for item_id, item_name in cur.fetchall():
             items_by_name[item_name.upper().strip()] = item_id
 
-    # Active tasks per service_location, WITH their rate/billing so a per-pool
-    # visit can attribute to the RIGHT task at a multi-contract location
-    # (e.g. WINDING RIVER = a $85 POOL MAINTENANCE task + $50 CHEMICAL TESTING
-    # tasks). Keyed by sl -> [task meta]; each meta carries the (max) per-visit
-    # rate, flat amount, billing_method, and its (day, tech) schedule slots.
+    # Active tasks per service_location, WITH rate/billing for rate-based
+    # attribution at multi-contract locations.
     tasks_by_sl = defaultdict(list)
-    task_meta = {}  # task_id -> meta dict (also the element stored in tasks_by_sl)
+    task_meta = {}
     with conn.cursor() as cur:
         cur.execute("""
             SELECT t.id, t.service_location_id,
@@ -196,14 +185,7 @@ def build_resolvers(conn):
 
 
 def _choose_task(candidates, price_cents, billing_method):
-    """Pick which of a location's active tasks a visit belongs to.
-
-    Single task -> it. Multi-contract location -> attribute by RATE so each
-    visit lands on the task billed at its price (a $85 POOL MAINTENANCE visit ->
-    the $85 task; a $50 CHEMICAL TESTING visit -> a $50 task). Same-rate ties are
-    arbitrary but harmless: the customer-month expected (sum of rate x visits) is
-    identical whichever same-rate task wins.
-    """
+    """Pick which of a location's active tasks a visit belongs to (rate match)."""
     if not candidates:
         return None
     if len(candidates) == 1:
@@ -220,14 +202,7 @@ def _choose_task(candidates, price_cents, billing_method):
 
 def resolve_task_and_schedule(resolvers, service_location_id, visit_date, actual_tech_id,
                               price_cents=None, billing_method=None):
-    """Returns (task_id, task_schedule_id, scheduled_tech_id) or all None if no task.
-
-    Step 1: pick the task at this location whose rate matches the visit (handles
-    multi-contract communities). Step 2: pick the (day, tech) schedule slot:
-      1. matching day_of_week AND tech_employee_id == actual_tech
-      2. matching day_of_week (any tech) — reassignment case
-      3. None — off-schedule (make-up, QC, etc.)
-    """
+    """Returns (task_id, task_schedule_id, scheduled_tech_id) or all None if no task."""
     candidates = resolvers["tasks_by_sl"].get(service_location_id, [])
     chosen = _choose_task(candidates, price_cents, billing_method)
     if chosen is None:
@@ -238,19 +213,15 @@ def resolve_task_and_schedule(resolvers, service_location_id, visit_date, actual
     if not schedules:
         return task_id, None, None
 
-    # Compute day_of_week (Postgres convention: 0=Sunday, 6=Saturday)
     if hasattr(visit_date, "weekday"):
-        # Python's weekday: 0=Monday, 6=Sunday — convert
         py_dow = visit_date.weekday()
         pg_dow = (py_dow + 1) % 7
     else:
         return task_id, None, None
 
-    # Tier 1: same day AND same tech
     for sched_id, dow, tech_id in schedules:
         if dow == pg_dow and tech_id == actual_tech_id:
             return task_id, sched_id, tech_id
-    # Tier 2: same day, any tech (reassignment case)
     for sched_id, dow, tech_id in schedules:
         if dow == pg_dow:
             return task_id, sched_id, tech_id
@@ -267,7 +238,7 @@ def resolve_service_location_id(resolvers, addr, name):
     candidates = resolvers["sl_by_addr_only"].get(n_addr, [])
     if len(candidates) == 1:
         return candidates[0]
-    return None  # ambiguous or unknown
+    return None
 
 
 def resolve_tech_id(resolvers, username):
@@ -279,7 +250,6 @@ def resolve_tech_id(resolvers, username):
 # ─── value derivation ─────────────────────────────────────────────────────────
 
 def combine_datetime(d, time_str):
-    """date + 'HH:MM AM/PM' string -> isoformat str, treated as US/Eastern."""
     if not d or not time_str:
         return None
     if isinstance(d, str):
@@ -339,12 +309,7 @@ def get_or_create_pool(conn, service_location_id, pool_name, source="ion"):
 # ─── core upsert ──────────────────────────────────────────────────────────────
 
 def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
-    """Take canonical-shaped rows from f/ION/_lib/normalize and write to maintenance.*
-
-    Idempotency: visits UPSERT on (service_location_id, scheduled_date, pool_id,
-    service_type). chem_readings + consumables_usage + visit_tasks are
-    DELETE-then-INSERT for the touched visit_ids.
-    """
+    """Write canonical rows to maintenance.*; visits keyed (loc, date, service_type)."""
     conn = _connect(supabase_connection)
     try:
         resolvers = build_resolvers(conn)
@@ -362,8 +327,8 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             "visit_tasks_inserted": 0,
         }
 
-        visit_buffer = []   # list of dicts ready to insert
-        per_row_extras = []  # parallel to visit_buffer
+        visit_buffer = []
+        per_row_extras = []
 
         for row in canonical_rows:
             v = row.get("visits", {}) or {}
@@ -396,7 +361,7 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             tech_id = resolve_tech_id(resolvers, v.get("_tech_username"))
             visit_date = v.get("visit_date")
             if not visit_date:
-                continue  # can't ingest without a date
+                continue
 
             started_at = combine_datetime(visit_date, v.get("_start_time_str"))
             ended_at = combine_datetime(visit_date, v.get("_end_time_str"))
@@ -404,13 +369,11 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             visit_type = derive_visit_type(v.get("_service_type"), price_cents)
             billing_method = derive_billing_method(v.get("_invoice_type"))
 
-            # Pool resolution (auto-create if needed)
             pool_name = pool_meta.get("_pool_name")
             pool_id, was_created = get_or_create_pool(conn, sl_id, pool_name, source=source)
             if was_created:
                 stats["pools_created"] += 1
 
-            # Task + schedule resolution (rate-matched at multi-contract locations).
             task_id, task_schedule_id, scheduled_tech = resolve_task_and_schedule(
                 resolvers, sl_id, visit_date, tech_id, price_cents, billing_method
             )
@@ -456,7 +419,6 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
             conn.commit()
             return stats
 
-        # UPSERT visits, capturing returned ids
         visit_ids = []
         with conn.cursor() as cur:
             for v in visit_buffer:
@@ -474,9 +436,10 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                        %(scheduled_tech_id)s, %(actual_tech_id)s, %(started_at)s, %(ended_at)s,
                        %(status)s, %(visit_type)s, %(price_cents)s, %(billing_method)s,
                        %(office)s, %(notes)s, %(external_source)s)
-                    ON CONFLICT (service_location_id, scheduled_date, pool_id, service_type) DO UPDATE SET
+                    ON CONFLICT (service_location_id, scheduled_date, service_type) DO UPDATE SET
                       task_id             = COALESCE(EXCLUDED.task_id, maintenance.visits.task_id),
                       task_schedule_id    = COALESCE(EXCLUDED.task_schedule_id, maintenance.visits.task_schedule_id),
+                      pool_id             = COALESCE(maintenance.visits.pool_id, EXCLUDED.pool_id),
                       visit_date          = EXCLUDED.visit_date,
                       scheduled_tech_id   = EXCLUDED.scheduled_tech_id,
                       actual_tech_id      = EXCLUDED.actual_tech_id,
@@ -510,7 +473,6 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                 (visit_ids,),
             )
 
-        # Insert chem_readings (one per row, keyed by visit_id + pool_id)
         chem_rows = []
         for visit_id, extras in zip(visit_ids, per_row_extras):
             pool_id = extras["pool_id"]
@@ -544,7 +506,6 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                 )
                 stats["chem_readings_inserted"] = len(chem_rows)
 
-        # Insert consumables_usage (one row per item per visit)
         cons_rows = []
         for visit_id, extras in zip(visit_ids, per_row_extras):
             pool_id = extras["pool_id"]
@@ -575,7 +536,6 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
                 )
                 stats["consumables_inserted"] = len(cons_rows)
 
-        # Insert visit_tasks (one row per checked-or-unchecked task per visit).
         task_rows = []
         for visit_id, extras in zip(visit_ids, per_row_extras):
             pool_id = extras["pool_id"]
@@ -618,5 +578,4 @@ def upsert_canonical(canonical_rows, supabase_connection, source="ion"):
 # ─── Windmill entry ───────────────────────────────────────────────────────────
 
 def main(canonical_rows, supabase_connection, source="ion"):
-    """Smoke entry. Pass `canonical_rows` from f/ION/_lib/normalize's output."""
     return upsert_canonical(canonical_rows, supabase_connection, source=source)
