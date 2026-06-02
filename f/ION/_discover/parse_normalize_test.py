@@ -38,7 +38,16 @@ def _cookie_header(cookies, ion_origin):
     return "; ".join(parts)
 
 
-def main(ion_session, supabase_connection, lookback_days=30, write_unmapped=True):
+def main(ion_session, supabase_connection, lookback_days=30, write_unmapped=True,
+         start_date=None, end_date=None, probe_only=False):
+    """Fetch + parse + normalize + upsert ION completed service logs.
+
+    Date window: [start, end]. By default start = today - lookback_days and end =
+    open (today). For BACKFILL, pass explicit start_date / end_date (YYYY-MM-DD)
+    to fetch a bounded historical window (chunk the backfill into windows; ION's
+    report + this parser + the row-by-row upsert don't want ~1.5y at once).
+    probe_only=True -> fetch + parse + report counts, but SKIP normalize-write and
+    upsert (read-only feasibility check; writes nothing to the DB)."""
     ion_origin = ion_session["ionOrigin"]
     cf_client_id = ion_session.get("cfClientId") or ""
     cookie_header = _cookie_header(ion_session["cookies"], ion_origin)
@@ -48,12 +57,13 @@ def main(ion_session, supabase_connection, lookback_days=30, write_unmapped=True
         "Accept": "text/html, */*",
     }
 
-    # STEP 1 — picker prime
-    start_str = date.fromordinal(date.today().toordinal() - lookback_days).strftime("%Y-%m-%d")
-    print(f"STEP 1: picker prime (Start={start_str})")
+    # STEP 1 — picker prime (bounded window if start/end given)
+    start_str = start_date or date.fromordinal(date.today().toordinal() - lookback_days).strftime("%Y-%m-%d")
+    end_str = end_date or ""
+    print(f"STEP 1: picker prime (Start={start_str}, end={end_str or 'open'})")
     picker_url = f"{ion_origin}/reports/serviceLogs.cfm"
     picker_params = {
-        "office": "", "tech": "", "Start": start_str, "end": "", "set": "1",
+        "office": "", "tech": "", "Start": start_str, "end": end_str, "set": "1",
         "_cf_containerId": "rptDetail",
         "_cf_nodebug": "true", "_cf_nocache": "true",
         "_cf_clientid": cf_client_id, "_cf_rc": "1",
@@ -83,6 +93,18 @@ def main(ion_session, supabase_connection, lookback_days=30, write_unmapped=True
     parser_meta = parsed["extraction_metadata"]
     print(f"  parser: {parser_meta['row_count']} rows, {len(parser_meta['profiles_found'])} profiles")
 
+    # PROBE — read-only feasibility check: report what the window returned, write nothing
+    if probe_only:
+        return {
+            "ok": True, "probe_only": True,
+            "fetch": {"start_date": start_str, "end_date": end_str or None, "data_bytes": len(r2.content)},
+            "parser": {
+                "row_count": parser_meta["row_count"],
+                "profiles_found": parser_meta["profiles_found"],
+                "profile_row_counts": parser_meta["profile_row_counts"],
+            },
+        }
+
     # STEP 4 — normalize (we want the FULL canonical_rows, not just summary)
     print("STEP 4: normalize")
     norm = ion_normalize.normalize_rows(parsed, supabase_connection)
@@ -101,6 +123,7 @@ def main(ion_session, supabase_connection, lookback_days=30, write_unmapped=True
         "ok": True,
         "fetch": {
             "start_date": start_str,
+            "end_date": end_str or None,
             "lookback_days": lookback_days,
             "data_bytes": len(r2.content),
         },

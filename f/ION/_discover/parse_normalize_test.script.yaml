@@ -1,7 +1,9 @@
-summary: End-to-end pipeline test (fetch -> parse -> normalize -> upsert)
+summary: End-to-end pipeline (fetch -> parse -> normalize -> upsert); supports
+  bounded backfill windows + probe_only
 description: Full ingest pipeline. Reuses captured IonSession to skip Chromium
   login. Writes to maintenance.visits / chem_readings / consumables_usage and
-  auto-creates pools.
+  auto-creates pools. start_date/end_date fetch a bounded historical window for
+  backfill; probe_only reports counts without writing.
 lock: '!inline f/ION/_discover/parse_normalize_test.script.lock'
 has_on_behalf_of: false
 kind: script
