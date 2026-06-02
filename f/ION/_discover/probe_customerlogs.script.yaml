@@ -1,5 +1,5 @@
-summary: 'Probe customerlogs.cfm filter submit (qdatesel=date): does it return
-  log rows with EventID/task id + customer?'
+summary: 'Probe customerlogs.cfm CFGRID: extract grid bind URL + column model +
+  try the data fetch (EventID?)'
 description: ''
 lock: '!inline f/ION/_discover/probe_customerlogs.script.lock'
 has_on_behalf_of: false
