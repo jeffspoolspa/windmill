@@ -216,32 +216,11 @@ def main(customer: dict, billing_month: str, access_token: str, realm_id: str, d
         result["payment_method_source"] = "table_linked"
         result["notes"].append(f"Method from payment-methods table: {rm.get('card_brand') or rm.get('kind')} ending {rm.get('last_four')}")
     else:
-        # No synced active method in the table -> fall back to live QBO lookup
-        result["payment_method_source"] = "qbo_live_fallback"
-        try:
-            cards_resp = requests.get(f"https://api.intuit.com/quickbooks/v4/customers/{qbo_id}/cards", headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "Request-Id": str(uuid.uuid4())}, timeout=15)
-            if cards_resp.ok:
-                cards = cards_resp.json()
-                if isinstance(cards, list):
-                    for card in cards:
-                        if card.get("status") == "ACTIVE":
-                            if card.get("default") or active_card is None:
-                                active_card = card
-            banks_resp = requests.get(f"https://api.intuit.com/quickbooks/v4/customers/{qbo_id}/bank-accounts", headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "Request-Id": str(uuid.uuid4())}, timeout=15)
-            if banks_resp.ok:
-                banks = banks_resp.json()
-                if isinstance(banks, list):
-                    for bank in banks:
-                        if bank.get("verificationStatus") in ("VERIFIED", "NOT_VERIFIED"):
-                            if bank.get("default") or active_bank is None:
-                                active_bank = bank
-        except Exception as e:
-            result["status"] = "error"
-            result["notes"].append("Payment method check error")
-            result["errors"].append(f"Payment method lookup exception: {str(e)[:300]}")
-            update_txn("error", error_step="payment_method_lookup", error_message=str(e)[:500])
-            conn.close()
-            return result
+        # Live QBO fallback REMOVED. A customer with no linked active method is
+        # flagged as no_payment_method below (no live lookup). Fix by linking a
+        # payment method (autopay_customers.payment_method_id) or removing them
+        # from autopay.
+        result["payment_method_source"] = "no_linked_method"
     if not active_card and not active_bank:
         result["status"] = "no_payment_method"
         result["notes"].append("No active card or bank account on file")
