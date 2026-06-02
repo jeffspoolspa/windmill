@@ -1,0 +1,7 @@
+summary: 'Log-linker step 1: task-less visits + ion_cust hint (for
+  loglist->addLog->EventID authoritative linking)'
+description: ''
+lock: '!inline f/ION/_lib/taskless_visits.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
