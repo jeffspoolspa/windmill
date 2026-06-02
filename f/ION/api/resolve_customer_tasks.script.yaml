@@ -1,0 +1,8 @@
+summary: 'Capture-nonactive step 2: resolve task-less-visit locations to ION
+  customerid (customerlist search) + pull full taskList'
+description: ''
+lock: '!inline f/ION/api/resolve_customer_tasks.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
