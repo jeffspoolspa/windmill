@@ -38,6 +38,7 @@ locks:
   f/google_maps/geocode_customers: 61cf6c931b46bbfca08d2561ad7a7414387f24c9d0e9a067925388031823a795
   f/google_maps/normalize_customer_addresses: 62646c8d9a50fb708109a87ca04e0e9631e7ce10fb48c08cfa59c5533d9349e0
   f/ION/_discover/_probe_wr: f527b79e7350002a46b8fcf9024fc312506e41fbe6c1b403eeb4f096c21b710d
+  f/ION/_discover/_probe_wr2: 4cc444be5e47c203bd7f0d701405b2e1edbf8ba9705bfbb1ee10ada63613a965
   f/ION/_discover/_run_backfill: 553dc9c4aa18bc018d30ebc418605ff6ecbe620a68665a07d89364762cac66a8
   f/ION/_discover/backfill_visits: 9ecc1d8e6d0a7ad40ce6ce0b724a3a3bf9c00eff99135288d5cc3f9e95a5ed19
   f/ION/_discover/diagnose_unresolved: 970bb7726625741c55c612dec8cd516913db45a0eb0cc8c030580914a3b3b920
