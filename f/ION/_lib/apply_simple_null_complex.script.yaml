@@ -1,0 +1,7 @@
+summary: 'Resolver step 3a: apply simple 1:1 visit->task assignments; null
+  complex visits for authoritative log relink'
+description: ''
+lock: '!inline f/ION/_lib/apply_simple_null_complex.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

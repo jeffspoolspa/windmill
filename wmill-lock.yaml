@@ -55,6 +55,7 @@ locks:
   f/ION/_discover/qbo_fix_service_addresses: 114dd20d031a3dce70e77d01d38fb52b355564218c159c6093aded9683f79b28
   f/ION/_discover/qbo_fix_service_addresses_commit: 363e0aee44734d78081ec2fef0f01a5fc6b03fdf17a95b7e9baa7edad7782331
   f/ION/_discover/timing_breakdown: dda83936276c376542510be429ad423311c4bdda8fa3f75ea95b1a56c08d4bcc
+  f/ION/_lib/apply_simple_null_complex: 46a2487e66e960813c243cbffccd208f8ba303bb181a369cf5f6b3efb4dc9d92
   f/ION/_lib/capture_targets: 2e7ac12ed0a9da730f2ddba9d83853ab5675417a03be4bc6f123a596a67839c2
   f/ION/_lib/correct_ambiguous_visits: 5888cb698ed9d9483552aae10d2b45e6223d98b0741d893298658fc1e251831f
   f/ION/_lib/link_visits_by_event: c4ce449d71b9be88e14ab21120ae1bcdc09836c4020961a9320442f623f0f9f8
