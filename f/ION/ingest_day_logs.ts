@@ -10,18 +10,13 @@
 //   2. get_log_detail  -> per log: EventID(task), TaskInvoiceID, times, serviceable, consumables
 //   3. KEEP logs that were PERFORMED = have a time_in AND resolve to a task (EventID).
 //      The "completed" bullet is NOT the gate: a performed visit whose tech never clocked
-//      out (no time_out) shows no green bullet yet ION bills it (e.g. HILTON 05/11). A log
-//      with no time_in was never serviced -> skipped.
-//   4. resolve EventID -> (task_id uuid, service_location_id, per-visit rate) and PRICE the
-//      visit at task_price_cents (the contracted/override rate); the trailing number in the
-//      service name ("POOL MAINTENANCE 80") is a tier code, not the price. Fall back to the
-//      name-parsed number only when the task has no contracted price.
-//   5. SCOPED TRANSACTIONAL REPLACE over the window: delete consumables_usage for the
-//      window's visits, delete those visits (cascades visit_tasks + chem_readings), INSERT
-//      one visit per performed log keyed by ion_log_id, plus consumables_usage.
-//
-// is_serviceable comes from get_log_detail: performed (has time_in) AND not an explicit
-// zero-duration log (time_out present AND == time_in). Reversed/garbled times still count.
+//      out (no time_out) shows no green bullet yet ION bills it (e.g. HILTON 05/11).
+//   4. resolve EventID -> (task_id, sl, rate); PRICE the visit at task_price_cents (the
+//      contracted/override rate), falling back to the name-parsed number only when null.
+//   5. SCOPED TRANSACTIONAL REPLACE over the window. INSERT one visit per performed log;
+//      ON CONFLICT (visits_uniq_log_natural) DO NOTHING -- multi-pool visits at the same
+//      sl/date/service/time collapse to one row (billing collapses by (task,day) anyway,
+//      so this is billing-equivalent; the natural key has no pool discriminator).
 //
 // dry_run=true (default): fetch + resolve + report, NO writes. dry_run=false: commit.
 
@@ -64,7 +59,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
   const perDay: any[] = []
   for (const day of days) {
     const enr: any = await listDayLogs(day)
-    const dayLogs = (enr.logs ?? [])   // ALL logs, not just completed
+    const dayLogs = (enr.logs ?? [])
     const det: any = await getLogDetail(dayLogs.map((l: any) => ({ log_id: l.log_id, calendar_id: l.calendar_id })))
     const byLog: Record<string, any> = {}
     for (const d of det.details) byLog[d.log_id] = d
@@ -72,7 +67,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
     for (const l of dayLogs) {
       const d = byLog[l.log_id] || {}
       if (!d.event_id) { noEvent++; continue }
-      if (!d.time_in) { notPerformed++; continue }   // no time_in => never serviced
+      if (!d.time_in) { notPerformed++; continue }
       visits.push({
         ion_log_id: l.log_id, ion_calendar_id: l.calendar_id,
         event_id: String(d.event_id),
@@ -131,15 +126,15 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
       result = { dry_run: true, ...summary }
     } else {
       const isoStart = toIso(start_date), isoEnd = toIso(end_date)
-      let deletedCons = 0, deletedVisits = 0, insertedVisits = 0, insertedCons = 0, skipped = 0
+      let deletedCons = 0, deletedVisits = 0, insertedVisits = 0, insertedCons = 0, skippedNoSl = 0, dupSkipped = 0
       await sql.begin(async (tx: any) => {
         const dc = await tx`DELETE FROM maintenance.consumables_usage WHERE visit_id IN (SELECT id FROM maintenance.visits WHERE scheduled_date BETWEEN ${isoStart} AND ${isoEnd})`
         deletedCons = dc.count
         const dv = await tx`DELETE FROM maintenance.visits WHERE scheduled_date BETWEEN ${isoStart} AND ${isoEnd}`
         deletedVisits = dv.count
         for (const v of visits) {
-          if (!v.service_location_id || !v.scheduled_date) { skipped++; continue }
-          const [row] = await tx`INSERT INTO maintenance.visits
+          if (!v.service_location_id || !v.scheduled_date) { skippedNoSl++; continue }
+          const ins = await tx`INSERT INTO maintenance.visits
             (service_location_id, task_id, ion_task_id, scheduled_date, visit_date, is_serviceable,
              service_type, price_cents, billing_method, status, visit_type, started_at, ended_at,
              ion_log_id, ion_calendar_id, external_source)
@@ -147,16 +142,18 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
              ${v.serviceable}, ${v.service_type}, ${v.price_cents}, ${v.billing_method}, 'completed', 'route',
              ${tsLocal(v.scheduled_date, v.time_in)}, ${tsLocal(v.scheduled_date, v.time_out)},
              ${v.ion_log_id}, ${v.ion_calendar_id}, 'ion_log')
+            ON CONFLICT ON CONSTRAINT visits_uniq_log_natural DO NOTHING
             RETURNING id`
+          if (!ins.length) { dupSkipped++; continue }
           insertedVisits++
           for (const [itemId, qty] of Object.entries(v.consumables || {})) {
             await tx`INSERT INTO maintenance.consumables_usage (visit_id, item_id, quantity, source, recorded_at)
-              VALUES (${row.id}, ${parseInt(itemId)}, ${qty as number}, 'ion', now())`
+              VALUES (${ins[0].id}, ${parseInt(itemId)}, ${qty as number}, 'ion', now())`
             insertedCons++
           }
         }
       })
-      result = { dry_run: false, committed: true, ...summary, deletedCons, deletedVisits, insertedVisits, insertedCons, skipped }
+      result = { dry_run: false, committed: true, ...summary, deletedCons, deletedVisits, insertedVisits, insertedCons, skippedNoSl, dupSkipped }
     }
   } finally {
     await sql.end()

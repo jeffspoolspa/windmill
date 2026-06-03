@@ -1,6 +1,6 @@
 summary: 'Canonical log-based visit ingestion: enumerate -> addLog detail ->
-  scoped transactional replace. Ingest on time-in (performed), price at
-  task_price_cents, serviceable unless zero-duration.'
+  scoped transactional replace. Ingest on time-in, price at task_price_cents,
+  serviceable unless zero-duration, ON CONFLICT dedupe.'
 description: ''
 lock: '!inline f/ION/ingest_day_logs.script.lock'
 has_on_behalf_of: false
