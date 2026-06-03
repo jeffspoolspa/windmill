@@ -16,6 +16,10 @@
 # Side effects: display_name renames are propagated to billing.invoices.
 # customer_name. Gated on did_write so the race loser doesn't overwrite
 # invoice cache rows with its stale display_name.
+#
+# Pattern D: on write we also reset sync_state -> 'synced', which closes the
+# cache loop after a self-initiated create (createInQbo leaves the row at
+# 'awaiting_propagation'; this confirms it once QBO's webhook reflects back).
 
 import json
 from datetime import date, datetime
@@ -145,7 +149,10 @@ def upsert_customer(conn, qbo_cust):
           latitude         = COALESCE(EXCLUDED.latitude, public."Customers".latitude),
           longitude        = COALESCE(EXCLUDED.longitude, public."Customers".longitude),
           qbo_last_updated = EXCLUDED.qbo_last_updated,
-          deleted_at       = NULL
+          deleted_at       = NULL,
+          sync_state            = 'synced',
+          sync_state_changed_at = now(),
+          sync_error            = NULL
         WHERE public."Customers".qbo_last_updated IS NULL
            OR EXCLUDED.qbo_last_updated IS NULL
            OR public."Customers".qbo_last_updated < EXCLUDED.qbo_last_updated

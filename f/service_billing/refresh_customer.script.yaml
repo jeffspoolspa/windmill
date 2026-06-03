@@ -1,7 +1,8 @@
 summary: Optional qbo_body + OCC guard + did_write return
-description: Adds qbo_body=None so cdc_reconciler can call in-process. OCC guard
-  on qbo_last_updated. display_name propagation to
-  billing.invoices.customer_name now gated on did_write.
+description: Single-customer QBO -> Supabase refresh (webhook + CDC). OCC guard
+  on qbo_last_updated; display_name propagation to billing.invoices gated on
+  did_write. Now also resets Customers.sync_state to 'synced' on write
+  (completes the Pattern D cache loop after a self-initiated create).
 lock: '!inline f/service_billing/refresh_customer.script.lock'
 has_on_behalf_of: false
 kind: script
