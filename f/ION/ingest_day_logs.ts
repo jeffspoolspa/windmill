@@ -169,7 +169,7 @@ export async function main(
           insertedVisits++
           for (const [itemId, qty] of Object.entries(v.consumables || {})) {
             await tx`INSERT INTO maintenance.consumables_usage (visit_id, item_id, quantity, source, recorded_at)
-              VALUES (${row.id}, ${parseInt(itemId)}, ${qty as number}, 'ion_log', now())`
+              VALUES (${row.id}, ${parseInt(itemId)}, ${qty as number}, 'ion', now())`
             insertedCons++
           }
         }
