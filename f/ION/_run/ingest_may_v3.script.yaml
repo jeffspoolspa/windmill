@@ -1,0 +1,9 @@
+summary: 'One-shot runner: log-based re-ingest of May 2026 visits in weekly
+  chunks (commits each), no args. Re-bundle with ingest-on-time-in + task_price
+  pricing.'
+description: ''
+lock: '!inline f/ION/_run/ingest_may_v3.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
