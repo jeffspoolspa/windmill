@@ -1,7 +1,9 @@
-summary: Create a QBO customer from a new lead and update Supabase
-description: Called by the create-lead edge function after a lead is created.
-  Creates a QBO Customer record, upserts into public.Customers, and updates the
-  lead with the qbo_customer_id.
+summary: Create a QBO customer for a converted lead (Gen-2)
+description: Looks up the lead's existing Supabase account, creates the QBO
+  Customer (idempotent — skips if already linked), and stamps
+  Customers.qbo_customer_id via update_lead_qbo_customer (which logs to
+  maintenance.lead_activities). Gen-2 rewrite per ADR 004; replaces the dead
+  version that wrote the nonexistent maintenance.leads.
 lock: '!inline f/leads/create_qbo_customer.script.lock'
 has_on_behalf_of: false
 kind: script

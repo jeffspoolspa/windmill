@@ -4,8 +4,23 @@ import wmill
 import psycopg2
 import psycopg2.extras
 
+# Create a QBO customer for a converted lead and link it back to Supabase (Gen-2).
+#
+# In the canonical "Gen-2" leads model the Customers row already exists at intake
+# (check_or_create_customer creates/dedups it), so this script does NOT create a
+# Supabase customer. It: looks up the lead's account, creates the QBO customer if
+# the account isn't already linked, then stamps public."Customers".qbo_customer_id
+# via the update_lead_qbo_customer RPC (which also logs to maintenance.lead_activities).
+#
+# Replaces the dead Gen-1 version that wrote the nonexistent maintenance.leads /
+# maintenance.lead_activities. See docs/adrs/004-leads-canonical-model.md and
+# docs/flows/lead-intake-to-conversion.md.
+
+
 def main(
     lead_id: str,
+    # Kept for backward-compat with the legacy caller's payload; values fetched
+    # from Supabase take precedence, these are fallbacks only.
     first_name: str = "",
     last_name: str = "",
     email: str = "",
@@ -16,9 +31,53 @@ def main(
     address_zip: str = "",
     source: str = "website",
 ):
-    """Create a QBO customer for a new lead and link it back to Supabase."""
+    db = wmill.get_resource("u/carter/supabase")
+    conn = psycopg2.connect(
+        host=db["host"], port=db["port"], dbname=db["dbname"],
+        user=db["user"], password=db["password"],
+        sslmode="require",
+    )
+    conn.autocommit = True
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    # --- 1. QBO Token Refresh ---
+    # --- 1. Resolve the lead's account (the Customer already exists in Gen-2) ---
+    cur.execute("""
+        SELECT l.account_id,
+               c.qbo_customer_id, c.display_name, c.first_name, c.last_name,
+               c.email, c.phone, c.street, c.city, c.state, c.zip
+        FROM public.leads l
+        JOIN public."Customers" c ON c.id = l.account_id
+        WHERE l.id = %s::uuid
+    """, (lead_id,))
+    row = cur.fetchone()
+
+    if not row:
+        cur.close(); conn.close()
+        return {"success": False, "error": f"Lead {lead_id} not found or has no linked account"}
+
+    account_id = row["account_id"]
+
+    # Idempotent: if already linked, don't create a duplicate QBO customer.
+    if row["qbo_customer_id"]:
+        cur.close(); conn.close()
+        return {
+            "success": True,
+            "lead_id": lead_id,
+            "qbo_customer_id": row["qbo_customer_id"],
+            "supabase_customer_id": account_id,
+            "already_linked": True,
+        }
+
+    first_name = row["first_name"] or first_name or ""
+    last_name = row["last_name"] or last_name or ""
+    email = row["email"] or email or ""
+    phone = row["phone"] or phone or ""
+    street = row["street"] or address_street or ""
+    city = row["city"] or address_city or ""
+    state = row["state"] or address_state or "GA"
+    zip_code = row["zip"] or address_zip or ""
+
+    # --- 2. QBO token refresh (rotating refresh token — MUST save the new one) ---
     resource_path = "u/carter/quickbooks_api"
     resource = wmill.get_resource(resource_path)
 
@@ -29,13 +88,13 @@ def main(
         auth=(resource["client_id"], resource["client_secret"]),
     )
     if not response.ok:
+        cur.close(); conn.close()
         raise Exception(f"Token refresh failed: {response.status_code} - {response.text}")
 
     tokens = response.json()
     access_token = tokens["access_token"]
-
     resource["refresh_token"] = tokens["refresh_token"]
-    wmill.set_resource(resource_path, resource)
+    wmill.set_resource(resource_path, resource)  # CRITICAL: persist rotated token
 
     realm_id = resource["realm_id"]
     headers = {
@@ -44,30 +103,28 @@ def main(
         "Accept": "application/json",
     }
 
-    # --- 2. Build display name ---
-    display_name = f"{last_name}, {first_name}".strip(", ").strip()
+    # --- 3. Build display name + create the QBO customer ---
+    display_name = (row["display_name"] or "").strip()
     if not display_name:
-        display_name = email or "Unknown Lead"
+        display_name = f"{last_name}, {first_name}".strip(", ").strip() or email or "Unknown Lead"
 
-    # --- 3. Create QBO Customer ---
     customer_body = {
         "DisplayName": display_name,
         "GivenName": first_name or None,
         "FamilyName": last_name or None,
-        "Notes": f"Created via website quote form. Lead ID: {lead_id}",
+        "Notes": f"Created on lead conversion. Lead ID: {lead_id}",
     }
     if email:
         customer_body["PrimaryEmailAddr"] = {"Address": email}
     if phone:
         customer_body["PrimaryPhone"] = {"FreeFormNumber": phone}
-    if address_street:
+    if street:
         customer_body["BillAddr"] = {
-            "Line1": address_street,
-            "City": address_city or None,
-            "CountrySubDivisionCode": address_state or "GA",
-            "PostalCode": address_zip or None,
+            "Line1": street,
+            "City": city or None,
+            "CountrySubDivisionCode": state or "GA",
+            "PostalCode": zip_code or None,
         }
-
     customer_body = {k: v for k, v in customer_body.items() if v is not None}
 
     resp = requests.post(
@@ -76,9 +133,9 @@ def main(
         json=customer_body,
     )
 
-    # If QBO rejects due to duplicate name, retry with street address appended
+    # QBO rejects duplicate DisplayName — retry with the street appended.
     if resp.status_code == 400 and "already being used" in resp.text.lower():
-        street_label = address_street.strip() if address_street else "New"
+        street_label = street.strip() if street else "New"
         customer_body["DisplayName"] = f"{display_name} ({street_label})"
         display_name = customer_body["DisplayName"]
         resp = requests.post(
@@ -88,6 +145,7 @@ def main(
         )
 
     if not resp.ok:
+        cur.close(); conn.close()
         return {
             "success": False,
             "error": f"QBO customer creation failed: {resp.status_code} - {resp.text[:500]}",
@@ -98,67 +156,11 @@ def main(
     qbo_customer_id = qbo_customer["Id"]
     final_display_name = qbo_customer["DisplayName"]
 
-    # --- 4. Upsert into public.Customers + update lead ---
-    db = wmill.get_resource("u/carter/supabase")
-    conn = psycopg2.connect(
-        host=db["host"], port=db["port"], dbname=db["dbname"],
-        user=db["user"], password=db["password"],
-        sslmode="require",
+    # --- 4. Stamp Customers.qbo_customer_id + log activity (Gen-2 RPC) ---
+    cur.execute(
+        "SELECT public.update_lead_qbo_customer(%s::uuid, %s, %s)",
+        (lead_id, qbo_customer_id, account_id),
     )
-    conn.autocommit = True
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-    cur.execute("""
-        INSERT INTO public."Customers" (
-            qbo_customer_id, display_name, first_name, last_name,
-            email, phone, street, city, state, zip,
-            is_active, is_maintenance
-        ) VALUES (
-            %(qbo_id)s, %(display)s, %(first)s, %(last)s,
-            %(email)s, %(phone)s, %(street)s, %(city)s, %(state)s, %(zip)s,
-            true, true
-        )
-        ON CONFLICT (qbo_customer_id) DO UPDATE SET
-            display_name = EXCLUDED.display_name,
-            first_name = EXCLUDED.first_name,
-            last_name = EXCLUDED.last_name,
-            email = COALESCE(EXCLUDED.email, public."Customers".email),
-            phone = COALESCE(EXCLUDED.phone, public."Customers".phone),
-            is_active = true,
-            is_maintenance = true
-        RETURNING id
-    """, {
-        "qbo_id": qbo_customer_id,
-        "display": final_display_name,
-        "first": first_name or None,
-        "last": last_name or None,
-        "email": email or None,
-        "phone": phone or None,
-        "street": address_street or None,
-        "city": address_city or None,
-        "state": address_state or "GA",
-        "zip": address_zip or None,
-    })
-    row = cur.fetchone()
-    supabase_customer_id = row["id"] if row else None
-
-    cur.execute("""
-        UPDATE maintenance.leads
-        SET qbo_customer_id = %s,
-            customer_id = %s,
-            matched_customer_id = COALESCE(matched_customer_id, %s),
-            updated_at = now()
-        WHERE id = %s::uuid
-    """, (qbo_customer_id, supabase_customer_id, supabase_customer_id, lead_id))
-
-    cur.execute("""
-        INSERT INTO maintenance.lead_activities (lead_id, activity_type, description, metadata, created_by)
-        VALUES (%s::uuid, 'system', 'QBO customer created', %s::jsonb, 'windmill')
-    """, (lead_id, psycopg2.extras.Json({
-        "qbo_customer_id": qbo_customer_id,
-        "display_name": final_display_name,
-        "supabase_customer_id": supabase_customer_id,
-    })))
 
     cur.close()
     conn.close()
@@ -167,6 +169,6 @@ def main(
         "success": True,
         "lead_id": lead_id,
         "qbo_customer_id": qbo_customer_id,
-        "supabase_customer_id": supabase_customer_id,
+        "supabase_customer_id": account_id,
         "display_name": final_display_name,
     }
