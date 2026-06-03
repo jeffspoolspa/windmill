@@ -1,0 +1,9 @@
+summary: 'Canonical log-based visit ingestion: per-day enumerate -> addLog
+  detail -> scoped transactional replace of maintenance.visits (task=EventID, sl
+  via task, serviceable from times, consumables)'
+description: ''
+lock: '!inline f/ION/ingest_day_logs.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
