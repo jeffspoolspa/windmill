@@ -1,0 +1,8 @@
+summary: 'ION API: addLog.cfm detail per LogID -> EventID(task),
+  TaskInvoiceID(customer), times(serviceable), consumables'
+description: ''
+lock: '!inline f/ION/api/get_log_detail.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
