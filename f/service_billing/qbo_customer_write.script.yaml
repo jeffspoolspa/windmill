@@ -1,0 +1,9 @@
+summary: Pattern D QBO Customer write (create / sparse update)
+description: Pure-QBO write used by lib/qbo/write.ts (createInQbo / writeToQbo).
+  Creates or sparse-updates a QBO Customer with rotating-token refresh; returns
+  {success, qbo_id, entity}. The caller owns the Supabase cache +
+  webhook_expectations WAL.
+lock: '!inline f/service_billing/qbo_customer_write.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
