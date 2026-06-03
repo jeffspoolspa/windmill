@@ -14,9 +14,9 @@
 //   4. resolve EventID -> (task_id, sl, rate); PRICE the visit at task_price_cents (the
 //      contracted/override rate), falling back to the name-parsed number only when null.
 //   5. SCOPED TRANSACTIONAL REPLACE over the window. INSERT one visit per performed log;
-//      ON CONFLICT (visits_uniq_log_natural) DO NOTHING -- multi-pool visits at the same
-//      sl/date/service/time collapse to one row (billing collapses by (task,day) anyway,
-//      so this is billing-equivalent; the natural key has no pool discriminator).
+//      ON CONFLICT on the natural-key unique index (sl, date, service_type, pool_id,
+//      started_at; NULLS NOT DISTINCT) DO NOTHING -- multi-pool visits at the same
+//      sl/date/service/time collapse to one row (billing collapses by (task,day) anyway).
 //
 // dry_run=true (default): fetch + resolve + report, NO writes. dry_run=false: commit.
 
@@ -142,7 +142,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
              ${v.serviceable}, ${v.service_type}, ${v.price_cents}, ${v.billing_method}, 'completed', 'route',
              ${tsLocal(v.scheduled_date, v.time_in)}, ${tsLocal(v.scheduled_date, v.time_out)},
              ${v.ion_log_id}, ${v.ion_calendar_id}, 'ion_log')
-            ON CONFLICT ON CONSTRAINT visits_uniq_log_natural DO NOTHING
+            ON CONFLICT (service_location_id, scheduled_date, service_type, pool_id, started_at) DO NOTHING
             RETURNING id`
           if (!ins.length) { dupSkipped++; continue }
           insertedVisits++
