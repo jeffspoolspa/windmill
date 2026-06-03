@@ -3,28 +3,27 @@
 //playwright@1.40.0
 //postgres@3.4.4
 
-// CANONICAL LOG-BASED VISIT INGESTION (Carter's design: LogID is the unique grain).
+// CANONICAL LOG-BASED VISIT INGESTION (LogID is the unique grain).
 //
-// For each day in [start_date, end_date]:
-//   1. list_day_logs   -> every COMPLETED service log that day (LogID + calendarID + service)
-//   2. get_log_detail  -> per log: EventID(=task), TaskInvoiceID(=billed QBO cust),
-//                         scheduled date, time-in/out (-> serviceable), consumables
-//   3. resolve EventID -> (task_id uuid, service_location_id) via task_schedules+tasks
-//      (DISTINCT ON ion_task_id; all schedule rows for a task point to the same task uuid)
-//   4. SCOPED TRANSACTIONAL REPLACE over the date window: delete consumables_usage for the
-//      window's visits, delete those visits (cascades visit_tasks + chem_readings), then
-//      INSERT one visit per completed log keyed by ion_log_id, plus consumables_usage.
+// Per day in [start_date, end_date]:
+//   1. list_day_logs   -> every service log that day (ALL statuses, not just "completed")
+//   2. get_log_detail  -> per log: EventID(task), TaskInvoiceID, times, serviceable, consumables
+//   3. KEEP logs that were PERFORMED = have a time_in AND resolve to a task (EventID).
+//      The "completed" bullet is NOT the gate: a performed visit whose tech never clocked
+//      out (no time_out) shows no green bullet yet ION bills it (e.g. HILTON 05/11). A log
+//      with no time_in was never serviced -> skipped.
+//   4. resolve EventID -> (task_id uuid, service_location_id, per-visit rate) and PRICE the
+//      visit at task_price_cents (the contracted/override rate); the trailing number in the
+//      service name ("POOL MAINTENANCE 80") is a tier code, not the price. Fall back to the
+//      name-parsed number only when the task has no contracted price.
+//   5. SCOPED TRANSACTIONAL REPLACE over the window: delete consumables_usage for the
+//      window's visits, delete those visits (cascades visit_tasks + chem_readings), INSERT
+//      one visit per performed log keyed by ion_log_id, plus consumables_usage.
 //
-// Why replace (not insert-alongside): the billing build collapses to one charge per
-// (task, day) and would double-count if a stale mis-attributed row and the new authoritative
-// log row both exist for the same task-day. Replace guarantees the window reflects ONLY the
-// logs. FK note: consumables_usage is NO ACTION (delete first); visit_tasks/chem_readings CASCADE.
+// is_serviceable comes from get_log_detail: performed (has time_in) AND not an explicit
+// zero-duration log (time_out present AND == time_in). Reversed/garbled times still count.
 //
-// Attribution is DIRECT (no inference): task = EventID, customer flows through the task's
-// canonical ion.recurring_tasks.qbo_customer_id, serviceable = real time-in<time-out.
-//
-// dry_run=true (default): fetch + resolve + report coverage, NO writes. Inspect
-// resolved_to_task / unresolved_events before committing. dry_run=false: commit the replace.
+// dry_run=true (default): fetch + resolve + report, NO writes. dry_run=false: commit.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -33,7 +32,6 @@ import { main as listDayLogs } from "/f/ION/api/list_day_logs"
 import { main as getLogDetail } from "/f/ION/api/get_log_detail"
 
 function pad(n: number) { return String(n).padStart(2, "0") }
-// iterate MM/DD/YYYY inclusive
 function eachDay(startMdy: string, endMdy: string): string[] {
   const p = (s: string) => { const [m, d, y] = s.split("/").map(Number); return new Date(Date.UTC(y, m - 1, d)) }
   const a = p(startMdy), b = p(endMdy), out: string[] = []
@@ -59,50 +57,42 @@ function tsLocal(isoDate: string | null, t: string | null): string | null {
   return `${isoDate} ${pad(h)}:${pad(+m[2])}:00`
 }
 
-export async function main(
-  start_date: string,
-  end_date: string,
-  dry_run: boolean = true,
-) {
+export async function main(start_date: string, end_date: string, dry_run: boolean = true) {
   const days = eachDay(start_date, end_date)
 
-  // ---- 1+2. enumerate + detail per day, build visit candidates ----
   const visits: any[] = []
   const perDay: any[] = []
   for (const day of days) {
     const enr: any = await listDayLogs(day)
-    const completed = (enr.logs ?? []).filter((l: any) => l.completed)
-    const det: any = await getLogDetail(completed.map((l: any) => ({ log_id: l.log_id, calendar_id: l.calendar_id })))
+    const dayLogs = (enr.logs ?? [])   // ALL logs, not just completed
+    const det: any = await getLogDetail(dayLogs.map((l: any) => ({ log_id: l.log_id, calendar_id: l.calendar_id })))
     const byLog: Record<string, any> = {}
     for (const d of det.details) byLog[d.log_id] = d
-    let built = 0, noEvent = 0
-    for (const l of completed) {
+    let built = 0, noEvent = 0, notPerformed = 0
+    for (const l of dayLogs) {
       const d = byLog[l.log_id] || {}
       if (!d.event_id) { noEvent++; continue }
-      const iso = toIso(d.scheduled_date) || toIso(day)
+      if (!d.time_in) { notPerformed++; continue }   // no time_in => never serviced
       visits.push({
         ion_log_id: l.log_id, ion_calendar_id: l.calendar_id,
         event_id: String(d.event_id),
-        scheduled_date: iso,
+        scheduled_date: toIso(d.scheduled_date) || toIso(day),
         service_type: l.service_type ?? null,
-        serviceable: d.serviceable === false ? false : true,
-        price_cents: priceFromService(l.service_type),
+        serviceable: d.serviceable === true,
         time_in: d.time_in ?? null, time_out: d.time_out ?? null,
         consumables: d.consumables || {},
         task_invoice_id: d.task_invoice_id ?? null,
       })
       built++
     }
-    perDay.push({ day, completed: completed.length, built, no_event: noEvent })
+    perDay.push({ day, logs: dayLogs.length, built, no_event: noEvent, not_performed: notPerformed })
   }
 
-  // ---- DB connection ----
   const sb: any = await wmill.getResource("u/carter/supabase")
   const sql = postgres({ host: sb.host, port: sb.port, database: sb.dbname, username: sb.user, password: sb.password, ssl: "require", max: 4 })
 
   let result: any
   try {
-    // ---- 3. resolve EventID -> task_id uuid, service_location_id, billing_method ----
     const eventIds = [...new Set(visits.map((v) => v.event_id))]
     const taskRows = eventIds.length ? await sql<any[]>`
       SELECT DISTINCT ON (ts.ion_task_id)
@@ -122,7 +112,7 @@ export async function main(
       v.task_id = tm?.task_id ?? null
       v.service_location_id = tm?.service_location_id ?? null
       v.billing_method = tm?.billing_method ?? "per_visit"
-      if (v.price_cents == null) v.price_cents = tm?.task_price_cents ?? null
+      v.price_cents = (tm?.task_price_cents ?? null) ?? priceFromService(v.service_type)
       if (v.task_id) resolved++
       if (v.serviceable) serviceableN++
     }
@@ -132,14 +122,9 @@ export async function main(
 
     const summary = {
       window: { start: start_date, end: end_date, days: days.length },
-      per_day: perDay,
-      logs_built: visits.length,
-      distinct_events: eventIds.length,
-      resolved_to_task: resolved,
-      insertable: visits.filter((v) => v.service_location_id).length,
-      serviceable: serviceableN,
-      unresolved_count: unresolved.length,
-      unresolved_events: unresolvedEvents.slice(0, 60),
+      per_day: perDay, logs_built: visits.length, distinct_events: eventIds.length,
+      resolved_to_task: resolved, insertable: visits.filter((v) => v.service_location_id).length,
+      serviceable: serviceableN, unresolved_count: unresolved.length, unresolved_events: unresolvedEvents.slice(0, 60),
     }
 
     if (dry_run) {
@@ -148,12 +133,9 @@ export async function main(
       const isoStart = toIso(start_date), isoEnd = toIso(end_date)
       let deletedCons = 0, deletedVisits = 0, insertedVisits = 0, insertedCons = 0, skipped = 0
       await sql.begin(async (tx: any) => {
-        const dc = await tx`DELETE FROM maintenance.consumables_usage
-          WHERE visit_id IN (SELECT id FROM maintenance.visits
-            WHERE scheduled_date BETWEEN ${isoStart} AND ${isoEnd})`
+        const dc = await tx`DELETE FROM maintenance.consumables_usage WHERE visit_id IN (SELECT id FROM maintenance.visits WHERE scheduled_date BETWEEN ${isoStart} AND ${isoEnd})`
         deletedCons = dc.count
-        const dv = await tx`DELETE FROM maintenance.visits
-          WHERE scheduled_date BETWEEN ${isoStart} AND ${isoEnd}`
+        const dv = await tx`DELETE FROM maintenance.visits WHERE scheduled_date BETWEEN ${isoStart} AND ${isoEnd}`
         deletedVisits = dv.count
         for (const v of visits) {
           if (!v.service_location_id || !v.scheduled_date) { skipped++; continue }
