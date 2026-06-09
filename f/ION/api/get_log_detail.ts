@@ -3,17 +3,15 @@
 //playwright@1.40.0
 
 // Authoritative per-log detail from addLog.cfm. For a batch of {log_id, calendar_id}
-// (from list_day_logs), reads each log's form and returns the ground-truth fields:
-//   event_id        = EventID = the parent TASK (ion_task_id)
-//   task_invoice_id = TaskInvoiceID = the QBO invoice DocNumber the log billed under
-//   ion_customer_id, loc_id, scheduled_date, time_in/out, serviceable, invoice_type,
-//   service_profile, original_failure_id, consumables {item_id: qty},
-//   task_checklist [{name,completed}] = the per-visit task checklist (Brushed, Vacuumed,
-//     Cleaned Filter ...) read from the addLog radio groups (field<digits> Yes/blank).
-//
-// SERVICEABLE RULE (validated 2026-06-03 against the ION transactions report):
-//   serviceable = has time_in AND NOT (time_out present AND time_out == time_in)
-//   Only an explicit ZERO-duration log (in == out) is a genuine skip/no-access.
+// (from list_day_logs), reads each log's form and returns the ground-truth fields.
+//   GENERAL  : event_id(=task), task_invoice_id, consumable_invoice_id, ion_customer_id,
+//              loc_id, scheduled_date, time_in/out, serviceable, invoice_type, service_profile,
+//              original_failure_id, submitted_by(=tech), comment(=notes), failure_reason
+//   READINGS : [{name,value}] from field<n> SELECT or TEXT controls (anything not yes/no), label-keyed
+//   CHECKLIST: [{name,completed}] from field<n> Yes/blank RADIO groups
+//   CONSUMABLES: {item_id: qty} from item<n> with qty>0
+// Classify by control: radio=checklist, select/text=reading. Field ids vary by profile -> key on LABEL.
+// SERVICEABLE: has time_in AND NOT (time_out present AND time_out==time_in). Validated 2026-06-03.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -31,6 +29,13 @@ function toMin(t: string | null): number | null {
   let h = (+m[1]) % 12; if (/pm/i.test(m[3])) h += 12
   return h * 60 + (+m[2])
 }
+function rowLabel(el: any): string | null {
+  let tr: any = el
+  for (let k = 0; k < 8 && tr && tr.tagName !== "TR"; k++) tr = tr.parentNode
+  const cell = tr?.querySelector("td,th")
+  return cell ? cell.text.replace(/\s+/g, " ").trim() : null
+}
+const EMPTY = new Set(["", "-", "--"])
 
 export async function main(logs: { log_id: string; calendar_id?: string }[] = []) {
   const ion = {
@@ -49,6 +54,7 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
       const html = await (await fetch(`${o}/tasks/addLog.cfm?calendarID=${lg.calendar_id || ""}&LogID=${lg.log_id}&source=ServiceLog`, { headers: H, redirect: "manual" })).text()
       const r = parse(html)
       const v = (n: string) => r.querySelector(`input[name="${n}"]`)?.getAttribute("value") ?? null
+      const selText = (n: string) => r.querySelector(`select[name="${n}"] option[selected]`)?.text?.trim() ?? null
       const tin = v("timeinvalue"), tout = v("timeoutvalue")
       const mi = toMin(tin), mo = toMin(tout)
       rec.event_id = v("EventID")
@@ -62,6 +68,11 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
       rec.invoice_type = v("InvoiceType")
       rec.service_profile = v("ServiceProfile")
       rec.original_failure_id = v("OriginalFailureID") || null
+      // general extras
+      rec.submitted_by = selText("submittedBy")     // the tech
+      rec.failure_reason = selText("failureid")      // non-service reason (null when serviced)
+      rec.comment = r.querySelector('textarea[name="comment"]')?.text.replace(/\s+/g, " ").trim() || null
+      // consumables
       const cons: Record<string, number> = {}
       for (const inp of r.querySelectorAll('input[name^="item"]')) {
         const nm = inp.getAttribute("name") || ""
@@ -70,19 +81,29 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
         if (!isNaN(q) && q > 0) cons[m[1]] = (cons[m[1]] || 0) + q
       }
       rec.consumables = cons
-      // task checklist: radio groups named field<digits> with Yes/blank values; checked "Yes" = done.
-      // Key on the row LABEL (matches our visit_tasks names) -- field ids vary by service profile.
-      // Excludes SendLogEmail / WOadd (not field<digits>).
+      // readings = field<n> SELECT or TEXT (anything not a yes/no radio); skip empty values. key on LABEL.
+      const readings: { name: string; value: string }[] = []
+      for (const sel of r.querySelectorAll("select")) {
+        const nm = sel.getAttribute("name") || ""; if (!/^field\d+$/.test(nm)) continue
+        const label = rowLabel(sel); if (!label) continue
+        const value = (sel.querySelector("option[selected]")?.text || "").trim()
+        if (!EMPTY.has(value)) readings.push({ name: label, value })
+      }
+      for (const inp of r.querySelectorAll('input[type="text"]')) {
+        const nm = inp.getAttribute("name") || ""; if (!/^field\d+$/.test(nm)) continue
+        const label = rowLabel(inp); if (!label) continue
+        const value = (inp.getAttribute("value") || "").trim()
+        if (!EMPTY.has(value)) readings.push({ name: label, value })
+      }
+      rec.readings = readings
+      // checklist = field<n> Yes/blank RADIO groups; checked "Yes" = done. key on LABEL.
       const checklist: { name: string; completed: boolean }[] = []
       const seenChk = new Set<string>()
       for (const inp of r.querySelectorAll('input[type="radio"]')) {
         const nm = inp.getAttribute("name") || ""
         if (!/^field\d+$/.test(nm) || seenChk.has(nm)) continue
         seenChk.add(nm)
-        let tr: any = inp
-        for (let k = 0; k < 8 && tr && tr.tagName !== "TR"; k++) tr = tr.parentNode
-        const label = tr?.querySelector("td,th")?.text.replace(/\s+/g, " ").trim()
-        if (!label) continue
+        const label = rowLabel(inp); if (!label) continue
         let done = false
         for (const g of r.querySelectorAll(`input[name="${nm}"]`))
           if ((g.getAttribute("checked") != null || /checked/i.test(g.toString())) && g.getAttribute("value") === "Yes") done = true
@@ -99,6 +120,7 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
     count: out.length,
     with_event: out.filter(d => d.event_id).length,
     performed: out.filter(d => d.time_in).length,
+    with_readings: out.filter(d => d.readings?.length).length,
     with_checklist: out.filter(d => d.task_checklist?.length).length,
     details: out,
   }
