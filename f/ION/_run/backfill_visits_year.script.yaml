@@ -1,7 +1,7 @@
-summary: Backfill maintenance.visits from ION logs in weekly chunks (default
-  2025-01-01 -> today). Logs in ONCE + reuses/re-logins the session (no mid-run
-  variable reads), passes it to ingest_day_logs per week, logs progress.
-  Idempotent on ion_log_id.
+summary: Backfill maintenance.visits from ION logs in weekly chunks, NEWEST WEEK
+  FIRST (default 2025-01-01..today). Logs in once + reuses/re-logins the
+  session, passes it to ingest_day_logs per week, logs progress. Idempotent on
+  ion_log_id.
 description: ''
 lock: '!inline f/ION/_run/backfill_visits_year.script.lock'
 has_on_behalf_of: false

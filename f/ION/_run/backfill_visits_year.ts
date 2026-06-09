@@ -3,9 +3,9 @@
 //playwright@1.40.0
 //postgres@3.4.4
 
-// Yearly visit backfill in WEEKLY chunks. Reads ION creds + logs in ONCE, holds the session,
-// and RE-LOGINS from the held creds when it ages out -- so nothing re-reads f/ION variables
-// mid-run (those reads degrade ~15 min into a long job, which broke the first attempt).
+// Yearly visit backfill in WEEKLY chunks, NEWEST WEEK FIRST (so the current month lands in
+// minutes and older history fills in behind it). Reads ION creds + logs in ONCE, holds the
+// session, RE-LOGINS from the held creds when it ages out -- no mid-run f/ION variable reads.
 // Each week is one ingest_day_logs call = one DB transaction; per-week failures are caught and
 // logged, and ingest upserts on ion_log_id so the whole thing is idempotent / safe to re-run.
 
@@ -32,7 +32,8 @@ export async function main(start_date: string = "01/01/2025", end_date: string =
   const weeks: [string, string][] = []
   let cur = start.getTime()
   while (cur <= endT) { const e = Math.min(cur + 6 * 86400000, endT); weeks.push([mdy(new Date(cur)), mdy(new Date(e))]); cur += 7 * 86400000 }
-  console.log(`backfill ${start_date}..${end_date || mdy(new Date(endT))} = ${weeks.length} weeks, dry_run=${dry_run}`)
+  weeks.reverse() // NEWEST WEEK FIRST -- current month commits first
+  console.log(`backfill ${start_date}..${end_date || mdy(new Date(endT))} = ${weeks.length} weeks, NEWEST-FIRST, dry_run=${dry_run}`)
 
   const per_week: any[] = []
   let totV = 0, totR = 0, totK = 0, totC = 0, totU = 0, failed = 0
@@ -54,5 +55,5 @@ export async function main(start_date: string = "01/01/2025", end_date: string =
       console.log(`[${i + 1}/${weeks.length}] ${ws}..${we}: ERROR ${msg}`)
     }
   }
-  return { range: { start: start_date, end: end_date || mdy(new Date(endT)) }, weeks: weeks.length, logins, dry_run, failed_weeks: failed, totals: { visits: totV, readings: totR, checklist: totK, consumables: totC, unlinked: totU }, per_week }
+  return { range: { start: start_date, end: end_date || mdy(new Date(endT)) }, weeks: weeks.length, order: "newest-first", logins, dry_run, failed_weeks: failed, totals: { visits: totV, readings: totR, checklist: totK, consumables: totC, unlinked: totU }, per_week }
 }
