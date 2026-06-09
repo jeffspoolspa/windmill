@@ -1,7 +1,7 @@
-summary: 'Canonical log-based visit ingestion: enumerate -> addLog detail ->
-  scoped transactional replace. Writes visits + consumables_usage + visit_tasks
-  (checklist). Price at task_price_cents, serviceable unless zero-duration, ON
-  CONFLICT dedupe.'
+summary: 'Canonical log-based visit ingestion (dedup on ion_log_id). Per-log
+  upsert + child refresh: visits + visit_readings + visit_tasks (raw name) +
+  consumables (raw ion_item_id), canonical FKs NULL/backfilled. Captures
+  tech/notes/failure; always stores ion_task_id. dry_run default.'
 description: ''
 lock: '!inline f/ION/ingest_day_logs.script.lock'
 has_on_behalf_of: false

@@ -3,20 +3,21 @@
 //playwright@1.40.0
 //postgres@3.4.4
 
-// CANONICAL LOG-BASED VISIT INGESTION (LogID is the unique grain).
+// CANONICAL LOG-BASED VISIT INGESTION (LogID = the unique grain; dedup on ion_log_id).
 //
 // Per day in [start_date, end_date]:
-//   1. list_day_logs   -> every service log that day (ALL statuses, not just "completed")
-//   2. get_log_detail  -> per log: EventID(task), TaskInvoiceID, times, serviceable,
-//                         consumables, task_checklist
-//   3. KEEP logs that were PERFORMED = have a time_in AND resolve to a task (EventID).
-//   4. resolve EventID -> (task_id, sl, rate); PRICE at task_price_cents (fallback name-parse).
-//   5. SCOPED TRANSACTIONAL REPLACE over the window. INSERT one visit per performed log;
-//      ON CONFLICT (sl, date, service_type, pool_id, started_at; NULLS NOT DISTINCT) DO NOTHING.
-//      Per visit also write consumables_usage + visit_tasks (one row per checklist item,
-//      task_name = slug(label)).
+//   1. list_day_logs  -> every service log that day
+//   2. get_log_detail -> EventID(task), TaskInvoiceID, times, serviceable, consumables,
+//                        readings[{name,value}], task_checklist[{name,completed}],
+//                        submitted_by(tech), comment(notes), failure_reason
+//   3. KEEP performed (time_in) logs. EventID resolves to (task_id, sl, rate) when the task
+//      exists; if not, the visit is still captured (task_id + sl NULL, ion_task_id always set) and
+//      linked after a missing-task lookup.
+//   4. Per-log UPSERT on ion_log_id; refresh the visit's children (readings / checklist / consumables).
 //
-// dry_run=true (default): fetch + resolve + report, NO writes. dry_run=false: commit.
+// Each detail row stores the RAW ION name + value; the canonical FK (reading_id/checklist_id/item_id)
+// is left NULL and backfilled after the full load. dry_run=true (default) writes nothing.
+// Run the backfill in chunks (e.g. weekly) -- one transaction per call.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -49,9 +50,6 @@ function tsLocal(isoDate: string | null, t: string | null): string | null {
   let h = (+m[1]) % 12; if (/pm/i.test(m[3])) h += 12
   return `${isoDate} ${pad(h)}:${pad(+m[2])}:00`
 }
-// addLog checklist label -> our canonical visit_tasks.task_name (snake_case), matching
-// f/ION/_lib/normalize TASK_DEFINITIONS (e.g. "Skim/Net Surface" -> skim_net_surface).
-function slug(s: string): string { return String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") }
 
 export async function main(start_date: string, end_date: string, dry_run: boolean = true) {
   const days = eachDay(start_date, end_date)
@@ -76,9 +74,12 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
         service_type: l.service_type ?? null,
         serviceable: d.serviceable === true,
         time_in: d.time_in ?? null, time_out: d.time_out ?? null,
+        submitted_by: d.submitted_by ?? null,
+        comment: d.comment ?? null,
+        failure_reason: d.failure_reason ?? null,
         consumables: d.consumables || {},
+        readings: d.readings || [],
         task_checklist: d.task_checklist || [],
-        task_invoice_id: d.task_invoice_id ?? null,
       })
       built++
     }
@@ -103,7 +104,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
     const tmap: Record<string, any> = {}
     for (const r of taskRows) tmap[r.ion_task_id] = r
 
-    let resolved = 0, serviceableN = 0
+    let resolved = 0
     for (const v of visits) {
       const tm = tmap[v.event_id]
       v.task_id = tm?.task_id ?? null
@@ -111,61 +112,63 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
       v.billing_method = tm?.billing_method ?? "per_visit"
       v.price_cents = (tm?.task_price_cents ?? null) ?? priceFromService(v.service_type)
       if (v.task_id) resolved++
-      if (v.serviceable) serviceableN++
     }
-    const unresolved = visits.filter((v) => !v.task_id)
-    const unresolvedEvents = [...new Set(unresolved.map((v) => v.event_id))]
-      .map((e) => ({ event_id: e, service_type: unresolved.find((v) => v.event_id === e)?.service_type }))
+    const unknownEvents = [...new Set(visits.filter((v) => !v.task_id).map((v) => v.event_id))]
 
     const summary = {
       window: { start: start_date, end: end_date, days: days.length },
       per_day: perDay, logs_built: visits.length, distinct_events: eventIds.length,
-      resolved_to_task: resolved, insertable: visits.filter((v) => v.service_location_id).length,
-      serviceable: serviceableN, checklist_rows: visits.reduce((n, v) => n + (v.task_checklist?.length || 0), 0),
-      unresolved_count: unresolved.length, unresolved_events: unresolvedEvents.slice(0, 60),
+      resolved_to_task: resolved, unlinked_visits: visits.filter((v) => !v.task_id).length,
+      unknown_event_ids: unknownEvents.slice(0, 60),
+      readings_rows: visits.reduce((n, v) => n + (v.readings?.length || 0), 0),
+      checklist_rows: visits.reduce((n, v) => n + (v.task_checklist?.length || 0), 0),
+      consumable_rows: visits.reduce((n, v) => n + Object.keys(v.consumables || {}).length, 0),
+      with_tech: visits.filter((v) => v.submitted_by).length,
+      with_notes: visits.filter((v) => v.comment).length,
     }
 
-    if (dry_run) {
-      result = { dry_run: true, ...summary }
-    } else {
-      const isoStart = toIso(start_date), isoEnd = toIso(end_date)
-      let deletedCons = 0, deletedTasks = 0, deletedVisits = 0, insertedVisits = 0, insertedCons = 0, insertedTasks = 0, skippedNoSl = 0, dupSkipped = 0
-      await sql.begin(async (tx: any) => {
-        const dc = await tx`DELETE FROM maintenance.consumables_usage WHERE visit_id IN (SELECT id FROM maintenance.visits WHERE scheduled_date BETWEEN ${isoStart} AND ${isoEnd})`
-        deletedCons = dc.count
-        const dtk = await tx`DELETE FROM maintenance.visit_tasks WHERE visit_id IN (SELECT id FROM maintenance.visits WHERE scheduled_date BETWEEN ${isoStart} AND ${isoEnd})`
-        deletedTasks = dtk.count
-        const dv = await tx`DELETE FROM maintenance.visits WHERE scheduled_date BETWEEN ${isoStart} AND ${isoEnd}`
-        deletedVisits = dv.count
-        for (const v of visits) {
-          if (!v.service_location_id || !v.scheduled_date) { skippedNoSl++; continue }
-          const ins = await tx`INSERT INTO maintenance.visits
-            (service_location_id, task_id, ion_task_id, scheduled_date, visit_date, is_serviceable,
-             service_type, price_cents, billing_method, status, visit_type, started_at, ended_at,
-             ion_log_id, ion_calendar_id, external_source)
-            VALUES (${v.service_location_id}, ${v.task_id}, ${v.event_id}, ${v.scheduled_date}, ${v.scheduled_date},
-             ${v.serviceable}, ${v.service_type}, ${v.price_cents}, ${v.billing_method}, 'completed', 'route',
-             ${tsLocal(v.scheduled_date, v.time_in)}, ${tsLocal(v.scheduled_date, v.time_out)},
-             ${v.ion_log_id}, ${v.ion_calendar_id}, 'ion_log')
-            ON CONFLICT (service_location_id, scheduled_date, service_type, pool_id, started_at) DO NOTHING
-            RETURNING id`
-          if (!ins.length) { dupSkipped++; continue }
-          insertedVisits++
-          for (const [itemId, qty] of Object.entries(v.consumables || {})) {
-            await tx`INSERT INTO maintenance.consumables_usage (visit_id, item_id, quantity, source, recorded_at)
-              VALUES (${ins[0].id}, ${parseInt(itemId)}, ${qty as number}, 'ion', now())`
-            insertedCons++
-          }
-          for (const c of (v.task_checklist || [])) {
-            const tn = slug(c.name); if (!tn) continue
-            await tx`INSERT INTO maintenance.visit_tasks (visit_id, task_name, completed, source, recorded_at)
-              VALUES (${ins[0].id}, ${tn}, ${c.completed === true}, 'ion', now())`
-            insertedTasks++
-          }
+    if (dry_run) { result = { dry_run: true, ...summary }; return result }
+
+    let insVisits = 0, insReadings = 0, insChecklist = 0, insConsumables = 0, skipped = 0
+    await sql.begin(async (tx: any) => {
+      for (const v of visits) {
+        if (!v.ion_log_id || !v.scheduled_date) { skipped++; continue }
+        const ins = await tx`INSERT INTO maintenance.visits
+          (service_location_id, task_id, ion_task_id, scheduled_date, visit_date, is_serviceable,
+           service_type, price_cents, billing_method, status, visit_type, started_at, ended_at,
+           ion_log_id, ion_calendar_id, ion_submitted_by, notes, failure_reason, external_source)
+          VALUES (${v.service_location_id}, ${v.task_id}, ${v.event_id}, ${v.scheduled_date}, ${v.scheduled_date},
+           ${v.serviceable}, ${v.service_type}, ${v.price_cents}, ${v.billing_method}, 'completed', 'route',
+           ${tsLocal(v.scheduled_date, v.time_in)}, ${tsLocal(v.scheduled_date, v.time_out)},
+           ${v.ion_log_id}, ${v.ion_calendar_id}, ${v.submitted_by}, ${v.comment}, ${v.failure_reason}, 'ion_log')
+          ON CONFLICT (ion_log_id) WHERE ion_log_id IS NOT NULL DO UPDATE SET
+            service_location_id=EXCLUDED.service_location_id, task_id=EXCLUDED.task_id, ion_task_id=EXCLUDED.ion_task_id,
+            scheduled_date=EXCLUDED.scheduled_date, visit_date=EXCLUDED.visit_date, is_serviceable=EXCLUDED.is_serviceable,
+            service_type=EXCLUDED.service_type, price_cents=EXCLUDED.price_cents, billing_method=EXCLUDED.billing_method,
+            started_at=EXCLUDED.started_at, ended_at=EXCLUDED.ended_at, ion_calendar_id=EXCLUDED.ion_calendar_id,
+            ion_submitted_by=EXCLUDED.ion_submitted_by, notes=EXCLUDED.notes, failure_reason=EXCLUDED.failure_reason,
+            updated_at=now()
+          RETURNING id`
+        const vid = ins[0].id
+        insVisits++
+        await tx`DELETE FROM maintenance.visit_readings WHERE visit_id=${vid}`
+        await tx`DELETE FROM maintenance.visit_tasks WHERE visit_id=${vid}`
+        await tx`DELETE FROM maintenance.consumables_usage WHERE visit_id=${vid}`
+        for (const rd of (v.readings || [])) {
+          await tx`INSERT INTO maintenance.visit_readings (visit_id, name, value) VALUES (${vid}, ${rd.name}, ${String(rd.value ?? "")})`
+          insReadings++
         }
-      })
-      result = { dry_run: false, committed: true, ...summary, deletedCons, deletedTasks, deletedVisits, insertedVisits, insertedCons, insertedTasks, skippedNoSl, dupSkipped }
-    }
+        for (const c of (v.task_checklist || [])) {
+          await tx`INSERT INTO maintenance.visit_tasks (visit_id, task_name, completed, source) VALUES (${vid}, ${c.name}, ${c.completed === true}, 'ion')`
+          insChecklist++
+        }
+        for (const [itemId, qty] of Object.entries(v.consumables || {})) {
+          await tx`INSERT INTO maintenance.consumables_usage (visit_id, ion_item_id, quantity, source, recorded_at) VALUES (${vid}, ${itemId}, ${qty as number}, 'ion', now())`
+          insConsumables++
+        }
+      }
+    })
+    result = { dry_run: false, committed: true, ...summary, insVisits, insReadings, insChecklist, insConsumables, skipped }
   } finally {
     await sql.end()
   }
