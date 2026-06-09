@@ -5,10 +5,9 @@
 // Canonical per-DAY service-log enumerator. ONE call to customerLogDetails.cfm
 // (global, all customers) returns every scheduled event + submitted log for the date,
 // each row carrying the unique LogID + calendarID (-> addLog.cfm), customer name,
-// service type, tech, and a status bullet (green = completed/submitted log). This is
-// the discovery step of the log-based ingestion: enumerate a day's LogIDs here, then
-// open addLog.cfm?LogID per COMPLETED log for the authoritative detail (EventID=task,
-// scheduled date, time-in/out, TaskInvoiceID, price, consumables).
+// service type, tech, and a status bullet (green = completed/submitted log).
+// Pass an existing `sess` (e.g. from a long backfill) to REUSE it and skip the per-call
+// session_cache + f/ION variable reads -- those reads degrade ~15 min into a long job.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -22,13 +21,16 @@ function cookieHeader(s: any) {
 }
 
 // date_us = MM/DD/YYYY
-export async function main(date_us: string, officeid: number | string = 0) {
-  const ion = {
-    loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"),
-    username: await wmill.getVariable("f/ION/USERNAME"),
-    password: await wmill.getVariable("f/ION/PASSWORD"),
+export async function main(date_us: string, officeid: number | string = 0, sess: any = null) {
+  let s = sess
+  if (!s) {
+    const ion = {
+      loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"),
+      username: await wmill.getVariable("f/ION/USERNAME"),
+      password: await wmill.getVariable("f/ION/PASSWORD"),
+    }
+    s = await getOrRefreshSession(ion)
   }
-  const s = await getOrRefreshSession(ion)
   const o = s.ionOrigin
   const H = { Cookie: cookieHeader(s), "User-Agent": "Mozilla/5.0", Accept: "text/html, */*", "X-Requested-With": "XMLHttpRequest", Referer: `${o}/main.cfm` }
   const url = `/home/customerLogDetails.cfm?officeid=${officeid}&techid=0&status=0&logset=1`
@@ -60,10 +62,5 @@ export async function main(date_us: string, officeid: number | string = 0) {
       addlog_url: `/tasks/addLog.cfm?calendarID=${cal || ""}&LogID=${log}&source=ServiceLog`,
     })
   }
-  return {
-    date: date_us,
-    total: logs.length,
-    completed: logs.filter((l) => l.completed).length,
-    logs,
-  }
+  return { date: date_us, total: logs.length, completed: logs.filter((l) => l.completed).length, logs }
 }

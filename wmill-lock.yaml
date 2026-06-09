@@ -86,7 +86,7 @@ locks:
   f/ION/api/get_recurring_tasks: 5c802795062293a2b8f1fcb9c683b43e0efb99e51c49da6e2eb2aafe967e7b16
   f/ION/api/get_task_detail: bbf6590f4e38669d1150fcfcaea51801f838916dd391970075cb7718b6367cd7
   f/ION/api/list_customer_tasks: f4764652cd85cd749500341890932ebcc6916085c96912e66e06c3a724382ab5
-  f/ION/api/list_day_logs: b9b6fd7cb84e6d2b241847a93e6d02eeb3513f0afd4ab5a020c86e214f9cc599
+  f/ION/api/list_day_logs: 15831d2848565c7e72d5f76ed6a13c0e82040548f6929e9e3ecf9a6adc18c4f2
   f/ION/api/list_recurring_tasks: f126db187bfa092b795d74b9bfa2bc5517ad67af77b5d83771751ea225dbee72
   f/ION/api/resolve_ambiguous_eventids: 0c6876af3523635e4b6e03eeea58af48b1faed9ee320887e6091ec74f49d6a04
   f/ION/api/resolve_customer_tasks: fcc2f4298010299a2afc55e5d18a6bc3625beab080b6111e9480a8014d3e0afd
