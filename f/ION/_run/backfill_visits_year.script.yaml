@@ -1,0 +1,10 @@
+summary: 'Backfill maintenance.visits from ION logs in weekly chunks (default
+  2025-01-01 -> today). Loops ingest_day_logs per week, commits each, tolerates
+  per-week failure (idempotent on ion_log_id -> safe to re-run). Args:
+  start_date, end_date (M/D/Y), dry_run.'
+description: ''
+lock: '!inline f/ION/_run/backfill_visits_year.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
