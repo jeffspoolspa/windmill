@@ -9,10 +9,9 @@
 //              original_failure_id, submitted_by(=tech), comment(=notes), failure_reason
 //   READINGS : [{name,value}] from field<n> SELECT or TEXT controls (anything not yes/no), label-keyed
 //   CHECKLIST: [{name,completed}] from field<n> Yes/blank RADIO groups
-//   CONSUMABLES: [{ion_item_id,name,quantity}] from item<n> qty>0; name read off the row
-//                (<strong>NAME</strong>) -- authoritative, no separate item catalog needed.
-// Classify by control: radio=checklist, select/text=reading. Field ids vary by profile -> key on LABEL.
-// SERVICEABLE: has time_in AND NOT (time_out present AND time_out==time_in). Validated 2026-06-03.
+//   CONSUMABLES: [{ion_item_id,name,quantity}] from item<n> qty>0; name read off the row.
+// Pass an existing `sess` to REUSE it and skip the per-call f/ION variable reads (which
+// degrade ~15 min into a long job). Classify by control: radio=checklist, select/text=reading.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -38,13 +37,16 @@ function rowLabel(el: any): string | null {
 }
 const EMPTY = new Set(["", "-", "--"])
 
-export async function main(logs: { log_id: string; calendar_id?: string }[] = []) {
-  const ion = {
-    loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"),
-    username: await wmill.getVariable("f/ION/USERNAME"),
-    password: await wmill.getVariable("f/ION/PASSWORD"),
+export async function main(logs: { log_id: string; calendar_id?: string }[] = [], sess: any = null) {
+  let s = sess
+  if (!s) {
+    const ion = {
+      loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"),
+      username: await wmill.getVariable("f/ION/USERNAME"),
+      password: await wmill.getVariable("f/ION/PASSWORD"),
+    }
+    s = await getOrRefreshSession(ion)
   }
-  const s = await getOrRefreshSession(ion)
   const o = s.ionOrigin
   const H = { Cookie: cookieHeader(s), "User-Agent": "Mozilla/5.0", Accept: "text/html, */*", "X-Requested-With": "XMLHttpRequest", Referer: `${o}/main.cfm` }
 
@@ -69,11 +71,9 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
       rec.invoice_type = v("InvoiceType")
       rec.service_profile = v("ServiceProfile")
       rec.original_failure_id = v("OriginalFailureID") || null
-      // general extras
-      rec.submitted_by = selText("submittedBy")     // the tech
-      rec.failure_reason = selText("failureid")      // non-service reason (null when serviced)
+      rec.submitted_by = selText("submittedBy")
+      rec.failure_reason = selText("failureid")
       rec.comment = r.querySelector('textarea[name="comment"]')?.text.replace(/\s+/g, " ").trim() || null
-      // consumables WITH names: each item<n> qty>0; name from the row's first cell (<strong>short name</strong>)
       const cons: { ion_item_id: string; name: string | null; quantity: number }[] = []
       for (const inp of r.querySelectorAll('input[name^="item"]')) {
         const nm = inp.getAttribute("name") || ""
@@ -85,7 +85,6 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
         cons.push({ ion_item_id: m[1], name, quantity: q })
       }
       rec.consumables = cons
-      // readings = field<n> SELECT or TEXT (anything not a yes/no radio); skip empty values. key on LABEL.
       const readings: { name: string; value: string }[] = []
       for (const sel of r.querySelectorAll("select")) {
         const nm = sel.getAttribute("name") || ""; if (!/^field\d+$/.test(nm)) continue
@@ -100,7 +99,6 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
         if (!EMPTY.has(value)) readings.push({ name: label, value })
       }
       rec.readings = readings
-      // checklist = field<n> Yes/blank RADIO groups; checked "Yes" = done. key on LABEL.
       const checklist: { name: string; completed: boolean }[] = []
       const seenChk = new Set<string>()
       for (const inp of r.querySelectorAll('input[type="radio"]')) {
