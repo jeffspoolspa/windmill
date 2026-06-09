@@ -9,7 +9,8 @@
 //              original_failure_id, submitted_by(=tech), comment(=notes), failure_reason
 //   READINGS : [{name,value}] from field<n> SELECT or TEXT controls (anything not yes/no), label-keyed
 //   CHECKLIST: [{name,completed}] from field<n> Yes/blank RADIO groups
-//   CONSUMABLES: {item_id: qty} from item<n> with qty>0
+//   CONSUMABLES: [{ion_item_id,name,quantity}] from item<n> qty>0; name read off the row
+//                (<strong>NAME</strong>) -- authoritative, no separate item catalog needed.
 // Classify by control: radio=checklist, select/text=reading. Field ids vary by profile -> key on LABEL.
 // SERVICEABLE: has time_in AND NOT (time_out present AND time_out==time_in). Validated 2026-06-03.
 
@@ -72,13 +73,16 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
       rec.submitted_by = selText("submittedBy")     // the tech
       rec.failure_reason = selText("failureid")      // non-service reason (null when serviced)
       rec.comment = r.querySelector('textarea[name="comment"]')?.text.replace(/\s+/g, " ").trim() || null
-      // consumables
-      const cons: Record<string, number> = {}
+      // consumables WITH names: each item<n> qty>0; name from the row's first cell (<strong>short name</strong>)
+      const cons: { ion_item_id: string; name: string | null; quantity: number }[] = []
       for (const inp of r.querySelectorAll('input[name^="item"]')) {
         const nm = inp.getAttribute("name") || ""
         const m = nm.match(/^item(\d+)$/); if (!m) continue
-        const q = parseFloat(inp.getAttribute("value") || "")
-        if (!isNaN(q) && q > 0) cons[m[1]] = (cons[m[1]] || 0) + q
+        const q = parseFloat(inp.getAttribute("value") || ""); if (isNaN(q) || q <= 0) continue
+        let tr: any = inp; for (let k = 0; k < 8 && tr && tr.tagName !== "TR"; k++) tr = tr.parentNode
+        const cell = tr?.querySelector("td")
+        const name = cell?.querySelector("strong")?.text?.replace(/\s+/g, " ").trim() || null
+        cons.push({ ion_item_id: m[1], name, quantity: q })
       }
       rec.consumables = cons
       // readings = field<n> SELECT or TEXT (anything not a yes/no radio); skip empty values. key on LABEL.
@@ -122,6 +126,7 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
     performed: out.filter(d => d.time_in).length,
     with_readings: out.filter(d => d.readings?.length).length,
     with_checklist: out.filter(d => d.task_checklist?.length).length,
+    with_consumables: out.filter(d => d.consumables?.length).length,
     details: out,
   }
 }
