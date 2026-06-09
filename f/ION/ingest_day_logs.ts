@@ -4,20 +4,10 @@
 //postgres@3.4.4
 
 // CANONICAL LOG-BASED VISIT INGESTION (LogID = the unique grain; dedup on ion_log_id).
-//
-// Per day in [start_date, end_date]:
-//   1. list_day_logs  -> every service log that day
-//   2. get_log_detail -> EventID(task), TaskInvoiceID, times, serviceable,
-//                        readings[{name,value}], task_checklist[{name,completed}],
-//                        consumables[{ion_item_id,name,quantity}], submitted_by(tech), comment(notes), failure_reason
-//   3. KEEP performed (time_in) logs. EventID resolves to (task_id, sl, rate) when the task
-//      exists; if not, the visit is still captured (task_id + sl NULL, ion_task_id always set) and
-//      linked after a missing-task lookup.
-//   4. Per-log UPSERT on ion_log_id; refresh the visit's children (readings / checklist / consumables).
-//
-// Each detail row stores the RAW ION name + value; the canonical FK (reading_id/checklist_id/item_id)
-// is left NULL and backfilled after the full load. dry_run=true (default) writes nothing.
-// Run the backfill in chunks (e.g. weekly) -- one transaction per call.
+// Per day: list_day_logs -> get_log_detail (readings/checklist/consumables/tech/notes/failure)
+// -> keep performed (time_in) logs -> per-log UPSERT on ion_log_id + refresh children.
+// Pass `sess` (a logged-in IonSession) to reuse it across the window and skip per-call f/ION
+// variable reads (those degrade ~15 min into a long job). dry_run=true writes nothing.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -51,15 +41,15 @@ function tsLocal(isoDate: string | null, t: string | null): string | null {
   return `${isoDate} ${pad(h)}:${pad(+m[2])}:00`
 }
 
-export async function main(start_date: string, end_date: string, dry_run: boolean = true) {
+export async function main(start_date: string, end_date: string, dry_run: boolean = true, sess: any = null) {
   const days = eachDay(start_date, end_date)
 
   const visits: any[] = []
   const perDay: any[] = []
   for (const day of days) {
-    const enr: any = await listDayLogs(day)
+    const enr: any = await listDayLogs(day, 0, sess)
     const dayLogs = (enr.logs ?? [])
-    const det: any = await getLogDetail(dayLogs.map((l: any) => ({ log_id: l.log_id, calendar_id: l.calendar_id })))
+    const det: any = await getLogDetail(dayLogs.map((l: any) => ({ log_id: l.log_id, calendar_id: l.calendar_id })), sess)
     const byLog: Record<string, any> = {}
     for (const d of det.details) byLog[d.log_id] = d
     let built = 0, noEvent = 0, notPerformed = 0
