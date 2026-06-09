@@ -7,9 +7,9 @@
 //
 // Per day in [start_date, end_date]:
 //   1. list_day_logs  -> every service log that day
-//   2. get_log_detail -> EventID(task), TaskInvoiceID, times, serviceable, consumables,
+//   2. get_log_detail -> EventID(task), TaskInvoiceID, times, serviceable,
 //                        readings[{name,value}], task_checklist[{name,completed}],
-//                        submitted_by(tech), comment(notes), failure_reason
+//                        consumables[{ion_item_id,name,quantity}], submitted_by(tech), comment(notes), failure_reason
 //   3. KEEP performed (time_in) logs. EventID resolves to (task_id, sl, rate) when the task
 //      exists; if not, the visit is still captured (task_id + sl NULL, ion_task_id always set) and
 //      linked after a missing-task lookup.
@@ -77,7 +77,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
         submitted_by: d.submitted_by ?? null,
         comment: d.comment ?? null,
         failure_reason: d.failure_reason ?? null,
-        consumables: d.consumables || {},
+        consumables: d.consumables || [],
         readings: d.readings || [],
         task_checklist: d.task_checklist || [],
       })
@@ -122,7 +122,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
       unknown_event_ids: unknownEvents.slice(0, 60),
       readings_rows: visits.reduce((n, v) => n + (v.readings?.length || 0), 0),
       checklist_rows: visits.reduce((n, v) => n + (v.task_checklist?.length || 0), 0),
-      consumable_rows: visits.reduce((n, v) => n + Object.keys(v.consumables || {}).length, 0),
+      consumable_rows: visits.reduce((n, v) => n + (v.consumables?.length || 0), 0),
       with_tech: visits.filter((v) => v.submitted_by).length,
       with_notes: visits.filter((v) => v.comment).length,
     }
@@ -162,8 +162,8 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
           await tx`INSERT INTO maintenance.visit_tasks (visit_id, task_name, completed, source) VALUES (${vid}, ${c.name}, ${c.completed === true}, 'ion')`
           insChecklist++
         }
-        for (const [itemId, qty] of Object.entries(v.consumables || {})) {
-          await tx`INSERT INTO maintenance.consumables_usage (visit_id, ion_item_id, quantity, source, recorded_at) VALUES (${vid}, ${itemId}, ${qty as number}, 'ion', now())`
+        for (const c of (v.consumables || [])) {
+          await tx`INSERT INTO maintenance.consumables_usage (visit_id, ion_item_id, item_name, quantity, source, recorded_at) VALUES (${vid}, ${c.ion_item_id}, ${c.name}, ${c.quantity}, 'ion', now())`
           insConsumables++
         }
       }
