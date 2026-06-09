@@ -1,6 +1,6 @@
 summary: 'ION API: addLog.cfm detail per LogID -> EventID(task),
   TaskInvoiceID(customer), times, serviceable(performed unless zero-duration),
-  consumables'
+  consumables, task_checklist'
 description: ''
 lock: '!inline f/ION/api/get_log_detail.script.lock'
 has_on_behalf_of: false

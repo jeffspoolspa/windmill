@@ -7,15 +7,13 @@
 //   event_id        = EventID = the parent TASK (ion_task_id)
 //   task_invoice_id = TaskInvoiceID = the QBO invoice DocNumber the log billed under
 //   ion_customer_id, loc_id, scheduled_date, time_in/out, serviceable, invoice_type,
-//   service_profile, original_failure_id, consumables {item_id: qty}.
+//   service_profile, original_failure_id, consumables {item_id: qty},
+//   task_checklist [{name,completed}] = the per-visit task checklist (Brushed, Vacuumed,
+//     Cleaned Filter ...) read from the addLog radio groups (field<digits> Yes/blank).
 //
 // SERVICEABLE RULE (validated 2026-06-03 against the ION transactions report):
-//   A visit was PERFORMED (and ION bills it) iff it has a time_in. The time_OUT may be
-//   missing (tech never clocked out -- e.g. HILTON 05/11) or reversed/garbled (AM/PM
-//   typo -- MASSEY 05/18 in 14:52/out 11:11) yet still be a real billed visit. So:
-//     serviceable = has time_in AND NOT (time_out present AND time_out == time_in)
+//   serviceable = has time_in AND NOT (time_out present AND time_out == time_in)
 //   Only an explicit ZERO-duration log (in == out) is a genuine skip/no-access.
-//   (no time_in -> not performed -> serviceable false; the ingestion also skips it.)
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -60,7 +58,6 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
       rec.loc_id = v("LocID")
       rec.scheduled_date = v("ScheduledDate") || v("LogDate")
       rec.time_in = tin; rec.time_out = tout
-      // performed iff time_in present; non-serviceable ONLY when an explicit zero-duration (in==out)
       rec.serviceable = (mi == null) ? false : !(mo != null && mo === mi)
       rec.invoice_type = v("InvoiceType")
       rec.service_profile = v("ServiceProfile")
@@ -73,11 +70,36 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
         if (!isNaN(q) && q > 0) cons[m[1]] = (cons[m[1]] || 0) + q
       }
       rec.consumables = cons
+      // task checklist: radio groups named field<digits> with Yes/blank values; checked "Yes" = done.
+      // Key on the row LABEL (matches our visit_tasks names) -- field ids vary by service profile.
+      // Excludes SendLogEmail / WOadd (not field<digits>).
+      const checklist: { name: string; completed: boolean }[] = []
+      const seenChk = new Set<string>()
+      for (const inp of r.querySelectorAll('input[type="radio"]')) {
+        const nm = inp.getAttribute("name") || ""
+        if (!/^field\d+$/.test(nm) || seenChk.has(nm)) continue
+        seenChk.add(nm)
+        let tr: any = inp
+        for (let k = 0; k < 8 && tr && tr.tagName !== "TR"; k++) tr = tr.parentNode
+        const label = tr?.querySelector("td,th")?.text.replace(/\s+/g, " ").trim()
+        if (!label) continue
+        let done = false
+        for (const g of r.querySelectorAll(`input[name="${nm}"]`))
+          if ((g.getAttribute("checked") != null || /checked/i.test(g.toString())) && g.getAttribute("value") === "Yes") done = true
+        checklist.push({ name: label, completed: done })
+      }
+      rec.task_checklist = checklist
       if (!rec.event_id) rec.error = "no EventID (not a service log?)"
     } catch (e: any) {
       rec.error = String(e?.message ?? e).slice(0, 140)
     }
     out.push(rec)
   }
-  return { count: out.length, with_event: out.filter(d => d.event_id).length, performed: out.filter(d => d.time_in).length, details: out }
+  return {
+    count: out.length,
+    with_event: out.filter(d => d.event_id).length,
+    performed: out.filter(d => d.time_in).length,
+    with_checklist: out.filter(d => d.task_checklist?.length).length,
+    details: out,
+  }
 }
