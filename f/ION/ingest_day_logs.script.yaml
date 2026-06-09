@@ -1,7 +1,7 @@
 summary: Canonical log-based visit ingestion (dedup on ion_log_id). visits +
   visit_readings + visit_tasks(raw) + consumables(ion_item_id+name), canonical
-  FKs NULL. Optional `sess` reused across the window (long-run safe). dry_run
-  default.
+  FKs NULL. Optional `sess` + `sb` (supabase resource) passed in to avoid
+  mid-run wmill reads (long-run safe). dry_run default.
 description: ''
 lock: '!inline f/ION/ingest_day_logs.script.lock'
 has_on_behalf_of: false

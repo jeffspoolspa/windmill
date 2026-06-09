@@ -3,11 +3,12 @@
 //playwright@1.40.0
 //postgres@3.4.4
 
-// Yearly visit backfill in WEEKLY chunks, NEWEST WEEK FIRST (so the current month lands in
-// minutes and older history fills in behind it). Reads ION creds + logs in ONCE, holds the
-// session, RE-LOGINS from the held creds when it ages out -- no mid-run f/ION variable reads.
-// Each week is one ingest_day_logs call = one DB transaction; per-week failures are caught and
-// logged, and ingest upserts on ion_log_id so the whole thing is idempotent / safe to re-run.
+// Yearly visit backfill in WEEKLY chunks, NEWEST WEEK FIRST (current month lands first).
+// Reads ION creds + the supabase resource + logs in ONCE, holds them, and RE-LOGINS from the
+// held creds when the session ages out -- so nothing re-reads wmill variables/resources mid-run
+// (those reads degrade ~15 min into a long job, which broke the earlier attempts).
+// Each week is one ingest_day_logs call = one DB transaction; failures are caught + logged, and
+// ingest upserts on ion_log_id so the whole thing is idempotent / safe to re-run.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -24,6 +25,7 @@ export async function main(start_date: string = "01/01/2025", end_date: string =
     username: await wmill.getVariable("f/ION/USERNAME"),
     password: await wmill.getVariable("f/ION/PASSWORD"),
   }
+  const sb = await wmill.getResource("u/carter/supabase")
   let session = await loginToIon(ion)
   let logins = 1
 
@@ -41,7 +43,7 @@ export async function main(start_date: string = "01/01/2025", end_date: string =
     const [ws, we] = weeks[i]
     try {
       if (!isSessionFresh(session)) { session = await loginToIon(ion); logins++ }
-      const r: any = await ingestDayLogs(ws, we, dry_run, session)
+      const r: any = await ingestDayLogs(ws, we, dry_run, session, sb)
       const v = r.insVisits ?? r.logs_built ?? 0
       const rd = r.insReadings ?? r.readings_rows ?? 0, ck = r.insChecklist ?? r.checklist_rows ?? 0
       const cn = r.insConsumables ?? r.consumable_rows ?? 0, ul = r.unlinked_visits ?? 0

@@ -6,8 +6,9 @@
 // CANONICAL LOG-BASED VISIT INGESTION (LogID = the unique grain; dedup on ion_log_id).
 // Per day: list_day_logs -> get_log_detail (readings/checklist/consumables/tech/notes/failure)
 // -> keep performed (time_in) logs -> per-log UPSERT on ion_log_id + refresh children.
-// Pass `sess` (a logged-in IonSession) to reuse it across the window and skip per-call f/ION
-// variable reads (those degrade ~15 min into a long job). dry_run=true writes nothing.
+// Pass `sess` (a logged-in IonSession) AND `sb` (the supabase resource object) to reuse both
+// across a long run and skip per-call wmill variable/resource reads -- those reads degrade
+// ~15 min into a long job (broke the first backfills). dry_run=true writes nothing.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -41,9 +42,11 @@ function tsLocal(isoDate: string | null, t: string | null): string | null {
   return `${isoDate} ${pad(h)}:${pad(+m[2])}:00`
 }
 
-export async function main(start_date: string, end_date: string, dry_run: boolean = true, sess: any = null) {
-  const days = eachDay(start_date, end_date)
+export async function main(start_date: string, end_date: string, dry_run: boolean = true, sess: any = null, sb: any = null) {
+  // Resolve the DB resource up front (fail fast); reuse the passed one in long runs.
+  const res: any = (!dry_run) ? (sb ?? await wmill.getResource("u/carter/supabase")) : null
 
+  const days = eachDay(start_date, end_date)
   const visits: any[] = []
   const perDay: any[] = []
   for (const day of days) {
@@ -76,12 +79,21 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
     perDay.push({ day, logs: dayLogs.length, built, no_event: noEvent, not_performed: notPerformed })
   }
 
-  const sb: any = await wmill.getResource("u/carter/supabase")
-  const sql = postgres({ host: sb.host, port: sb.port, database: sb.dbname, username: sb.user, password: sb.password, ssl: "require", max: 4 })
+  const eventIds = [...new Set(visits.map((v) => v.event_id))]
+  const summaryBase = {
+    window: { start: start_date, end: end_date, days: days.length },
+    per_day: perDay, logs_built: visits.length, distinct_events: eventIds.length,
+    readings_rows: visits.reduce((n, v) => n + (v.readings?.length || 0), 0),
+    checklist_rows: visits.reduce((n, v) => n + (v.task_checklist?.length || 0), 0),
+    consumable_rows: visits.reduce((n, v) => n + (v.consumables?.length || 0), 0),
+    with_tech: visits.filter((v) => v.submitted_by).length,
+    with_notes: visits.filter((v) => v.comment).length,
+  }
+  if (dry_run) return { dry_run: true, ...summaryBase }
 
+  const sql = postgres({ host: res.host, port: res.port, database: res.dbname, username: res.user, password: res.password, ssl: "require", max: 4 })
   let result: any
   try {
-    const eventIds = [...new Set(visits.map((v) => v.event_id))]
     const taskRows = eventIds.length ? await sql<any[]>`
       SELECT DISTINCT ON (ts.ion_task_id)
              ts.ion_task_id, ts.task_id, t.service_location_id,
@@ -104,20 +116,6 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
       if (v.task_id) resolved++
     }
     const unknownEvents = [...new Set(visits.filter((v) => !v.task_id).map((v) => v.event_id))]
-
-    const summary = {
-      window: { start: start_date, end: end_date, days: days.length },
-      per_day: perDay, logs_built: visits.length, distinct_events: eventIds.length,
-      resolved_to_task: resolved, unlinked_visits: visits.filter((v) => !v.task_id).length,
-      unknown_event_ids: unknownEvents.slice(0, 60),
-      readings_rows: visits.reduce((n, v) => n + (v.readings?.length || 0), 0),
-      checklist_rows: visits.reduce((n, v) => n + (v.task_checklist?.length || 0), 0),
-      consumable_rows: visits.reduce((n, v) => n + (v.consumables?.length || 0), 0),
-      with_tech: visits.filter((v) => v.submitted_by).length,
-      with_notes: visits.filter((v) => v.comment).length,
-    }
-
-    if (dry_run) { result = { dry_run: true, ...summary }; return result }
 
     let insVisits = 0, insReadings = 0, insChecklist = 0, insConsumables = 0, skipped = 0
     await sql.begin(async (tx: any) => {
@@ -158,7 +156,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
         }
       }
     })
-    result = { dry_run: false, committed: true, ...summary, insVisits, insReadings, insChecklist, insConsumables, skipped }
+    result = { dry_run: false, committed: true, ...summaryBase, resolved_to_task: resolved, unlinked_visits: visits.filter((v) => !v.task_id).length, unknown_event_ids: unknownEvents.slice(0, 60), insVisits, insReadings, insChecklist, insConsumables, skipped }
   } finally {
     await sql.end()
   }
