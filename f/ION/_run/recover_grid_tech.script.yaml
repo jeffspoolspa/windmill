@@ -1,0 +1,10 @@
+summary: 'One-off: recover blank-submittedBy visit tech from the day-grid
+  (list_day_logs) for visits with NULL actual_tech_id + NULL ion_submitted_by,
+  fill ion_submitted_by, then relink actual_tech_id from employee ion_username
+  aliases. Idempotent; self-discovers dates.'
+description: ''
+lock: '!inline f/ION/_run/recover_grid_tech.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
