@@ -6,9 +6,11 @@
 // CANONICAL LOG-BASED VISIT INGESTION (LogID = the unique grain; dedup on ion_log_id).
 // Per day: list_day_logs -> get_log_detail (readings/checklist/consumables/tech/notes/failure)
 // -> keep performed (time_in) logs -> per-log UPSERT on ion_log_id + refresh children.
-// Pass `sess` (a logged-in IonSession) AND `sb` (the supabase resource object) to reuse both
-// across a long run and skip per-call wmill variable/resource reads -- those reads degrade
-// ~15 min into a long job (broke the first backfills). dry_run=true writes nothing.
+// TECH: addLog submittedBy is often blank, so submitted_by FALLS BACK to the day-grid tech
+// (list_day_logs `tech`, which is authoritative and always present); actual_tech_id is resolved
+// inline from public.employees.ion_username aliases so visits land tech-linked.
+// Pass `sess` (a logged-in IonSession) AND `sb` (the supabase resource) to reuse both across a
+// long run and skip per-call wmill reads (which degrade ~15 min into a job). dry_run writes nothing.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
@@ -43,7 +45,6 @@ function tsLocal(isoDate: string | null, t: string | null): string | null {
 }
 
 export async function main(start_date: string, end_date: string, dry_run: boolean = true, sess: any = null, sb: any = null) {
-  // Resolve the DB resource up front (fail fast); reuse the passed one in long runs.
   const res: any = (!dry_run) ? (sb ?? await wmill.getResource("u/carter/supabase")) : null
 
   const days = eachDay(start_date, end_date)
@@ -60,6 +61,8 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
       const d = byLog[l.log_id] || {}
       if (!d.event_id) { noEvent++; continue }
       if (!d.time_in) { notPerformed++; continue }
+      // addLog submittedBy is often blank -> fall back to the day-grid tech (authoritative, always present)
+      const sub = (d.submitted_by && String(d.submitted_by).trim()) ? d.submitted_by : ((l.tech && String(l.tech).trim()) ? l.tech : null)
       visits.push({
         ion_log_id: l.log_id, ion_calendar_id: l.calendar_id,
         event_id: String(d.event_id),
@@ -67,7 +70,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
         service_type: l.service_type ?? null,
         serviceable: d.serviceable === true,
         time_in: d.time_in ?? null, time_out: d.time_out ?? null,
-        submitted_by: d.submitted_by ?? null,
+        submitted_by: sub,
         comment: d.comment ?? null,
         failure_reason: d.failure_reason ?? null,
         consumables: d.consumables || [],
@@ -94,6 +97,11 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
   const sql = postgres({ host: res.host, port: res.port, database: res.dbname, username: res.user, password: res.password, ssl: "require", max: 4 })
   let result: any
   try {
+    // employee alias -> id map, to resolve actual_tech_id inline from submitted_by
+    const empRows = await sql<any[]>`SELECT id, ion_username FROM public.employees WHERE ion_username IS NOT NULL`
+    const aliasMap: Record<string, string> = {}
+    for (const e of empRows) for (const a of (e.ion_username || [])) aliasMap[a] = e.id
+
     const taskRows = eventIds.length ? await sql<any[]>`
       SELECT DISTINCT ON (ts.ion_task_id)
              ts.ion_task_id, ts.task_id, t.service_location_id,
@@ -106,14 +114,16 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
     const tmap: Record<string, any> = {}
     for (const r of taskRows) tmap[r.ion_task_id] = r
 
-    let resolved = 0
+    let resolved = 0, techLinked = 0
     for (const v of visits) {
       const tm = tmap[v.event_id]
       v.task_id = tm?.task_id ?? null
       v.service_location_id = tm?.service_location_id ?? null
       v.billing_method = tm?.billing_method ?? "per_visit"
       v.price_cents = (tm?.task_price_cents ?? null) ?? priceFromService(v.service_type)
+      v.actual_tech_id = (v.submitted_by && aliasMap[v.submitted_by]) ? aliasMap[v.submitted_by] : null
       if (v.task_id) resolved++
+      if (v.actual_tech_id) techLinked++
     }
     const unknownEvents = [...new Set(visits.filter((v) => !v.task_id).map((v) => v.event_id))]
 
@@ -124,18 +134,18 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
         const ins = await tx`INSERT INTO maintenance.visits
           (service_location_id, task_id, ion_task_id, scheduled_date, visit_date, is_serviceable,
            service_type, price_cents, billing_method, status, visit_type, started_at, ended_at,
-           ion_log_id, ion_calendar_id, ion_submitted_by, notes, failure_reason, external_source)
+           ion_log_id, ion_calendar_id, ion_submitted_by, actual_tech_id, notes, failure_reason, external_source)
           VALUES (${v.service_location_id}, ${v.task_id}, ${v.event_id}, ${v.scheduled_date}, ${v.scheduled_date},
            ${v.serviceable}, ${v.service_type}, ${v.price_cents}, ${v.billing_method}, 'completed', 'route',
            ${tsLocal(v.scheduled_date, v.time_in)}, ${tsLocal(v.scheduled_date, v.time_out)},
-           ${v.ion_log_id}, ${v.ion_calendar_id}, ${v.submitted_by}, ${v.comment}, ${v.failure_reason}, 'ion_log')
+           ${v.ion_log_id}, ${v.ion_calendar_id}, ${v.submitted_by}, ${v.actual_tech_id}, ${v.comment}, ${v.failure_reason}, 'ion_log')
           ON CONFLICT (ion_log_id) WHERE ion_log_id IS NOT NULL DO UPDATE SET
             service_location_id=EXCLUDED.service_location_id, task_id=EXCLUDED.task_id, ion_task_id=EXCLUDED.ion_task_id,
             scheduled_date=EXCLUDED.scheduled_date, visit_date=EXCLUDED.visit_date, is_serviceable=EXCLUDED.is_serviceable,
             service_type=EXCLUDED.service_type, price_cents=EXCLUDED.price_cents, billing_method=EXCLUDED.billing_method,
             started_at=EXCLUDED.started_at, ended_at=EXCLUDED.ended_at, ion_calendar_id=EXCLUDED.ion_calendar_id,
-            ion_submitted_by=EXCLUDED.ion_submitted_by, notes=EXCLUDED.notes, failure_reason=EXCLUDED.failure_reason,
-            updated_at=now()
+            ion_submitted_by=EXCLUDED.ion_submitted_by, actual_tech_id=COALESCE(EXCLUDED.actual_tech_id, maintenance.visits.actual_tech_id),
+            notes=EXCLUDED.notes, failure_reason=EXCLUDED.failure_reason, updated_at=now()
           RETURNING id`
         const vid = ins[0].id
         insVisits++
@@ -156,7 +166,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
         }
       }
     })
-    result = { dry_run: false, committed: true, ...summaryBase, resolved_to_task: resolved, unlinked_visits: visits.filter((v) => !v.task_id).length, unknown_event_ids: unknownEvents.slice(0, 60), insVisits, insReadings, insChecklist, insConsumables, skipped }
+    result = { dry_run: false, committed: true, ...summaryBase, resolved_to_task: resolved, tech_linked: techLinked, unlinked_visits: visits.filter((v) => !v.task_id).length, unknown_event_ids: unknownEvents.slice(0, 60), insVisits, insReadings, insChecklist, insConsumables, skipped }
   } finally {
     await sql.end()
   }
