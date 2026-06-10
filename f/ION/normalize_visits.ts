@@ -2,11 +2,15 @@
 //postgres@3.4.4
 
 // NORMALIZE RECONCILER — owns "raw -> canonical FK" for the visits domain. Pure DB (no ION),
-// idempotent, only touches NULL FKs, so it is safe to re-run any time aliases/definitions/
-// task_schedules change (append an alias -> re-run -> historical rows resolve, no re-scrape).
-// Resolves: actual_tech_id (employee aliases), consumables canonical_name+base_quantity,
-// visit_readings.reading_id, visit_tasks.checklist_id, and task_id/task_schedule_id/scheduled_tech_id
-// from the best matching task_schedule. Returns counts + a drift snapshot (top unmapped raw names).
+// idempotent, only touches NULL FKs -> safe to re-run any time aliases/definitions/task_schedules
+// change (append an alias -> re-run -> historical rows resolve, no re-scrape). Each child resolves
+// by a SINGLE join to its alias table's definition_id (the alias table is the sole lookup):
+//   visit_readings.name      -> ion.reading_aliases.definition_id   (reading_definitions.id)
+//   visit_tasks.task_name    -> ion.task_aliases.definition_id      (task_definitions.id)
+//   consumables_usage.ion_item_id -> ion.consumable_aliases (canonical_name + to_base_factor)
+//   visits.ion_submitted_by  -> employees.ion_username  (actual_tech_id)
+//   visits.ion_task_id       -> task_schedules           (task_id/schedule/scheduled_tech)
+// Drift snapshot = raw values present on the children with NO alias row (the watcher's queue).
 
 import * as wmill from "windmill-client"
 import postgres from "postgres@3.4.4"
@@ -27,26 +31,16 @@ export async function main(sb: any = null) {
       WHERE a.ion_item_id = cu.ion_item_id AND a.canonical_name IS NOT NULL AND cu.canonical_name IS NULL`).count
 
     out.readings_resolved = (await sql`
-      WITH rmap AS (
-        SELECT DISTINCT ON (k) k, id FROM (
-          SELECT lower(btrim(canonical_name)) k, id FROM ion.reading_definitions WHERE canonical_name IS NOT NULL
-          UNION ALL SELECT lower(btrim(display_name)), id FROM ion.reading_definitions WHERE display_name IS NOT NULL
-          UNION ALL SELECT lower(btrim(ra.raw_name)), rd.id FROM ion.reading_aliases ra JOIN ion.reading_definitions rd ON rd.canonical_name = ra.canonical_name
-        ) u WHERE k <> '' ORDER BY k
-      )
-      UPDATE maintenance.visit_readings vr SET reading_id = rmap.id
-      FROM rmap WHERE vr.reading_id IS NULL AND lower(btrim(vr.name)) = rmap.k`).count
+      UPDATE maintenance.visit_readings vr SET reading_id = ra.definition_id
+      FROM ion.reading_aliases ra
+      WHERE vr.reading_id IS NULL AND ra.definition_id IS NOT NULL
+        AND lower(btrim(vr.name)) = lower(btrim(ra.raw_name))`).count
 
     out.checklist_resolved = (await sql`
-      WITH cmap AS (
-        SELECT DISTINCT ON (k) k, id FROM (
-          SELECT lower(btrim(canonical_name)) k, id FROM ion.task_definitions WHERE canonical_name IS NOT NULL
-          UNION ALL SELECT lower(btrim(display_name)), id FROM ion.task_definitions WHERE display_name IS NOT NULL
-          UNION ALL SELECT lower(btrim(ta.raw_name)), td.id FROM ion.task_aliases ta JOIN ion.task_definitions td ON td.canonical_name = ta.canonical_name
-        ) u WHERE k <> '' ORDER BY k
-      )
-      UPDATE maintenance.visit_tasks vt SET checklist_id = cmap.id
-      FROM cmap WHERE vt.checklist_id IS NULL AND lower(btrim(vt.task_name)) = cmap.k`).count
+      UPDATE maintenance.visit_tasks vt SET checklist_id = ta.definition_id
+      FROM ion.task_aliases ta
+      WHERE vt.checklist_id IS NULL AND ta.definition_id IS NOT NULL
+        AND lower(btrim(vt.task_name)) = lower(btrim(ta.raw_name))`).count
 
     out.task_linked = (await sql`
       WITH best AS (
@@ -67,8 +61,19 @@ export async function main(sb: any = null) {
       checklist_unresolved: (await sql`SELECT count(*)::int n FROM maintenance.visit_tasks WHERE checklist_id IS NULL`)[0].n,
       consumables_unmapped: (await sql`SELECT count(*)::int n FROM maintenance.consumables_usage WHERE canonical_name IS NULL AND ion_item_id IS NOT NULL`)[0].n,
     }
-    out.drift_readings = await sql`SELECT name, count(*)::int n FROM maintenance.visit_readings WHERE reading_id IS NULL GROUP BY 1 ORDER BY n DESC LIMIT 20`
-    out.drift_checklist = await sql`SELECT task_name, count(*)::int n FROM maintenance.visit_tasks WHERE checklist_id IS NULL GROUP BY 1 ORDER BY n DESC LIMIT 20`
+    out.drift_readings = await sql`
+      SELECT vr.name, count(*)::int n FROM maintenance.visit_readings vr
+      WHERE NOT EXISTS (SELECT 1 FROM ion.reading_aliases ra WHERE lower(btrim(ra.raw_name)) = lower(btrim(vr.name)))
+      GROUP BY vr.name ORDER BY n DESC LIMIT 30`
+    out.drift_checklist = await sql`
+      SELECT vt.task_name, count(*)::int n FROM maintenance.visit_tasks vt
+      WHERE NOT EXISTS (SELECT 1 FROM ion.task_aliases ta WHERE lower(btrim(ta.raw_name)) = lower(btrim(vt.task_name)))
+      GROUP BY vt.task_name ORDER BY n DESC LIMIT 30`
+    out.drift_consumables = await sql`
+      SELECT cu.item_name, cu.ion_item_id, count(*)::int n FROM maintenance.consumables_usage cu
+      WHERE cu.ion_item_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM ion.consumable_aliases a WHERE a.ion_item_id = cu.ion_item_id AND a.definition_id IS NOT NULL)
+      GROUP BY cu.item_name, cu.ion_item_id ORDER BY n DESC LIMIT 30`
   } finally { await sql.end() }
   return out
 }
