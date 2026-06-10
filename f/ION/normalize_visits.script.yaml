@@ -1,0 +1,9 @@
+summary: 'Normalize reconciler (DB-only, re-runnable, no ION): resolves visit
+  FKs — actual_tech_id, consumables canonical+base_quantity,
+  visit_readings.reading_id, visit_tasks.checklist_id,
+  task_id/schedule/scheduled_tech from task_schedules. Returns drift snapshot.'
+description: ''
+lock: '!inline f/ION/normalize_visits.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
