@@ -19,6 +19,6 @@
   "packages": {
     "postgres": ["postgres@3.4.4", "", {}, "sha512-IbyN+9KslkqcXa8AO9fxpk97PA4pzewvpi2B3Dwy9u4zpV32QicaEdgmF3eSQUzdRk7ttDHQejNgAEr4XoeH4A=="],
 
-    "windmill-client": ["windmill-client@1.721.0", "", {}, "sha512-3buA/Cx1XMSAJ88j1T1a6xdErQuBjbPptxBysNk7LVMoyTfyVWJUK3H04QeLZTQOXpPWJP/lvFwqQU7YagF5+w=="],
+    "windmill-client": ["windmill-client@1.722.0", "", {}, "sha512-9g9HpB946mEvJj3TnF0b2IuoXayodzzu7eBpzr6/9Fg3Uif+6/oIoHWrXl0tWFEv46J02rpfPSdkQPjQAdxKeg=="],
   }
 }

@@ -3,11 +3,11 @@
 
 // NORMALIZE RECONCILER — owns "raw -> canonical FK" for the visits domain. Pure DB (no ION),
 // idempotent, only touches NULL FKs -> safe to re-run any time aliases/definitions/task_schedules
-// change (append an alias -> re-run -> historical rows resolve, no re-scrape). Each child resolves
-// by a SINGLE join to its alias table's definition_id (the alias table is the sole lookup):
-//   visit_readings.name      -> ion.reading_aliases.definition_id   (reading_definitions.id)
-//   visit_tasks.task_name    -> ion.task_aliases.definition_id      (task_definitions.id)
-//   consumables_usage.ion_item_id -> ion.consumable_aliases (canonical_name + to_base_factor)
+// change. Each child resolves by a SINGLE join to its alias table (the alias is the sole lookup):
+//   consumables_usage.ion_item_id -> ion.consumable_aliases -> item_id (public.items SKU) +
+//                                    canonical_name + base_quantity (chemical_definitions roll-up)
+//   visit_readings.name      -> ion.reading_aliases.definition_id  (reading_definitions.id)
+//   visit_tasks.task_name    -> ion.task_aliases.definition_id     (task_definitions.id)
 //   visits.ion_submitted_by  -> employees.ion_username  (actual_tech_id)
 //   visits.ion_task_id       -> task_schedules           (task_id/schedule/scheduled_tech)
 // Drift snapshot = raw values present on the children with NO alias row (the watcher's queue).
@@ -25,6 +25,11 @@ export async function main(sb: any = null) {
       FROM public.employees e
       WHERE v.actual_tech_id IS NULL AND v.ion_submitted_by IS NOT NULL AND v.ion_submitted_by = ANY(e.ion_username)`).count
 
+    // consumables: SKU link (inventory axis) + canonical roll-up (analysis axis)
+    out.consumables_item_linked = (await sql`
+      UPDATE maintenance.consumables_usage cu SET item_id = a.item_id
+      FROM ion.consumable_aliases a
+      WHERE a.ion_item_id = cu.ion_item_id AND a.item_id IS NOT NULL AND cu.item_id IS NULL`).count
     out.consumables_tied = (await sql`
       UPDATE maintenance.consumables_usage cu SET canonical_name = a.canonical_name, base_quantity = cu.quantity * a.to_base_factor
       FROM ion.consumable_aliases a
@@ -59,7 +64,8 @@ export async function main(sb: any = null) {
       visits_no_task: (await sql`SELECT count(*)::int n FROM maintenance.visits WHERE task_id IS NULL`)[0].n,
       readings_unresolved: (await sql`SELECT count(*)::int n FROM maintenance.visit_readings WHERE reading_id IS NULL`)[0].n,
       checklist_unresolved: (await sql`SELECT count(*)::int n FROM maintenance.visit_tasks WHERE checklist_id IS NULL`)[0].n,
-      consumables_unmapped: (await sql`SELECT count(*)::int n FROM maintenance.consumables_usage WHERE canonical_name IS NULL AND ion_item_id IS NOT NULL`)[0].n,
+      consumables_no_sku: (await sql`SELECT count(*)::int n FROM maintenance.consumables_usage WHERE item_id IS NULL AND ion_item_id IS NOT NULL`)[0].n,
+      consumables_no_canonical: (await sql`SELECT count(*)::int n FROM maintenance.consumables_usage WHERE canonical_name IS NULL AND ion_item_id IS NOT NULL`)[0].n,
     }
     out.drift_readings = await sql`
       SELECT vr.name, count(*)::int n FROM maintenance.visit_readings vr
@@ -69,11 +75,6 @@ export async function main(sb: any = null) {
       SELECT vt.task_name, count(*)::int n FROM maintenance.visit_tasks vt
       WHERE NOT EXISTS (SELECT 1 FROM ion.task_aliases ta WHERE lower(btrim(ta.raw_name)) = lower(btrim(vt.task_name)))
       GROUP BY vt.task_name ORDER BY n DESC LIMIT 30`
-    out.drift_consumables = await sql`
-      SELECT cu.item_name, cu.ion_item_id, count(*)::int n FROM maintenance.consumables_usage cu
-      WHERE cu.ion_item_id IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM ion.consumable_aliases a WHERE a.ion_item_id = cu.ion_item_id AND a.definition_id IS NOT NULL)
-      GROUP BY cu.item_name, cu.ion_item_id ORDER BY n DESC LIMIT 30`
   } finally { await sql.end() }
   return out
 }
