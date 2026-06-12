@@ -1,10 +1,14 @@
-summary: Hold cursor on inline-refresh failure so next run retries
-description: If trigger_inline_refresh returns an error, process_entity now
-  returns ts_for_cursor=None — the caller skips the cursor advance for that
-  entity. Otherwise a transient or schema-induced upsert failure caused the
-  entity to be skipped permanently. drift_log + refresh_failures still record
-  the failure for visibility.
+summary: Survive dropped pooler connections (reconnect + retry once)
+description: Db wrapper reconnects on OperationalError/InterfaceError and
+  retries the failed operation once; save_cursor, the drift-error logger, and
+  end-of-run sweeps use the live connection. Fixes the 2026-06-12 cascade
+  failure (job 019ebd19-2f41-1ceb-b17f-9bc44fcf1c67). Header retrofitted to
+  SCRIPT_HEADER convention.
 lock: '!inline f/service_billing/cdc_reconciler.script.lock'
 has_on_behalf_of: false
 kind: script
-schema: null
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []

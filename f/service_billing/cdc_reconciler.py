@@ -1,10 +1,43 @@
-# CDC-based reconciler for QBO ↔ cache drift detection.
+# f/service_billing/cdc_reconciler
 #
-# Architecture (Pattern D, see CLAUDE.md):
-#   - Webhooks are the primary low-latency channel for external changes
-#   - This reconciler is the truth backstop — catches anything webhooks dropped
-#   - Uses QBO's CDC endpoint (incremental) so we only check what actually
-#     changed since our last cursor, not the whole table.
+# CDC-based reconciler for QBO ↔ cache drift detection — the truth backstop
+# behind the QBO webhooks (Pattern D).
+#
+# Module: docs/modules/service/billing.md
+# Status: [active]
+# Concurrency key: qbo_api (target — not yet applied in script settings)
+#
+# Triggered by:
+#   - schedule: every 15 minutes
+#
+# Tables touched:
+#   billing.cdc_cursors          [r/w]    read last cursor; advance + record run status
+#   billing.invoices             [r/w]    drift compare; upsert via refresh_invoice; sync_state on cache_ahead
+#   billing.customer_payments    [r/w]    drift compare; upsert via refresh_payment
+#   public."Customers"           [r/w]    drift compare; upsert via refresh_customer
+#   billing.drift_log            [write]  one row per drift / processing error; auto_healed pruned after 30 days
+#   billing.webhook_expectations [write]  flag 'pending' rows past their grace window as 'missing'
+#
+# External APIs:
+#   - QBO: POST /oauth2/v1/tokens/bearer (token refresh), GET /v3/company/<realm>/cdc
+#
+# Why this exists:
+#   Webhooks are the primary low-latency channel for external changes; this
+#   reconciler catches anything webhooks dropped. It uses QBO's CDC endpoint
+#   (incremental) so we only check what actually changed since our last
+#   cursor, not the whole table.
+#
+#   2026-06-12: the Supabase pooler (port 6543) dropped the run's single
+#   long-lived connection mid-batch ("SSL connection has been closed
+#   unexpectedly", job 019ebd19-2f41-1ceb-b17f-9bc44fcf1c67). Every later
+#   event failed with "connection already closed", the drift-error logger
+#   failed the same way, and save_cursor raised — failing the whole run.
+#   The Db wrapper below reconnects on OperationalError/InterfaceError and
+#   retries the failed operation once. Safe because every write here is
+#   idempotent-or-benign on replay: upserts are OCC-guarded, and a
+#   duplicated drift_log row is pruned by the 30-day sweep.
+#
+# Architecture notes:
 #
 # CACHE WRITES — single source of truth:
 # The CDC response includes the FULL entity body for each changed record.
@@ -233,6 +266,66 @@ def get_db_conn():
     )
 
 
+# Raised when the TCP connection to Postgres is gone or the session is
+# unusable. The Supabase pooler drops long-lived connections mid-run:
+# the in-flight statement gets OperationalError ("SSL connection has been
+# closed unexpectedly") and every use after that gets InterfaceError
+# ("connection already closed").
+DB_CONN_ERRORS = (psycopg2.OperationalError, psycopg2.InterfaceError)
+
+
+class Db:
+    """Holds the run's connection and survives the pooler dropping it.
+
+    All DB work goes through run(), which retries ONCE on a connection
+    error after reconnecting. One retry only: replays must stay bounded,
+    and a second consecutive drop means the pooler/DB is actually down —
+    that should fail the run loudly, not loop.
+    """
+
+    def __init__(self):
+        self.conn = get_db_conn()
+
+    def live(self):
+        if self.conn is None or self.conn.closed:
+            self.reconnect()
+        return self.conn
+
+    def reconnect(self):
+        try:
+            if self.conn is not None:
+                self.conn.close()
+        except Exception:
+            pass
+        self.conn = get_db_conn()
+
+    def run(self, fn, *args, **kwargs):
+        """fn(conn, *args, **kwargs), reconnect + retry once on a dropped conn."""
+        try:
+            return fn(self.live(), *args, **kwargs)
+        except DB_CONN_ERRORS as e:
+            print(
+                f"  DB connection error ({type(e).__name__}: {str(e)[:120].strip()}); "
+                "reconnecting and retrying once"
+            )
+            self.reconnect()
+            return fn(self.conn, *args, **kwargs)
+
+    def rollback(self):
+        try:
+            if self.conn is not None and not self.conn.closed:
+                self.conn.rollback()
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            if self.conn is not None:
+                self.conn.close()
+        except Exception:
+            pass
+
+
 def qbo_cdc(access_token, realm_id, entities, changed_since):
     url = f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/cdc"
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
@@ -378,11 +471,16 @@ def mark_cache_drift(conn, schema, table, id_col, entity_id):
         )
         cur.execute(query, (entity_id,))
         conn.commit()
+    except DB_CONN_ERRORS:
+        raise  # let the caller's reconnect+retry handle a dropped connection
     except Exception as e:
         conn.rollback()
         print(f"  could not mark drift on {schema}.{table}:{entity_id}: {e}")
     finally:
-        cur.close()
+        try:
+            cur.close()
+        except Exception:
+            pass
 
 
 def flag_missing_webhooks(conn):
@@ -520,10 +618,10 @@ def process_entity(conn, entity_type, qbo_entity, schema, table, id_col):
 def main():
     """Run the reconciler. Schedule: every 15 minutes."""
     started = time.time()
-    conn = get_db_conn()
+    db = Db()
 
     try:
-        cursor = get_cursor(conn)
+        cursor = db.run(get_cursor)
         print(f"=== CDC reconciler starting (cursor={cursor}) ===")
 
         access_token, realm_id = refresh_qbo_token()
@@ -533,7 +631,7 @@ def main():
                 access_token, realm_id, ENTITIES_TO_RECONCILE, cursor,
             )
         except Exception as e:
-            save_cursor(conn, cursor, "failed", 0, 0, f"cdc_fetch: {str(e)[:300]}")
+            db.run(save_cursor, cursor, "failed", 0, 0, f"cdc_fetch: {str(e)[:300]}")
             raise
 
         # Sort by qbo_updated ascending so cursor advances incrementally.
@@ -559,8 +657,8 @@ def main():
 
             entity_id = qbo_entity.get("Id", "<unknown>")
             try:
-                ts, drift_kind, refresh_result = process_entity(
-                    conn, entity_type, qbo_entity, schema, table, id_col,
+                ts, drift_kind, refresh_result = db.run(
+                    process_entity, entity_type, qbo_entity, schema, table, id_col,
                 )
                 entities_processed += 1
                 if drift_kind:
@@ -575,13 +673,10 @@ def main():
             except Exception as e:
                 msg = f"{type(e).__name__}: {str(e)[:200]}"
                 print(f"  ERROR processing {entity_type}:{entity_id}: {msg}")
+                db.rollback()
                 try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                try:
-                    log_drift(
-                        conn, entity_type, entity_id,
+                    db.run(
+                        log_drift, entity_type, entity_id,
                         kind="processing_error", severity="hard",
                         cache_state={"error": msg},
                         qbo_state=(
@@ -595,8 +690,8 @@ def main():
                     print(f"  could not log drift error: {inner}")
                 processing_errors.append((entity_type, entity_id, msg))
 
-        save_cursor(
-            conn,
+        db.run(
+            save_cursor,
             progress_cursor,
             "succeeded" if not processing_errors else "partial",
             entities_processed,
@@ -608,9 +703,9 @@ def main():
             ),
         )
 
-        cleared = auto_resolve_caught_up_drift(conn)
-        missing_webhooks_count = flag_missing_webhooks(conn)
-        pruned = prune_drift_log(conn)
+        cleared = db.run(auto_resolve_caught_up_drift)
+        missing_webhooks_count = db.run(flag_missing_webhooks)
+        pruned = db.run(prune_drift_log)
 
         elapsed = time.time() - started
         cursor_advance_s = (progress_cursor - cursor).total_seconds()
@@ -639,4 +734,4 @@ def main():
         }
 
     finally:
-        conn.close()
+        db.close()
