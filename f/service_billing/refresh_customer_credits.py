@@ -101,6 +101,10 @@ def qbo_query_all(query, entity, access_token, realm_id):
 
 
 def upsert_payment(cur, row, now):
+    # qbo_customer_id is refreshed on conflict: a QBO customer merge
+    # silently re-points payments to the surviving customer, and a row
+    # stuck on the deleted customer id is invisible to credit matching +
+    # credits_ok (DAKE/DUKE incident, 2026-06-12).
     cur.execute("""
         INSERT INTO billing.customer_payments
             (qbo_payment_id, qbo_customer_id, type, unapplied_amt,
@@ -109,6 +113,7 @@ def upsert_payment(cur, row, now):
              raw, fetched_at)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
         ON CONFLICT (qbo_payment_id) DO UPDATE SET
+            qbo_customer_id = EXCLUDED.qbo_customer_id,
             unapplied_amt = EXCLUDED.unapplied_amt,
             total_amt = EXCLUDED.total_amt,
             txn_date = EXCLUDED.txn_date,
@@ -197,7 +202,10 @@ def main(qbo_customer_id: str, lookback_days: int = 365):
             pmref = p.get("PaymentMethodRef") or {}
             row = {
                 "qbo_payment_id": p.get("Id"),
-                "qbo_customer_id": qbo_customer_id,
+                # Trust the payload's CustomerRef over the caller's arg —
+                # after a QBO customer merge the payment may belong to a
+                # different (surviving) customer than the one being refreshed.
+                "qbo_customer_id": (p.get("CustomerRef") or {}).get("value") or qbo_customer_id,
                 "type": "payment",
                 "unapplied_amt": float(p.get("UnappliedAmt") or 0),
                 "total_amt": float(p.get("TotalAmt") or 0),
@@ -216,7 +224,7 @@ def main(qbo_customer_id: str, lookback_days: int = 365):
         for cm in credit_memos:
             row = {
                 "qbo_payment_id": f"CM-{cm.get('Id')}",
-                "qbo_customer_id": qbo_customer_id,
+                "qbo_customer_id": (cm.get("CustomerRef") or {}).get("value") or qbo_customer_id,
                 "type": "credit_memo",
                 "unapplied_amt": float(cm.get("RemainingCredit") or 0),
                 "total_amt": float(cm.get("TotalAmt") or 0),

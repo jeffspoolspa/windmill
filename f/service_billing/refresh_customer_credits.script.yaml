@@ -1,5 +1,9 @@
 summary: Single-customer QBO credits refresh + multi-invoice status recheck
-description: ''
+description: Pulls Payments + CreditMemos for one customer from QBO into
+  billing.customer_payments, mirrors LinkedTxn into payment_invoice_links, then
+  runs billing.recheck_invoice_status on every non-terminal invoice for the
+  customer. Trusts the payload CustomerRef over the caller arg and refreshes
+  qbo_customer_id on conflict (QBO merge safety).
 lock: '!inline f/service_billing/refresh_customer_credits.script.lock'
 has_on_behalf_of: false
 kind: script
