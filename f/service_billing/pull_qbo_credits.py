@@ -72,6 +72,11 @@ def upsert_payment(cur, row, now):
     """Upsert into billing.customer_payments.
     Keeps fully-applied rows as history (don't delete -- we need them for
     the applied-payments UI and reconciliation).
+
+    qbo_customer_id must be refreshed on conflict: a QBO customer merge
+    silently re-points payments to the surviving customer, and a row stuck
+    on the deleted customer id is invisible to credit matching + credits_ok
+    (DAKE/DUKE incident, 2026-06-12).
     """
     cur.execute("""
         INSERT INTO billing.customer_payments
@@ -81,6 +86,7 @@ def upsert_payment(cur, row, now):
              raw, fetched_at)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
         ON CONFLICT (qbo_payment_id) DO UPDATE SET
+            qbo_customer_id = EXCLUDED.qbo_customer_id,
             unapplied_amt = EXCLUDED.unapplied_amt, total_amt = EXCLUDED.total_amt,
             txn_date = EXCLUDED.txn_date, ref_num = EXCLUDED.ref_num,
             memo = EXCLUDED.memo,

@@ -2,7 +2,9 @@ summary: Pull payments + credit memos; resolve payment method names; track was_c
 description: Pulls payments (last N days) + credit memos into
   billing.customer_payments. Resolves PaymentMethodRef.value -> name. Writes
   payment_invoice_links with applied_at = payment.txn_date so external_qbo links
-  reflect when QBO recorded the payment, not when our pull ran.
+  reflect when QBO recorded the payment, not when our pull ran. Refreshes
+  qbo_customer_id on conflict so QBO customer merges don't strand payments under
+  deleted customer ids.
 lock: '!inline f/service_billing/pull_qbo_credits.script.lock'
 has_on_behalf_of: false
 kind: script
