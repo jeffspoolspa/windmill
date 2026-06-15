@@ -148,21 +148,28 @@ def main():
                 new_dept = supabase.table('departments').insert({'name': dept_name}).execute()
                 dept_id = new_dept.data[0]['id']
 
+        # FK the employee to their office (branch) by Gusto location_uuid. The
+        # office table is maintained by f/gusto/sync_offices; this sync no longer
+        # creates branches. If the office isn't synced yet, branch_id stays null
+        # until the next weekly office sync fills it in.
         branch_id = None
         work_addresses_response = gusto_get(f"{GUSTO_API}/v1/employees/{emp_uuid}/work_addresses", headers)
 
         if work_addresses_response.status_code == 200:
-            work_addresses = work_addresses_response.json()
-            if work_addresses and len(work_addresses) > 0:
-                location = work_addresses[-1]
-                branch_name = f"{location.get('city', '')}, {location.get('state', '')}".strip(', ')
-
-                branch = supabase.table('branches').select('id').eq('name', branch_name).execute()
+            work_addresses = work_addresses_response.json() or []
+            active_addrs = [w for w in work_addresses if w.get('active')]
+            wa = active_addrs[-1] if active_addrs else (work_addresses[-1] if work_addresses else None)
+            loc_uuid = wa.get('location_uuid') if wa else None
+            if loc_uuid:
+                branch = (
+                    supabase.table('branches')
+                    .select('id')
+                    .eq('gusto_location_uuid', loc_uuid)
+                    .limit(1)
+                    .execute()
+                )
                 if branch.data:
                     branch_id = branch.data[0]['id']
-                else:
-                    new_branch = supabase.table('branches').insert({'name': branch_name}).execute()
-                    branch_id = new_branch.data[0]['id']
 
         if emp_data.get('terminated'):
             status = 'terminated'
