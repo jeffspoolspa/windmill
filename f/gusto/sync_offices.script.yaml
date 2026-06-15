@@ -1,0 +1,6 @@
+summary: Sync Gusto company locations into branches (office table), weekly
+description: ''
+lock: '!inline f/gusto/sync_offices.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
