@@ -1,5 +1,5 @@
 # py: 3.12
-anyio==4.13.0
+anyio==4.14.0
 certifi==2026.5.20
 charset-normalizer==3.4.7
 h11==0.16.0
@@ -10,4 +10,4 @@ psycopg2-binary==2.9.12
 requests==2.34.2
 typing-extensions==4.15.0
 urllib3==2.7.0
-wmill==1.726.0
+wmill==1.727.0

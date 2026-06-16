@@ -19,9 +19,10 @@ def in_bbox(lat, lng):
 def main(limit: int = 20000, maint_only: bool = False):
     """
     Resolve active service_locations to a Google place_id + coordinate + canonical
-    address (ADR 005). Server-side, resumable (only touches place_id IS NULL).
-    Out-of-area results flagged with no coordinate; place_id collisions flagged
-    needs_review with no place_id (unique(place_id) never violated).
+    address (ADR 005). Resumable (place_id IS NULL). Street-only rows use the
+    customer's BILLING city/state/zip as the geocode hint; the CANONICAL components
+    from Google are stored. Out-of-area → flagged, no coord. place_id collisions →
+    flagged 'needs_review' + duplicate_of_location_id pointed at the canonical row.
     """
     api_key = wmill.get_variable("f/google_maps/api_key")
     db = wmill.get_resource("u/carter/supabase")
@@ -36,8 +37,10 @@ def main(limit: int = 20000, maint_only: bool = False):
         if maint_only else ""
     )
     cur.execute(f"""
-        SELECT sl.id, sl.street, sl.city, sl.state, sl.zip
+        SELECT sl.id, sl.street, sl.city, sl.state, sl.zip,
+               c.city, c.state, c.zip
         FROM public.service_locations sl
+        JOIN public."Customers" c ON c.id = sl.account_id
         WHERE sl.is_active = true AND sl.place_id IS NULL
           AND sl.street IS NOT NULL AND length(btrim(sl.street)) >= 3
           {maint_clause}
@@ -50,11 +53,14 @@ def main(limit: int = 20000, maint_only: bool = False):
     c = {"ok": 0, "needs_review": 0, "out_of_area": 0, "collision": 0, "zero": 0, "error": 0}
     bounds = f'{SERVICE_BBOX["min_lat"]},{SERVICE_BBOX["min_lng"]}|{SERVICE_BBOX["max_lat"]},{SERVICE_BBOX["max_lng"]}'
 
-    for i, (loc_id, street, city, state, zip_code) in enumerate(rows, 1):
-        parts = [street]
+    for i, (loc_id, s_street, s_city, s_state, s_zip, b_city, b_state, b_zip) in enumerate(rows, 1):
+        city = s_city or b_city
+        state = s_state or b_state or "GA"
+        zip_code = s_zip or b_zip
+        parts = [s_street]
         if city:
             parts.append(city)
-        parts.append(state or "GA")
+        parts.append(state)
         if zip_code:
             parts.append(zip_code)
         address = ", ".join(p for p in parts if p)
@@ -107,7 +113,7 @@ def main(limit: int = 20000, maint_only: bool = False):
                              place_id=%s, place_provider='google', latitude=%s, longitude=%s,
                              geocoded_at=now(), geocode_source='google', geocode_status=%s,
                              city=COALESCE(city,%s), state=COALESCE(state,%s), zip=COALESCE(zip,%s),
-                             updated_at=now()
+                             duplicate_of_location_id=NULL, updated_at=now()
                            WHERE id=%s""",
                         (pid, lat, lng, row_status, ccity, cstate, czip, loc_id),
                     )
@@ -115,9 +121,14 @@ def main(limit: int = 20000, maint_only: bool = False):
                     c[row_status] += 1
                 except psycopg2.errors.UniqueViolation:
                     cur.execute("ROLLBACK TO SAVEPOINT sp")
+                    cur.execute("SELECT id FROM public.service_locations WHERE place_id=%s", (pid,))
+                    canon = cur.fetchone()
                     cur.execute(
-                        "UPDATE public.service_locations SET geocode_status='needs_review', geocode_source='google', updated_at=now() WHERE id=%s",
-                        (loc_id,),
+                        """UPDATE public.service_locations SET
+                             geocode_status='needs_review', geocode_source='google',
+                             duplicate_of_location_id=%s, updated_at=now()
+                           WHERE id=%s""",
+                        (canon[0] if canon else None, loc_id),
                     )
                     c["collision"] += 1
         elif status_api == "ZERO_RESULTS":
