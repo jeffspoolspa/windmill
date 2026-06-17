@@ -1,0 +1,7 @@
+summary: Probe ION CustomerRpt.cfm shape/columns (ADR-006 bulk ion_cust_id ingest)
+description: ''
+lock: '!inline f/ION/discover_customer_report.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
