@@ -1,0 +1,7 @@
+summary: Standardize service_locations address text from each row's Google
+  place_id (ADR 005)
+description: ''
+lock: '!inline f/google_maps/normalize_canonical_addresses.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
