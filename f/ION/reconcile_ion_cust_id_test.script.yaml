@@ -1,0 +1,8 @@
+summary: 'ADR-006 reconciler DRY-RUN test: match customers to ION via
+  customerlist search (no DB writes)'
+description: ''
+lock: '!inline f/ION/reconcile_ion_cust_id_test.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
