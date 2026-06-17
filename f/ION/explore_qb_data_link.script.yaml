@@ -1,0 +1,8 @@
+summary: Probe ION customer detail tab for the QuickBooks/QBO id (ADR-005 entity
+  resolution)
+description: ''
+lock: '!inline f/ION/explore_qb_data_link.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
