@@ -1,5 +1,4 @@
-summary: 'ADR-006 reconciler DRY-RUN test: match customers to ION via
-  customerlist search (no DB writes)'
+summary: 'ADR-006 reconciler DRY-RUN test v2: surname + narrowing full-name second pass'
 description: ''
 lock: '!inline f/ION/reconcile_ion_cust_id_test.script.lock'
 has_on_behalf_of: false

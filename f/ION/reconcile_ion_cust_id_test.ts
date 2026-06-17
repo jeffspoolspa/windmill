@@ -4,8 +4,6 @@
 import { chromium } from "playwright@1.40.0"
 import * as wmill from "windmill-client"
 
-// Embedded test targets (dry-run validation before wiring DB read/write).
-// "control" rows have known_ion -> the reconciler must reproduce it.
 const TARGETS: { kind: string; id: number; qbo: string; name: string; phone: string | null; known_ion: string | null }[] = [
   { kind: "control", id: 772962, qbo: "9848", name: "PRICE, CLAY", phone: "(912) 445-2127", known_ion: "2568084" },
   { kind: "control", id: 737504, qbo: "9845", name: "LEWIS, RALPH", phone: "(404) 441-2125", known_ion: "2567674" },
@@ -31,45 +29,57 @@ function decodeText(h: string): string {
     .replace(/<[^>]*>/g, " ")
     .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
-    .replace(/&amp;/g, "&")
-    .replace(/&nbsp;/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
+    .replace(/&amp;/g, "&").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim()
 }
-function cleanName(s: string): string {
-  return (s || "").replace(/\([^)]*\)/g, " ").replace(/[*&#]/g, " ").toLowerCase()
-}
-function norm(s: string): string {
-  return cleanName(s).replace(/[^a-z0-9]/g, "")
-}
-function normSorted(s: string): string {
-  return cleanName(s).replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(Boolean).sort().join("")
-}
+const cleanName = (s: string) => (s || "").replace(/\([^)]*\)/g, " ").replace(/[*&#]/g, " ").toLowerCase()
+const norm = (s: string) => cleanName(s).replace(/[^a-z0-9]/g, "")
+const normSorted = (s: string) => cleanName(s).replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(Boolean).sort().join("")
 function phone10(s: string | null): string {
   const d = (s || "").replace(/\D/g, "")
   return d.length >= 10 ? d.slice(-10) : ""
 }
-function searchTerm(name: string): string {
+function surnameTerm(name: string): string {
   let s = name.replace(/\([^)]*\)/g, " ").trim()
   if (s.includes(",")) return s.split(",")[0].trim()
   const toks = s.split(/\s+/).filter(Boolean)
   return toks.length ? toks[toks.length - 1] : s
 }
+const fullTerm = (name: string) => name.replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim()
 
-interface Cand { ion: string; name: string; location: string; home: string; mobile: string }
-
+interface Cand { ion: string; name: string; home: string; mobile: string }
 function parseCandidates(body: string): Cand[] {
   const out: Cand[] = []
   const re = /customerTabs\.cfm\?customerid=(\d+)',\s*'customerInfo'\)[^>]*>([\s\S]*?)<\/a>/gi
   let m: RegExpExecArray | null
   while ((m = re.exec(body)) !== null) {
-    const ion = m[1]
-    const name = decodeText(m[2])
     const after = body.slice(m.index + m[0].length, m.index + m[0].length + 700)
     const tds = [...after.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((x) => decodeText(x[1]))
-    out.push({ ion, name, location: tds[0] || "", home: tds[1] || "", mobile: tds[2] || "" })
+    out.push({ ion: m[1], name: decodeText(m[2]), home: tds[1] || "", mobile: tds[2] || "" })
   }
   return out
+}
+
+const RANK: Record<string, number> = { high: 3, medium: 2, review: 1, none: 0 }
+function matchOver(cands: Cand[], t: typeof TARGETS[number]) {
+  const tNameExact = norm(t.name), tNameSorted = normSorted(t.name), tPhone = phone10(t.phone)
+  const scored = cands.map((c) => ({
+    c,
+    nameExact: norm(c.name) === tNameExact,
+    nameSorted: normSorted(c.name) === tNameSorted,
+    phoneMatch: tPhone !== "" && (phone10(c.home) === tPhone || phone10(c.mobile) === tPhone),
+  }))
+  const nameHits = scored.filter((s) => s.nameExact || s.nameSorted)
+  let chosen: typeof scored[number] | null = null
+  let confidence = "none"
+  if (nameHits.length === 1) { chosen = nameHits[0]; confidence = chosen.phoneMatch ? "high" : "medium" }
+  else if (nameHits.length > 1) {
+    const ph = nameHits.filter((s) => s.phoneMatch)
+    if (ph.length === 1) { chosen = ph[0]; confidence = "high" } else { confidence = "review" }
+  } else {
+    const ph = scored.filter((s) => s.phoneMatch)
+    if (ph.length === 1) { chosen = ph[0]; confidence = "medium" }
+  }
+  return { chosen, confidence, scored, count: cands.length }
 }
 
 export async function main() {
@@ -98,62 +108,40 @@ export async function main() {
     const origin = new URL(page.url()).origin
     out.logged_in = true
 
-    const fetchUrl = (url: string) =>
+    const search = (term: string) =>
       page.evaluate(async (u: string) => {
-        try {
-          const res = await fetch(u, { credentials: "include", headers: { Accept: "text/html, */*" } })
-          return await res.text()
-        } catch (e: any) {
-          return "ERR:" + String(e)
-        }
-      }, url)
+        try { const res = await fetch(u, { credentials: "include", headers: { Accept: "text/html, */*" } }); return await res.text() }
+        catch (e: any) { return "ERR:" + String(e) }
+      }, `${origin}/customers/customerlist.cfm?officeid=0&techid=0&routeid=0&search=${encodeURIComponent(term)}&reset=1`)
 
-    let ok = 0, reproduced = 0, controls = 0
+    let reproduced = 0, controls = 0, matched = 0
     for (const t of TARGETS) {
-      const term = searchTerm(t.name)
-      const body = await fetchUrl(
-        `${origin}/customers/customerlist.cfm?officeid=0&techid=0&routeid=0&search=${encodeURIComponent(term)}&reset=1`,
-      )
-      const cands = parseCandidates(body)
-      const capped = body.includes("500 customers matching")
-      const tNameExact = norm(t.name), tNameSorted = normSorted(t.name), tPhone = phone10(t.phone)
-
-      const scored = cands.map((c) => ({
-        c,
-        nameExact: norm(c.name) === tNameExact,
-        nameSorted: normSorted(c.name) === tNameSorted,
-        phoneMatch: tPhone !== "" && (phone10(c.home) === tPhone || phone10(c.mobile) === tPhone),
-      }))
-      const nameHits = scored.filter((s) => s.nameExact || s.nameSorted)
-
-      let chosen: typeof scored[number] | null = null
-      let confidence = "none"
-      if (nameHits.length === 1) {
-        chosen = nameHits[0]
-        confidence = chosen.phoneMatch ? "high" : "medium"
-      } else if (nameHits.length > 1) {
-        const ph = nameHits.filter((s) => s.phoneMatch)
-        if (ph.length === 1) { chosen = ph[0]; confidence = "high" }
-        else { confidence = "review"; }
-      } else {
-        const ph = scored.filter((s) => s.phoneMatch)
-        if (ph.length === 1) { chosen = ph[0]; confidence = "medium" }
+      const term1 = surnameTerm(t.name)
+      let r = matchOver(parseCandidates(await search(term1)), t)
+      let usedTerm = term1, passes = 1
+      if (r.confidence !== "high") {
+        const term2 = fullTerm(t.name)
+        if (term2.toLowerCase() !== term1.toLowerCase()) {
+          const r2 = matchOver(parseCandidates(await search(term2)), t)
+          passes = 2
+          if (RANK[r2.confidence] > RANK[r.confidence]) { r = r2; usedTerm = term2 }
+          else if (RANK[r2.confidence] === RANK[r.confidence] && r.chosen && r2.chosen && r.chosen.c.ion !== r2.chosen.c.ion) {
+            r = { ...r, chosen: null, confidence: "review" }
+          }
+        }
       }
-
-      const chosenIon = chosen?.c.ion ?? null
+      const chosenIon = r.chosen?.c.ion ?? null
       const repro = t.known_ion ? chosenIon === t.known_ion : null
       if (t.kind === "control") { controls++; if (repro) reproduced++ }
-      if (chosen) ok++
-
+      if (r.chosen) matched++
       out.results.push({
         kind: t.kind, name: t.name, qbo: t.qbo, known_ion: t.known_ion,
-        search_term: term, candidates: cands.length, capped,
-        chosen_ion: chosenIon, chosen_name: chosen?.c.name ?? null, confidence,
+        used_term: usedTerm, passes, candidates: r.count,
+        chosen_ion: chosenIon, chosen_name: r.chosen?.c.name ?? null, confidence: r.confidence,
         reproduced: repro,
-        top: scored.slice(0, 4).map((s) => ({ ion: s.c.ion, name: s.c.name, home: s.c.home, mobile: s.c.mobile, nameExact: s.nameExact, nameSorted: s.nameSorted, phoneMatch: s.phoneMatch })),
       })
     }
-    out.summary = { controls, reproduced, matched_any: ok, total: TARGETS.length }
+    out.summary = { controls, reproduced, matched, total: TARGETS.length }
   } catch (e: any) {
     out.error = String(e)
   } finally {
