@@ -1,0 +1,8 @@
+summary: Discover ION customer-list API fields + customer report endpoints
+  (ADR-006 matcher design)
+description: ''
+lock: '!inline f/ION/discover_customer_fields.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
