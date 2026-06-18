@@ -1,0 +1,37 @@
+//bun-extra-requirements:
+//playwright@1.40.0
+import "playwright@1.40.0"
+import * as wmill from "windmill-client"
+import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
+import { main as ingestDayLogs } from "/f/ION/ingest_day_logs"
+import { main as recoverOrphanTasks } from "/f/ION/recover_orphan_tasks"
+
+const pad = (n: number) => String(n).padStart(2, "0")
+const mdy = (d: Date) => `${pad(d.getUTCMonth() + 1)}/${pad(d.getUTCDate())}/${d.getUTCFullYear()}`
+
+// The standard daily visit sync (log-detail grain; LogID is the unique key). Two steps, both proven:
+//   1. ingest_day_logs(window): per day list_day_logs -> get_log_detail -> UPSERT visit on ion_log_id
+//      (+ readings/checklist/consumables); every visit carries event_id + customer; links existing tasks.
+//   2. recover_orphan_tasks(): create tasks for EventIDs not yet in our DB (ingest's unknown_event_ids)
+//      + link those visits -> self-healing, no orphans.
+// Supersedes the bulk CompletedLogDetail flow (which produced 0 rows: the report has no unique id).
+// See docs/flows/sync/ion-visits.md. dry_run default writes nothing.
+export async function main(lookback_days = 7, dry_run = true) {
+  const ion = {
+    loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"),
+    username: await wmill.getVariable("f/ION/USERNAME"),
+    password: await wmill.getVariable("f/ION/PASSWORD"),
+  }
+  const sess = await getOrRefreshSession(ion)
+  const sb = dry_run ? null : await wmill.getResource("u/carter/supabase")
+
+  const end = new Date()
+  const start = new Date(end.getTime() - lookback_days * 86400000)
+  const window = { start: mdy(start), end: mdy(end), lookback_days }
+
+  const ingest = await ingestDayLogs(window.start, window.end, dry_run, sess, sb)
+  // recover_orphan_tasks manages its own session + advisory lock (serializes with the drain schedule).
+  const recover = dry_run ? { skipped: "dry_run" } : await recoverOrphanTasks(250)
+
+  return { window, ingest, recover }
+}
