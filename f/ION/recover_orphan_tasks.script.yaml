@@ -1,6 +1,5 @@
-summary: 'ADR-006: recover orphan-visit tasks
-  (addLog->CustomerID->get_task_detail->upsert task+schedules+link visits).
-  Committing, idempotent, batched.'
+summary: 'ADR-006: recover orphan-visit tasks. Committing, idempotent, batched,
+  advisory-locked (safe to schedule).'
 description: ''
 lock: '!inline f/ION/recover_orphan_tasks.script.lock'
 has_on_behalf_of: false
