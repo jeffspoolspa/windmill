@@ -45,9 +45,9 @@ CLOSURE IS BY task_end — NOT report-absence (the stale-active fix — 2026-06)
       serviced ~24x/week yet absent), and visits are ground truth — so absence
       alone must never close a task. (This replaced the old close-on-absence sweep,
       which would have wrongly closed those accounts every run.)
-  Genuine cancellations are caught while the task is still in the report with a
-  past task_end. A fully-dropped, no-longer-visited task is left for a separate
-  reviewed cancellation pass. See docs/operations/task-record-linkage.md.
+  Genuine cancellations are caught by f/ION/close_dropped_tasks: it fetches the live
+  ION end date (get_task_detail) for tasks that dropped from the report and closes
+  them by it. See docs/operations/task-record-linkage.md.
 
 CUSTOMER OWNER FROM ion_cust_id (ADR 006)
   tasks.customer_id is sourced from ION's customer id (ion_cust_id ->
@@ -62,6 +62,12 @@ MAPPING (report string -> column)
   taskPrice    -> per_visit rows: price_per_visit_cents
                   flat rows:      flat_rate_monthly_cents
   taskStart/End-> tasks.starts_on / ends_on (subject to the no-visits-after-end invariant)
+
+  FINANCIAL TERMS LIVE ON THE TASK (one ION contract = one rate). billing_method /
+  price_per_visit_cents / flat_rate_monthly_cents are written to maintenance.tasks (the
+  authoritative home); the same values are still written to task_schedules for now so the current
+  billing/views readers keep working, until those migrate off the slots and the slot columns are
+  dropped. task_schedules then carry only routing: day_of_week, tech_employee_id, frequency, sequence.
 
 SAFETY
   Defaults to dry_run=True: performs every INSERT/UPDATE inside one transaction,
@@ -397,11 +403,17 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                                    ends_on=%s,
                                    customer_id=COALESCE(%s::bigint, customer_id),
                                    ion_task_id=COALESCE(ion_task_id, %s),
+                                   billing_method=%s,
+                                   price_per_visit_cents = CASE WHEN %s='per_visit'
+                                        THEN %s ELSE price_per_visit_cents END,
+                                   flat_rate_monthly_cents = CASE WHEN %s='flat_rate_monthly'
+                                        THEN %s ELSE flat_rate_monthly_cents END,
                                    external_data=%s::jsonb,
                                    external_source=%s,
                                    updated_at=now()
                                WHERE id=%s""",
                             (task_status, starts_on, write_ends_on, cust_id, ion_task_id,
+                             billing_method, billing_method, ppv, billing_method, flat,
                              json.dumps(_build_external_data(row)), source, task_id),
                         )
                     stats["updated_tasks"] += cur.rowcount
@@ -478,14 +490,16 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                     cur.execute(
                         """INSERT INTO maintenance.tasks
                              (service_location_id, ion_task_id, customer_id, status,
-                              starts_on, ends_on, external_source, external_data)
+                              starts_on, ends_on, billing_method, price_per_visit_cents,
+                              flat_rate_monthly_cents, external_source, external_data)
                            VALUES (%s, %s,
                                    COALESCE(%s::bigint,
                                      (SELECT account_id FROM public.service_locations WHERE id=%s)),
-                                   %s, COALESCE(%s, CURRENT_DATE), %s, %s, %s::jsonb)
+                                   %s, COALESCE(%s, CURRENT_DATE), %s, %s, %s, %s, %s, %s::jsonb)
                            RETURNING id""",
                         (sl_id, ion_task_id, cust_id, sl_id, task_status,
-                         starts_on, write_ends_on, source, json.dumps(_build_external_data(row))),
+                         starts_on, write_ends_on, billing_method, ppv, flat,
+                         source, json.dumps(_build_external_data(row))),
                     )
                     new_task_id = cur.fetchone()[0]
                     stats["new_tasks_inserted"] += 1
