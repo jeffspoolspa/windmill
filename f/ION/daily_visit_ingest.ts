@@ -13,10 +13,9 @@ const mdy = (d: Date) => `${pad(d.getUTCMonth() + 1)}/${pad(d.getUTCDate())}/${d
 //   1. ingest_day_logs(window): per day list_day_logs -> get_log_detail -> UPSERT visit on ion_log_id
 //      (+ readings/checklist/consumables); every visit carries event_id + customer; links existing tasks.
 //   2. recover_orphan_tasks(): create tasks for EventIDs not yet in our DB + link -> self-healing.
-// Supersedes the dead CompletedLogDetail flow. See docs/flows/sync/ion-visits.md.
-// NOTE: defaults are set for a one-time gap backfill (lookback=10, commit). The schedule passes its
-// own args (lookback=3, dry_run=false). Restore defaults to (7, true) after the backfill.
-export async function main(lookback_days = 10, dry_run = false) {
+// Supersedes the dead CompletedLogDetail flow (which produced 0 rows). See docs/flows/sync/ion-visits.md.
+// dry_run default writes nothing. The schedule passes {lookback_days:3, dry_run:false}.
+export async function main(lookback_days = 7, dry_run = true) {
   const ion = {
     loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"),
     username: await wmill.getVariable("f/ION/USERNAME"),

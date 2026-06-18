@@ -1,5 +1,6 @@
-summary: Daily log-detail visit sync. (Default temporarily lookback=10/commit
-  for a one-time gap backfill; schedule passes its own args.)
+summary: 'Daily log-detail visit sync: ingest_day_logs(window) +
+  recover_orphan_tasks(). Self-healing (every visit gets event_id + customer +
+  task). Replaces the dead CompletedLogDetail flow.'
 description: ''
 lock: '!inline f/ION/daily_visit_ingest.script.lock'
 has_on_behalf_of: false
