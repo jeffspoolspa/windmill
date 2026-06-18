@@ -46,6 +46,11 @@ ONE TASK PER ion_task_id (new data model — 2026-06)
   merged rows are left as-is (split separately via _lib/split_collapsed_tasks);
   this sync updates the right slots by matching ion_task_id.
 
+  Matching is two-tier: the schedule map (task_schedules.ion_task_id, covers
+  merged sub-ids) then the task's own 1:1 key (tasks.ion_task_id, covers
+  schedule-less stubs — e.g. orphan-recovered 'ion_log' rows). A matched task
+  with no slot for the id gets one minimal slot.
+
 STATUS FROM task_end (the stale-active fix — 2026-06)
   The "Active Only" report still carries recently-ENDED tasks (e.g. WILLS,
   task_end 2026-05-20, was in the feed yet expired). So status is derived from
@@ -73,7 +78,7 @@ MAPPING (report string -> column)
 LIFECYCLE
   - existing ion_task_id  -> update task (status from task_end, dates, owner,
                              external_data*) + update its slots (financial terms,
-                             active/ends from task_end)
+                             active/ends from task_end); create one slot if it had none
   - new ion_task_id       -> resolve service_location_id (ion_cust_id map, then
                              address+name, then address-only-if-unique); INSERT its
                              OWN task (ion_task_id + customer_id + status from
@@ -166,6 +171,7 @@ def _build_task_resolvers(conn):
       sl_by_ion_cust  : {ion_cust_id: sl_id}   (from existing tasks' external_data)
       sched_by_iontask: {ion_task_id: {"task_id":.., "schedule_ids":[..]}}
       merged_task_ids : set(task_id) that bundle >1 ion_task_id (don't refresh metadata)
+      task_by_iontask : {ion_task_id: task_id}  (the 1:1 key on maintenance.tasks)
       cust_by_ion_cust: {ion_cust_id: Customers.id}  (authoritative task owner)
     """
     sl_by_addr_name = {}
@@ -216,6 +222,19 @@ def _build_task_resolvers(conn):
 
     merged_task_ids = {t for t, ids in iontasks_per_task.items() if len(ids) > 1}
 
+    # ion_task_id -> task_id straight off maintenance.tasks (the 1:1 key). Catches
+    # tasks that carry an ion_task_id but have NO task_schedules row (e.g. the
+    # orphan-recovered 'ion_log' stubs) — invisible to sched_by_iontask, so without
+    # this they'd be mis-treated as NEW and collide on uq_tasks_ion_task_id.
+    task_by_iontask = {}
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT ion_task_id, id FROM maintenance.tasks
+            WHERE ion_task_id IS NOT NULL
+        """)
+        for ion_task_id, task_id in cur.fetchall():
+            task_by_iontask[str(ion_task_id)] = task_id
+
     # ion_cust_id -> QBO Customers.id. The AUTHORITATIVE per-task owner (ADR 006):
     # tasks.customer_id is sourced from this, not from the service_location owner
     # (the REGINA mis-attribution fix). Full coverage today — every active-report
@@ -235,6 +254,7 @@ def _build_task_resolvers(conn):
         "sl_by_ion_cust": sl_by_ion_cust,
         "sched_by_iontask": sched_by_iontask,
         "merged_task_ids": merged_task_ids,
+        "task_by_iontask": task_by_iontask,
         "cust_by_ion_cust": cust_by_ion_cust,
     }
 
@@ -287,6 +307,7 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
         "updated_slots": 0,
         "new_tasks_inserted": 0,
         "new_slots_inserted": 0,
+        "slots_created_for_existing": 0,  # matched task that had NO slot for this id
         "new_resolved_by": defaultdict(int),
         "new_task_examples": [],       # brand-new ION-task rows (1 per ion_task_id)
         "closed_examples": [],         # tasks soft-closed (gone from report)
@@ -333,11 +354,14 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                 ppv = price_cents if billing_method == "per_visit" else None
                 flat = price_cents if billing_method == "flat_rate_monthly" else None
 
+                # Match on the schedule map first (covers merged sub-ids), then fall
+                # back to the task's own 1:1 ion_task_id (covers schedule-less stubs).
                 existing = r["sched_by_iontask"].get(ion_task_id)
+                task_id = existing["task_id"] if existing else r["task_by_iontask"].get(ion_task_id)
+                has_sched = existing is not None
 
-                if existing:
+                if task_id is not None:
                     stats["matched_existing"] += 1
-                    task_id = existing["task_id"]
 
                     if task_id in r["merged_task_ids"]:
                         # A merged task bundles >1 ion_task_id; one report row can't
@@ -397,6 +421,29 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                          freq, slot_active, ends_on, source, ion_task_id),
                     )
                     stats["updated_slots"] += cur.rowcount
+
+                    # Matched task carries this ion_task_id but has NO schedule slot
+                    # for it (an orphan-recovered 'ion_log' stub now surfacing in the
+                    # active report) -> give it one minimal slot so routing + terms
+                    # have a home (upsert_schedules fills day/tech later), and so the
+                    # "no active slot -> closed" sweep doesn't immediately re-close it.
+                    if not has_sched:
+                        cur.execute(
+                            """INSERT INTO maintenance.task_schedules
+                                 (task_id, ion_task_id, frequency, billing_method,
+                                  price_per_visit_cents, flat_rate_monthly_cents,
+                                  active, starts_on, ends_on, external_source)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s,
+                                       COALESCE(%s, CURRENT_DATE), %s, %s)
+                               RETURNING id""",
+                            (task_id, ion_task_id, freq, billing_method,
+                             ppv, flat, slot_active, starts_on, ends_on, source),
+                        )
+                        new_sched_id = cur.fetchone()[0]
+                        stats["slots_created_for_existing"] += 1
+                        r["sched_by_iontask"][ion_task_id] = {
+                            "task_id": task_id, "schedule_ids": [new_sched_id],
+                        }
 
                 else:
                     # New ION task — needs a service_location to live on.
