@@ -1,15 +1,6 @@
 summary: recurring_tasks (login if stale -> fetch active recurring tasks ->
   upsert in-report maintenance.tasks/task_schedules)
-description: 'Ongoing ION -> maintenance task sync (analog of ion-visits /
-  ion-work-orders). Step a fetches the bulk "Active Only" recurring-tasks report
-  (reuses the cached session; chromium only if stale). Step b reconciles every
-  IN-REPORT task into maintenance.tasks + maintenance.task_schedules keyed 1:1
-  by ion_task_id: inserts new ION tasks (own row, ion_task_id + customer_id from
-  ion_cust_id), refreshes financial terms/owner, and keeps them active (closure
-  is by task_end + the no-visits-after-end invariant). It does NOT close on
-  report-absence — a task that DROPS from the report (ION gave it an end date)
-  is closed by f/ION/close_dropped_tasks, which fetches the real ION end date.
-  Defaults to dry_run=true (rolls back); schedule with dry_run=false.'
+description: ''
 value:
   modules:
     - id: a
@@ -34,8 +25,8 @@ value:
         type: script
         input_transforms:
           dry_run:
-            type: javascript
-            expr: flow_input.dry_run ?? true
+            type: static
+            value: false
           source:
             type: static
             value: ion
