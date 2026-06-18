@@ -1,0 +1,9 @@
+summary: 'ADR-006: recover orphan-visit tasks
+  (addLog->CustomerID->get_task_detail->upsert task+schedules+link visits).
+  Committing, idempotent, batched.'
+description: ''
+lock: '!inline f/ION/recover_orphan_tasks.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
