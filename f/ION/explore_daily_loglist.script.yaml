@@ -1,0 +1,8 @@
+summary: Probe ION by-day customerLogDetails.cfm shape (does the list carry
+  EventID+CustomerID?)
+description: ''
+lock: '!inline f/ION/explore_daily_loglist.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
