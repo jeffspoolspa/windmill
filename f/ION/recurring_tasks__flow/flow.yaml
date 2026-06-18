@@ -25,8 +25,8 @@ value:
         type: script
         input_transforms:
           dry_run:
-            type: static
-            value: false
+            type: javascript
+            expr: flow_input.dry_run ?? true
           source:
             type: static
             value: ion
@@ -48,9 +48,9 @@ schema:
   properties:
     dry_run:
       type: boolean
-      description: If true, perform all writes in one transaction then ROLL BACK and
-        just report stats. Set false to commit.
-      default: false
+      description: If true (default), perform all writes in one transaction then ROLL
+        BACK and just report stats. Set false to commit.
+      default: true
     filters:
       type: object
       description: Optional ION report filters (techid/OfficeID/serviceType). Empty =
