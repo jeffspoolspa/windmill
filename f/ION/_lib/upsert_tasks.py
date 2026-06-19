@@ -43,11 +43,9 @@ CLOSURE IS BY task_end — NOT report-absence (the stale-active fix — 2026-06)
     - task absent from the report -> NOT a closure signal. The "Active Only" report
       omits actively-serviced commercial/POA/flat accounts (LOST PLANTATION is
       serviced ~24x/week yet absent), and visits are ground truth — so absence
-      alone must never close a task. (This replaced the old close-on-absence sweep,
-      which would have wrongly closed those accounts every run.)
-  Genuine cancellations are caught by f/ION/close_dropped_tasks: it fetches the live
-  ION end date (get_task_detail) for tasks that dropped from the report and closes
-  them by it. See docs/operations/task-record-linkage.md.
+      alone must never close a task. (close_dropped_tasks fetches the live ION end
+      date for dropped tasks and closes by it.)
+  See docs/operations/task-record-linkage.md.
 
 CUSTOMER OWNER FROM ion_cust_id (ADR 006)
   tasks.customer_id is sourced from ION's customer id (ion_cust_id ->
@@ -65,9 +63,9 @@ MAPPING (report string -> column)
 
   FINANCIAL TERMS LIVE ON THE TASK (one ION contract = one rate). billing_method /
   price_per_visit_cents / flat_rate_monthly_cents are written to maintenance.tasks (the
-  authoritative home); the same values are still written to task_schedules for now so the current
-  billing/views readers keep working, until those migrate off the slots and the slot columns are
-  dropped. task_schedules then carry only routing: day_of_week, tech_employee_id, frequency, sequence.
+  authoritative home). task_schedules carry ONLY routing — day_of_week, tech_employee_id,
+  frequency, sequence; the slot financial columns were dropped once views + billing migrated to
+  the task (migration 20260619150000).
 
 SAFETY
   Defaults to dry_run=True: performs every INSERT/UPDATE inside one transaction,
@@ -418,43 +416,32 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                         )
                     stats["updated_tasks"] += cur.rowcount
 
-                    # Slots for this ion_task_id: financial terms + active/ends.
-                    # frequency set only when currently NULL (don't clobber biweekly_a/_b).
+                    # Slots for this ion_task_id are ROUTING ONLY (day/tech/frequency +
+                    # active/ends). Financial terms live on the task. frequency set only
+                    # when currently NULL (don't clobber biweekly_a/_b).
                     cur.execute(
                         """UPDATE maintenance.task_schedules
-                           SET billing_method=%s,
-                               price_per_visit_cents = CASE WHEN %s='per_visit'
-                                    THEN %s ELSE price_per_visit_cents END,
-                               flat_rate_monthly_cents = CASE WHEN %s='flat_rate_monthly'
-                                    THEN %s ELSE flat_rate_monthly_cents END,
-                               frequency = COALESCE(frequency, %s),
+                           SET frequency = COALESCE(frequency, %s),
                                active=%s,
                                ends_on=%s,
                                external_source=%s,
                                updated_at=now()
                            WHERE ion_task_id=%s""",
-                        (billing_method,
-                         billing_method, ppv,
-                         billing_method, flat,
-                         freq, slot_active, write_ends_on, source, ion_task_id),
+                        (freq, slot_active, write_ends_on, source, ion_task_id),
                     )
                     stats["updated_slots"] += cur.rowcount
 
                     # Matched task carries this ion_task_id but has NO schedule slot
                     # for it (an orphan-recovered 'ion_log' stub now surfacing in the
-                    # active report) -> give it one minimal slot so routing + terms
-                    # have a home (upsert_schedules fills day/tech later).
+                    # active report) -> give it one minimal slot so routing has a home
+                    # (upsert_schedules fills day/tech later).
                     if not has_sched:
                         cur.execute(
                             """INSERT INTO maintenance.task_schedules
-                                 (task_id, ion_task_id, frequency, billing_method,
-                                  price_per_visit_cents, flat_rate_monthly_cents,
-                                  active, starts_on, ends_on, external_source)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s,
-                                       COALESCE(%s, CURRENT_DATE), %s, %s)
+                                 (task_id, ion_task_id, frequency, active, starts_on, ends_on, external_source)
+                               VALUES (%s, %s, %s, %s, COALESCE(%s, CURRENT_DATE), %s, %s)
                                RETURNING id""",
-                            (task_id, ion_task_id, freq, billing_method,
-                             ppv, flat, slot_active, starts_on, write_ends_on, source),
+                            (task_id, ion_task_id, freq, slot_active, starts_on, write_ends_on, source),
                         )
                         new_sched_id = cur.fetchone()[0]
                         stats["slots_created_for_existing"] += 1
@@ -516,14 +503,10 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
 
                     cur.execute(
                         """INSERT INTO maintenance.task_schedules
-                             (task_id, ion_task_id, frequency, billing_method,
-                              price_per_visit_cents, flat_rate_monthly_cents,
-                              active, starts_on, ends_on, external_source)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s,
-                                   COALESCE(%s, CURRENT_DATE), %s, %s)
+                             (task_id, ion_task_id, frequency, active, starts_on, ends_on, external_source)
+                           VALUES (%s, %s, %s, %s, COALESCE(%s, CURRENT_DATE), %s, %s)
                            RETURNING id""",
-                        (new_task_id, ion_task_id, freq, billing_method,
-                         ppv, flat, slot_active, starts_on, write_ends_on, source),
+                        (new_task_id, ion_task_id, freq, slot_active, starts_on, write_ends_on, source),
                     )
                     new_sched_id = cur.fetchone()[0]
                     stats["new_slots_inserted"] += 1
