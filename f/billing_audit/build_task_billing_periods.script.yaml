@@ -1,6 +1,6 @@
-summary: Build task_billing_periods (invoice promises) - v3 expected model
-description: flat->flat; per_visit w/rate->rate x billable days; per_visit
-  no-rate->sum serviceable prices. QC visits non-billable.
+summary: Build task_billing_periods (invoice promises) — task-driven; financial
+  terms read from the task; day-price model; flat-task effective months
+description: ''
 lock: '!inline f/billing_audit/build_task_billing_periods.script.lock'
 has_on_behalf_of: false
 kind: script
