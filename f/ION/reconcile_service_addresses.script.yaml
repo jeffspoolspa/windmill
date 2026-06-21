@@ -1,0 +1,7 @@
+summary: Land ION's recurring-tasks city/state/zip onto service_locations (ADR
+  007 address authority)
+description: ''
+lock: '!inline f/ION/reconcile_service_addresses.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
