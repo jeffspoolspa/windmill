@@ -164,9 +164,14 @@ def main(limit: int = 20000, maint_only: bool = False):
     Resolve active service_locations to a Google place_id + coordinate + canonical
     address (ADR 005). Server-side, resumable (only touches place_id IS NULL).
 
-    City hint: when the service address has no city (street-only), the customer's
-    BILLING city/state/zip are used as the geocode hint to recover a rooftop match;
-    the CANONICAL city/state/zip from Google's result are what gets stored.
+    City is REQUIRED (ADR 007). A bare street, geocoded with the service-area bounds
+    bias, resolves to a SAME-NAMED street in a wrong major-GA city (a Sea Island pool
+    -> "Savannah") and gets confidently stamped 'ok'. So a row with no service city is
+    NOT guessed -- it's flagged 'needs_review' for manual / ION backfill. Billing is
+    NOT used as a fallback hint: it's the customer's MAILING address (often a PO box in
+    another town, e.g. an Eastman PO box for a Sea Island pool), which produced exactly
+    these wrong pins. ION's recurring-tasks report carries the real city/ZIP; the
+    reconciler lands it on the row so this geocoder has a city to trust.
 
     Precision gate (ADR 005): a place_id is stored ONLY for a precise match —
     location_type ROOFTOP or RANGE_INTERPOLATED and NOT partial_match. A coarse
@@ -198,10 +203,8 @@ def main(limit: int = 20000, maint_only: bool = False):
         if maint_only else ""
     )
     cur.execute(f"""
-        SELECT sl.id, sl.street, sl.city, sl.state, sl.zip,
-               c.city, c.state, c.zip
+        SELECT sl.id, sl.street, sl.city, sl.state, sl.zip
         FROM public.service_locations sl
-        JOIN public."Customers" c ON c.id = sl.account_id
         WHERE sl.is_active = true AND sl.place_id IS NULL
           AND sl.street IS NOT NULL AND length(btrim(sl.street)) >= 3
           {maint_clause}
@@ -214,10 +217,22 @@ def main(limit: int = 20000, maint_only: bool = False):
     c = {"ok": 0, "fuzzy": 0, "needs_review": 0, "out_of_area": 0, "collision": 0, "zero": 0, "error": 0}
     bounds = f'{SERVICE_BBOX["min_lat"]},{SERVICE_BBOX["min_lng"]}|{SERVICE_BBOX["max_lat"]},{SERVICE_BBOX["max_lng"]}'
 
-    for i, (loc_id, s_street, s_city, s_state, s_zip, b_city, b_state, b_zip) in enumerate(rows, 1):
-        city = s_city or b_city           # billing city hint when service is street-only
-        state = s_state or b_state or "GA"
-        zip_code = s_zip or b_zip
+    for i, (loc_id, s_street, s_city, s_state, s_zip) in enumerate(rows, 1):
+        # City is required (ADR 007). No service city -> don't guess: a bare street
+        # bounds-biases to a same-named street in a wrong major-GA city and would be
+        # stamped 'ok'. Flag for manual / ION backfill instead. (No billing fallback --
+        # billing is the mailing address, which caused exactly these wrong pins.)
+        city = (s_city or "").strip()
+        if not city:
+            cur.execute(
+                "UPDATE public.service_locations SET geocode_status='needs_review', "
+                "geocode_source='google', duplicate_of_location_id=NULL, updated_at=now() WHERE id=%s",
+                (loc_id,),
+            )
+            c["needs_review"] += 1
+            continue
+        state = s_state or "GA"
+        zip_code = s_zip
         parts = [s_street]
         if city:
             parts.append(city)

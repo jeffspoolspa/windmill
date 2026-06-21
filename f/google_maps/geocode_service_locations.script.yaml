@@ -1,5 +1,5 @@
 summary: Resolve service_locations to Google place_id + coordinate (canonical
-  address list, ADR 005)
+  address list, ADR 005/007)
 description: ''
 lock: '!inline f/google_maps/geocode_service_locations.script.lock'
 has_on_behalf_of: false
