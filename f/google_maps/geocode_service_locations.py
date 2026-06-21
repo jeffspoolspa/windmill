@@ -30,6 +30,14 @@ def _norm(s):
     return " ".join(_ABBR.get(t, t) for t in s.split()).strip()
 
 
+def _norm_city(s):
+    # City names must NOT get the street-abbrev expansion: "St Simons" would become
+    # "STREET SIMONS" and fail the city-agreement guard against Google's "Saint
+    # Simons Island" / "St. Simons Island". Uppercase + strip punctuation + collapse
+    # whitespace only -- no _ABBR mapping.
+    return " ".join(re.sub(r"[^A-Za-z0-9 ]", " ", (s or "").upper()).split())
+
+
 def _ratio(a, b):
     # 1 - normalized Levenshtein distance; 1.0 == identical strings.
     if not a and not b:
@@ -61,7 +69,7 @@ def fuzzy_resolve(api_key, street, city, state, zip_code):
     m = re.match(r"\s*(\d+)", clean)
     in_num = m.group(1) if m else None
     in_street = _norm(re.sub(r"^\s*\d+", "", clean))
-    in_city = _norm(city)
+    in_city = _norm_city(city)
     try:
         fp = requests.get(
             "https://maps.googleapis.com/maps/api/place/findplacefromtext/json",
@@ -95,7 +103,7 @@ def fuzzy_resolve(api_key, street, city, state, zip_code):
         return None
     if _ratio(in_street, _norm(g("route"))) < 0.72:
         return None
-    cc_n = _norm(cand_city)
+    cc_n = _norm_city(cand_city)
     if not (in_city and cc_n and (in_city in cc_n or cc_n in in_city or _ratio(in_city, cc_n) >= 0.7)):
         return None
     loc = res["geometry"]["location"]

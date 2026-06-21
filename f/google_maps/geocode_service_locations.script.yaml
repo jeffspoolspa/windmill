@@ -4,4 +4,4 @@ description: ''
 lock: '!inline f/google_maps/geocode_service_locations.script.lock'
 has_on_behalf_of: false
 kind: script
-schema: null
+schema: {}
