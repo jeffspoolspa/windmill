@@ -1,0 +1,10 @@
+summary: "Part A: edit an existing ION task's per-day tech (tech reassignment +
+  day move) via ION write-back (ADR 002). day_assignments = {dow 0=Sun..6=Sat:
+  ION emp id}; only changed days are written; dry_run-first returns the POST
+  payload + diff + roster."
+description: ''
+lock: '!inline f/ION/api/upsert_task_schedule.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
