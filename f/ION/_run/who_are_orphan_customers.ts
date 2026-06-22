@@ -12,10 +12,9 @@ function cookieHeader(s: any) {
     .map((c: any) => `${c.name}=${c.value}`).join("; ")
 }
 
-// READ-ONLY: who are these ION customers? Fetch the customer detail page, STRIP <script>/<style>
-// (the page is JS-heavy; the contact info is server-rendered underneath), surface name/email/phone +
-// a clean visible-text snippet. No DB writes.
-export async function main(ids: string[] = ["2408772","2463288","2499559","2545478","2545500"]) {
+// READ-ONLY: who is this ION customer? Fetch the detail page, STRIP <script>/<style> (the page is
+// JS-heavy; the contact info is server-rendered underneath), surface name/email/phone + snippet.
+export async function main(ids: string[] = ["1126541"]) {
   const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
   const s = await getOrRefreshSession(ion)
   const o = s.ionOrigin
@@ -31,16 +30,10 @@ export async function main(ids: string[] = ["2408772","2463288","2499559","25454
       const root = parse(html)
       root.querySelectorAll("script, style").forEach((n: any) => n.remove())
       const text = root.text.replace(/\s+/g, " ").trim()
-      // input values often hold first/last name, email, address fields
-      const inputs = root.querySelectorAll("input")
-        .map((i: any) => ({ name: i.getAttribute("name"), value: (i.getAttribute("value") || "").trim() }))
-        .filter((i: any) => i.value && i.name && /name|email|addr|city|state|zip|phone/i.test(i.name))
-        .slice(0, 20)
       out.push({
         id,
-        emails: [...new Set((html.match(emailRe) || []))].slice(0, 4),
+        emails: [...new Set((html.match(emailRe) || []))].filter((e: string) => !/placs\.net|medtronic|volmedia/i.test(e)).slice(0, 3),
         phones: [...new Set((text.match(phoneRe) || []))].slice(0, 4),
-        inputs,
         snippet: text.slice(0, 700),
       })
     } catch (e: any) {

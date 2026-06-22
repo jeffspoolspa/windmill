@@ -87,7 +87,7 @@ locks:
   f/ION/_run/ingest_may_v4: e3a916bfab7c1be47ca8eaf76ea494c111b24e8c2432b627e82b3977bd3d3d2a
   f/ION/_run/ingest_may_v5: c81761bcd702d37fb2a48a76c7ad1aac20ece43c2ed5cc14f80814d2350f518d
   f/ION/_run/recover_grid_tech: d233858e35e82074af18a2584f60d69d04f0d5fb8e9ed5a644ef0b4d758ae969
-  f/ION/_run/who_are_orphan_customers: b8271e052e85bb437aef50ffad3961e9c5b44cc2db7f228f93bc4343dec3c5f1
+  f/ION/_run/who_are_orphan_customers: 03e9da33f22b9e952d2a3c89d9617ffc330dfec6e429765cacb92d71f3a75b74
   f/ION/api/get_customer_tasks: 5f42381db02071b3753b534c2dac5464ba14be26de453219205dc374762e0fc1
   f/ION/api/get_log_detail: 685fa727d2dcfd465edca0bc968f33083151588b20ca3ed31a02cb5a39e60de1
   f/ION/api/get_recurring_tasks: 5c802795062293a2b8f1fcb9c683b43e0efb99e51c49da6e2eb2aafe967e7b16
