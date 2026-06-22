@@ -43,15 +43,21 @@ CLOSURE IS BY task_end — NOT report-absence (the stale-active fix — 2026-06)
     - task absent from the report -> NOT a closure signal. The "Active Only" report
       omits actively-serviced commercial/POA/flat accounts (LOST PLANTATION is
       serviced ~24x/week yet absent), and visits are ground truth — so absence
-      alone must never close a task. (close_dropped_tasks fetches the live ION end
-      date for dropped tasks and closes by it.)
-  See docs/operations/task-record-linkage.md.
+      alone must never close a task. (This replaced the old close-on-absence sweep,
+      which would have wrongly closed those accounts every run.)
+  Genuine cancellations are caught while the task is still in the report with a
+  past task_end. A fully-dropped, no-longer-visited task is left for a separate
+  reviewed cancellation pass. See docs/operations/task-record-linkage.md.
 
-CUSTOMER OWNER FROM ion_cust_id (ADR 006)
+CUSTOMER OWNER FROM ion_cust_id (ADR 006), NO LOCATION ON THE TASK (ADR 007 §9)
   tasks.customer_id is sourced from ION's customer id (ion_cust_id ->
   Customers.ion_cust_id), the authoritative per-task owner — not from the service
-  location's account owner (the REGINA mis-attribution failure mode). Falls back
-  to the location owner only when ion_cust_id can't resolve.
+  location's account owner (the REGINA mis-attribution failure mode). A task carries
+  NO service_location_id (the column is being dropped — a contract can outlive an
+  address change; the visit's location is the customer's, resolved by
+  public.reconcile_visit_locations). So there is no location-owner fallback: a new
+  row whose ion_cust_id can't resolve to a Customer is left unresolved (full coverage
+  today makes this rare).
 
 MAPPING (report string -> column)
   billingType  -> billing_method: 'flat_rate_monthly' if 'FLAT' in upper else 'per_visit'
@@ -81,7 +87,7 @@ import json
 import re
 
 # Reuse the proven resolver primitives (no re-port -> no drift vs visits sync).
-from f.ION._lib.upsert import _connect, normalize_address, normalize_customer_name
+from f.ION._lib.upsert import _connect  # sl-resolution removed (ADR 007 §9): a task carries customer_id, not a location
 
 
 # ─── value derivation ─────────────────────────────────────────────────────────
@@ -139,45 +145,12 @@ def parse_ion_date(s):
 def _build_task_resolvers(conn):
     """
     Returns:
-      sl_by_addr_name   : {(norm_addr, norm_name): sl_id}
-      sl_by_addr_only   : {norm_addr: [sl_id, ...]}
-      sl_by_ion_cust    : {ion_cust_id: sl_id}   (from existing tasks' external_data)
       sched_by_iontask  : {ion_task_id: {"task_id":.., "schedule_ids":[..]}}
       merged_task_ids   : set(task_id) that bundle >1 ion_task_id
       task_by_iontask   : {ion_task_id: task_id}  (the 1:1 key on maintenance.tasks)
       last_visit_by_task: {task_id: 'YYYY-MM-DD'} (max visit_date; the closure invariant)
       cust_by_ion_cust  : {ion_cust_id: Customers.id}  (authoritative task owner)
     """
-    sl_by_addr_name = {}
-    sl_by_addr_only = defaultdict(list)
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT sl.id, sl.street, c.display_name
-            FROM public.service_locations sl
-            JOIN public."Customers" c ON c.id = sl.account_id
-            WHERE sl.is_active
-        """)
-        for sl_id, street, display_name in cur.fetchall():
-            n_addr = normalize_address(street or "")
-            if not n_addr:
-                continue
-            n_name = normalize_customer_name(display_name or "")
-            sl_by_addr_name[(n_addr, n_name)] = sl_id
-            sl_by_addr_only[n_addr].append(sl_id)
-
-    # ion_cust_id -> service_location_id, learned from existing ion tasks.
-    sl_by_ion_cust = {}
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT external_data->>'ion_cust_id' AS ion_cust_id, service_location_id
-            FROM maintenance.tasks
-            WHERE external_source = 'ion'
-              AND external_data->>'ion_cust_id' IS NOT NULL
-        """)
-        for ion_cust_id, sl_id in cur.fetchall():
-            # First wins; multi-task customers share a service_location anyway.
-            sl_by_ion_cust.setdefault(ion_cust_id, sl_id)
-
     # ion_task_id -> {task_id, schedule_ids[]}  +  detect merged tasks.
     sched_by_iontask = {}
     iontasks_per_task = defaultdict(set)
@@ -236,33 +209,12 @@ def _build_task_resolvers(conn):
             cust_by_ion_cust.setdefault(str(ion_cust_id), cust_id)
 
     return {
-        "sl_by_addr_name": sl_by_addr_name,
-        "sl_by_addr_only": sl_by_addr_only,
-        "sl_by_ion_cust": sl_by_ion_cust,
         "sched_by_iontask": sched_by_iontask,
         "merged_task_ids": merged_task_ids,
         "task_by_iontask": task_by_iontask,
         "last_visit_by_task": last_visit_by_task,
         "cust_by_ion_cust": cust_by_ion_cust,
     }
-
-
-def _resolve_sl(resolvers, ion_cust_id, addr, name):
-    # 1) known ION customer -> its service_location
-    sl = resolvers["sl_by_ion_cust"].get(ion_cust_id)
-    if sl is not None:
-        return sl, "ion_cust_id"
-    # 2) address + name
-    n_addr = normalize_address(addr or "")
-    if n_addr:
-        n_name = normalize_customer_name(name or "")
-        if (n_addr, n_name) in resolvers["sl_by_addr_name"]:
-            return resolvers["sl_by_addr_name"][(n_addr, n_name)], "addr_name"
-        # 3) address-only if unique
-        cands = resolvers["sl_by_addr_only"].get(n_addr, [])
-        if len(cands) == 1:
-            return cands[0], "addr_only"
-    return None, None
 
 
 def _build_external_data(row, slot_count=1):
@@ -433,8 +385,8 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
 
                     # Matched task carries this ion_task_id but has NO schedule slot
                     # for it (an orphan-recovered 'ion_log' stub now surfacing in the
-                    # active report) -> give it one minimal slot so routing has a home
-                    # (upsert_schedules fills day/tech later).
+                    # active report) -> give it one minimal slot so routing + terms
+                    # have a home (upsert_schedules fills day/tech later).
                     if not has_sched:
                         cur.execute(
                             """INSERT INTO maintenance.task_schedules
@@ -450,12 +402,12 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                         }
 
                 else:
-                    # New ION task — needs a service_location to live on.
-                    sl_id, how = _resolve_sl(
-                        r, row.get("ionCustId"),
-                        row.get("serviceAddress"), row.get("customerName"),
-                    )
-                    if sl_id is None:
+                    # New ION task. ADR 007 §9: a task carries customer_id, NOT a service location
+                    # (the visit's location is the customer's, via reconcile_visit_locations). The
+                    # authoritative owner is ION's customer id (ion_cust_id -> Customers, ADR 006);
+                    # with no location there is no account_id fallback, so a task we can't attribute
+                    # to a customer is left unresolved (full ion_cust_id coverage makes this rare).
+                    if cust_id is None:
                         stats["unresolved_new"] += 1
                         if len(stats["unresolved_examples"]) < 15:
                             stats["unresolved_examples"].append({
@@ -467,24 +419,19 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                             })
                         continue
 
-                    stats["new_resolved_by"][how] += 1
+                    stats["new_resolved_by"]["ion_cust_id"] += 1
 
                     # New data model: each ION task is its OWN tasks row, keyed 1:1 by
-                    # ion_task_id (uq_tasks_ion_task_id). Several ION tasks may share a
-                    # location — the one-open-per-loc guard now applies only to manual
-                    # (ion_task_id IS NULL) tasks. customer_id is the ION owner
-                    # (ion_cust_id -> Customers), falling back to the location owner.
+                    # ion_task_id (uq_tasks_ion_task_id), carrying customer_id (the ION owner).
                     cur.execute(
                         """INSERT INTO maintenance.tasks
-                             (service_location_id, ion_task_id, customer_id, status,
+                             (ion_task_id, customer_id, status,
                               starts_on, ends_on, billing_method, price_per_visit_cents,
                               flat_rate_monthly_cents, external_source, external_data)
-                           VALUES (%s, %s,
-                                   COALESCE(%s::bigint,
-                                     (SELECT account_id FROM public.service_locations WHERE id=%s)),
+                           VALUES (%s, %s::bigint,
                                    %s, COALESCE(%s, CURRENT_DATE), %s, %s, %s, %s, %s, %s::jsonb)
                            RETURNING id""",
-                        (sl_id, ion_task_id, cust_id, sl_id, task_status,
+                        (ion_task_id, cust_id, task_status,
                          starts_on, write_ends_on, billing_method, ppv, flat,
                          source, json.dumps(_build_external_data(row))),
                     )
@@ -498,7 +445,7 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                             "city": row.get("city"),
                             "service_type": row.get("serviceType"),
                             "status": task_status,
-                            "resolved_by": how,
+                            "resolved_by": "ion_cust_id",
                         })
 
                     cur.execute(

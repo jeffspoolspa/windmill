@@ -1,6 +1,7 @@
 summary: 'Recurring-task sync: upsert ION RecurringTask rows into
-  maintenance.tasks/task_schedules (1 task per ion_task_id; financial terms on
-  the task; slots routing-only; close by task_end + invariant; dry_run default)'
+  maintenance.tasks/task_schedules (1 task per ion_task_id; customer_id from
+  ion_cust_id; NO service_location_id per ADR 007 §9; financial terms on the
+  task; close by task_end + invariant; dry_run default)'
 description: ''
 lock: '!inline f/ION/_lib/upsert_tasks.script.lock'
 has_on_behalf_of: false
