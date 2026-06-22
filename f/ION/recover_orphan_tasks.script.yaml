@@ -1,7 +1,8 @@
-summary: 'Recover orphan-visit tasks. INVARIANT: every orphan visit gets a task;
-  an unresolvable customer -> customer_id=NULL + external_data.needs_fix (never
-  skipped). Task has no service_location_id (ADR 007 §9). Committing,
-  idempotent, batched, advisory-locked. Runs on chromium (ION login).'
+summary: 'Recover orphan-visit tasks (every visit gets a task). SELF-HEAL: an
+  unmatched ION CustomerID adopts an unlinked Customer by email/name/phone (sets
+  ion_cust_id); only a truly-new customer stays NULL + needs_fix. No
+  service_location_id (ADR 007 §9). Committing, batched, advisory-locked.
+  chromium.'
 description: ''
 lock: '!inline f/ION/recover_orphan_tasks.script.lock'
 has_on_behalf_of: false
