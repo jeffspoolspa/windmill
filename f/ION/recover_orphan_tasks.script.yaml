@@ -1,7 +1,7 @@
-summary: "ADR-006/007 §9: recover orphan-visit tasks. Creates the task with
-  customer_id only (no service_location_id); the VISIT's location is set from
-  the customer's confirmed link-table address. Committing, idempotent, batched,
-  advisory-locked (safe to schedule)."
+summary: 'Recover orphan-visit tasks. INVARIANT: every orphan visit gets a task;
+  an unresolvable customer -> customer_id=NULL + external_data.needs_fix (never
+  skipped). Task has no service_location_id (ADR 007 §9). Committing,
+  idempotent, batched, advisory-locked.'
 description: ''
 lock: '!inline f/ION/recover_orphan_tasks.script.lock'
 has_on_behalf_of: false

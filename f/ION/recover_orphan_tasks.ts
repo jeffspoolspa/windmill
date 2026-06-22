@@ -21,11 +21,13 @@ const mapFreq = (r: string) => {
 }
 const LOCK_KEY = 916273
 
-// Recover task-less ("orphan") visits, EventID-driven. Per distinct ion_task_id: read the customer
-// from the service log (addLog -> CustomerID), pull task detail, create the task (customer_id only --
-// ADR 007 §9: a task carries NO service_location_id) + per-day schedules, and link the visits
-// (task_id + customer_id + ion_cust_id; the VISIT's service_location_id is set from the customer's
-// confirmed link-table address). Committing, idempotent (skips EventIDs whose task exists), batched
+// Recover task-less ("orphan") visits, EventID-driven. INVARIANT: every orphan visit MUST get a task
+// (else it is silently unbillable). Per distinct ion_task_id: read the ION CustomerID from the service
+// log (addLog), pull task detail, create the task and link the visits. A task carries NO
+// service_location_id (ADR 007 §9); customer_id is the owner via ion_cust_id. If the ION CustomerID is
+// missing or unmatched, the task is STILL created with customer_id = NULL and FLAGGED
+// (external_data.needs_fix = 'customer_unmatched' | 'no_customerid_on_log') for manual repair -- the
+// visit is linked regardless. Committing, idempotent (skips EventIDs whose task exists), batched
 // highest-visit-first, advisory-locked so concurrent / scheduled runs serialize (get_task_detail
 // primes the shared ION session, so they MUST NOT overlap).
 export async function main(limit = 250) {
@@ -68,38 +70,54 @@ export async function main(limit = 250) {
     const get = (u: string) => fetch(`${o}${u}`, { headers: H, redirect: "manual" }).then((x) => x.text())
 
     const today = new Date().toISOString().slice(0, 10)
-    const stats: any = { batch: targets.length, tasks_created: 0, tasks_created_no_location: 0, schedules_created: 0, visits_linked: 0, customer_unmatched: 0, no_customerid_on_log: 0, errors: 0, examples: [] }
+    const stats: any = { batch: targets.length, tasks_created: 0, tasks_created_no_location: 0, tasks_created_needs_customer: 0, schedules_created: 0, visits_linked: 0, customer_unmatched: 0, no_customerid_on_log: 0, errors: 0, examples: [] }
 
     for (const t of targets) {
       const eid = String(t.ion_task_id)
       try {
         const logHtml = await get(`/tasks/addLog.cfm?LogID=${t.log_id}&Source=ServiceLog`)
-        const ionCust = parse(logHtml).querySelector('input[name="CustomerID"]')?.getAttribute("value") || (logHtml.match(/CustomerID=(\d+)/) || [])[1]
-        if (!ionCust) { stats.no_customerid_on_log++; continue }
-        const customerId = custByIon.get(String(ionCust)) ?? null
-        if (customerId == null) { stats.customer_unmatched++; continue } // can't attribute a task with no owner
-        const slId = slByCust.get(customerId) ?? null // the customer's confirmed location -> the VISIT's location (may be null -> resolved later)
+        const ionCust = parse(logHtml).querySelector('input[name="CustomerID"]')?.getAttribute("value") || (logHtml.match(/CustomerID=(\d+)/) || [])[1] || null
+        // INVARIANT: a missing/unmatched ION customer does NOT skip the visit. We still create the task
+        // (customer_id = NULL) and FLAG it for fixing; the visit is linked regardless.
+        if (!ionCust) stats.no_customerid_on_log++
+        const customerId = ionCust ? (custByIon.get(String(ionCust)) ?? null) : null
+        if (ionCust && customerId == null) stats.customer_unmatched++
+        const slId = customerId != null ? (slByCust.get(customerId) ?? null) : null
 
         const ex = await sql`select id from maintenance.tasks where ion_task_id = ${eid} limit 1`
         let tid: any
         if (ex.length) {
           tid = ex[0].id
         } else {
-          // ADR 007 §9: the task carries NO service_location_id (a contract can outlive an address
-          // change); customer_id is the owner. The visit's location comes from the customer (slId).
-          const { detail } = await getTaskDetail(s, eid, ionCust)
-          const startsOn = detail.startsOn || null
-          const endsOn = detail.endsOn || null
+          // ADR 007 §9: the task carries customer_id (best-effort) + NO service_location_id. Pull task
+          // detail when we have a CustomerID to navigate ION; otherwise create a minimal stub. A task
+          // with customer_id IS NULL is itself the flag that it needs a customer matched.
+          let startsOn: any = null, endsOn: any = null, perDayTech: any[] = [], serviceType = "", recurrence = ""
+          if (ionCust) {
+            try {
+              const { detail } = await getTaskDetail(s, eid, ionCust)
+              startsOn = detail.startsOn || null
+              endsOn = detail.endsOn || null
+              perDayTech = detail.perDayTech || []
+              serviceType = detail.serviceType?.text || ""
+              recurrence = detail.serviceRepeat?.text || ""
+            } catch (e: any) {
+              if (stats.examples.length < 12) stats.examples.push({ eid, note: "get_task_detail failed; created stub", error: String(e?.message ?? e).slice(0, 120) })
+            }
+          }
           const status = endsOn && endsOn < today ? "closed" : "active"
-          const ext = { ion_cust_id: String(ionCust), service_type: detail.serviceType?.text || "", recurrence: detail.serviceRepeat?.text || "", captured: "orphan_recovery" }
+          const needsFix = customerId == null
+          const ext: any = { ion_cust_id: ionCust ? String(ionCust) : null, service_type: serviceType, recurrence, captured: "orphan_recovery" }
+          if (needsFix) ext.needs_fix = ionCust ? "customer_unmatched" : "no_customerid_on_log"
           tid = (await sql`
             insert into maintenance.tasks (customer_id, ion_task_id, status, starts_on, ends_on, external_source, external_data)
             values (${customerId}, ${eid}, ${status}, coalesce(${startsOn}::date, current_date), ${endsOn}::date, 'ion_log', ${sql.json(ext)})
             returning id`)[0].id
           stats.tasks_created++
-          if (slId == null) stats.tasks_created_no_location++
-          const freq = mapFreq(detail.serviceRepeat?.text)
-          for (const d of (detail.perDayTech || []).filter((x: any) => x.techId)) {
+          if (needsFix) stats.tasks_created_needs_customer++
+          else if (slId == null) stats.tasks_created_no_location++
+          const freq = mapFreq(recurrence)
+          for (const d of perDayTech.filter((x: any) => x.techId)) {
             await sql`
               insert into maintenance.task_schedules (task_id, ion_task_id, day_of_week, tech_employee_id, frequency, active, starts_on, ends_on, external_source)
               values (${tid}, ${eid}, ${d.dow}, ${resolveTech(d.techName)}, ${freq}, ${status !== "closed"}, coalesce(${startsOn}::date, current_date), ${endsOn}::date, 'ion_log')`
@@ -107,7 +125,10 @@ export async function main(limit = 250) {
           }
         }
         const upd = await sql`
-          update maintenance.visits set task_id = ${tid}, customer_id = ${customerId}, ion_cust_id = ${String(ionCust)}, service_location_id = ${slId}
+          update maintenance.visits set task_id = ${tid},
+              customer_id = coalesce(${customerId}, maintenance.visits.customer_id),
+              ion_cust_id = coalesce(${ionCust ? String(ionCust) : null}, maintenance.visits.ion_cust_id),
+              service_location_id = coalesce(${slId}, maintenance.visits.service_location_id)
           where ion_task_id = ${eid} and task_id is null`
         stats.visits_linked += upd.count
       } catch (e: any) {
