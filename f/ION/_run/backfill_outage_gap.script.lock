@@ -1,8 +1,8 @@
 {
   "dependencies": {
     "playwright": "1.40.0",
-    "windmill-client": "latest",
     "postgres": "latest",
+    "windmill-client": "latest",
     "node-html-parser": "latest"
   }
 }
