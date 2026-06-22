@@ -1,9 +1,10 @@
 summary: 'Recover orphan-visit tasks. INVARIANT: every orphan visit gets a task;
   an unresolvable customer -> customer_id=NULL + external_data.needs_fix (never
   skipped). Task has no service_location_id (ADR 007 §9). Committing,
-  idempotent, batched, advisory-locked.'
+  idempotent, batched, advisory-locked. Runs on chromium (ION login).'
 description: ''
 lock: '!inline f/ION/recover_orphan_tasks.script.lock'
 has_on_behalf_of: false
 kind: script
 schema: null
+tag: chromium
