@@ -1,8 +1,9 @@
-summary: 'ADR-006: recover orphan-visit tasks. Committing, idempotent, batched,
-  advisory-locked (safe to schedule).'
+summary: "ADR-006/007 §9: recover orphan-visit tasks. Creates the task with
+  customer_id only (no service_location_id); the VISIT's location is set from
+  the customer's confirmed link-table address. Committing, idempotent, batched,
+  advisory-locked (safe to schedule)."
 description: ''
 lock: '!inline f/ION/recover_orphan_tasks.script.lock'
 has_on_behalf_of: false
 kind: script
 schema: null
-tag: chromium

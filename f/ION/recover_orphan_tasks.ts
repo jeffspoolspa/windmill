@@ -22,10 +22,12 @@ const mapFreq = (r: string) => {
 const LOCK_KEY = 916273
 
 // Recover task-less ("orphan") visits, EventID-driven. Per distinct ion_task_id: read the customer
-// from the service log (addLog -> CustomerID), pull task detail, create the task + per-day schedules,
-// link the visits (task_id + customer_id + ion_cust_id + service_location_id). Committing, idempotent
-// (skips EventIDs whose task exists), batched highest-visit-first, advisory-locked so concurrent /
-// scheduled runs serialize (get_task_detail primes the shared ION session, so they MUST NOT overlap).
+// from the service log (addLog -> CustomerID), pull task detail, create the task (customer_id only --
+// ADR 007 §9: a task carries NO service_location_id) + per-day schedules, and link the visits
+// (task_id + customer_id + ion_cust_id; the VISIT's service_location_id is set from the customer's
+// confirmed link-table address). Committing, idempotent (skips EventIDs whose task exists), batched
+// highest-visit-first, advisory-locked so concurrent / scheduled runs serialize (get_task_detail
+// primes the shared ION session, so they MUST NOT overlap).
 export async function main(limit = 250) {
   const cfg = (await wmill.getResource("u/carter/supabase")) as any
   const conn = { host: cfg.host, port: cfg.port, database: cfg.dbname, username: cfg.user, password: cfg.password, ssl: "require" as const, prepare: false }
@@ -58,7 +60,6 @@ export async function main(limit = 250) {
         from public.customer_service_addresses csa
         join public.service_locations sl on sl.id = csa.service_location_id
         where csa.is_active group by csa.customer_id`).map((x: any) => [Number(x.customer_id), Number(x.sl)]))
-    const openLocs = new Set((await sql`select distinct service_location_id from maintenance.tasks where status in ('active','paused') and service_location_id is not null`).map((x: any) => Number(x.service_location_id)))
 
     const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
     const s = await getOrRefreshSession(ion)
@@ -67,7 +68,7 @@ export async function main(limit = 250) {
     const get = (u: string) => fetch(`${o}${u}`, { headers: H, redirect: "manual" }).then((x) => x.text())
 
     const today = new Date().toISOString().slice(0, 10)
-    const stats: any = { batch: targets.length, tasks_created: 0, schedules_created: 0, visits_linked: 0, customer_unmatched: 0, no_service_location: 0, no_customerid_on_log: 0, errors: 0, examples: [] }
+    const stats: any = { batch: targets.length, tasks_created: 0, tasks_created_no_location: 0, schedules_created: 0, visits_linked: 0, customer_unmatched: 0, no_customerid_on_log: 0, errors: 0, examples: [] }
 
     for (const t of targets) {
       const eid = String(t.ion_task_id)
@@ -76,27 +77,27 @@ export async function main(limit = 250) {
         const ionCust = parse(logHtml).querySelector('input[name="CustomerID"]')?.getAttribute("value") || (logHtml.match(/CustomerID=(\d+)/) || [])[1]
         if (!ionCust) { stats.no_customerid_on_log++; continue }
         const customerId = custByIon.get(String(ionCust)) ?? null
-        if (customerId == null) stats.customer_unmatched++
-        const slId = customerId != null ? (slByCust.get(customerId) ?? null) : null
+        if (customerId == null) { stats.customer_unmatched++; continue } // can't attribute a task with no owner
+        const slId = slByCust.get(customerId) ?? null // the customer's confirmed location -> the VISIT's location (may be null -> resolved later)
 
         const ex = await sql`select id from maintenance.tasks where ion_task_id = ${eid} limit 1`
         let tid: any
         if (ex.length) {
           tid = ex[0].id
         } else {
-          if (slId == null) { stats.no_service_location++; continue } // tasks.service_location_id is NOT NULL
+          // ADR 007 §9: the task carries NO service_location_id (a contract can outlive an address
+          // change); customer_id is the owner. The visit's location comes from the customer (slId).
           const { detail } = await getTaskDetail(s, eid, ionCust)
           const startsOn = detail.startsOn || null
           const endsOn = detail.endsOn || null
-          let status = endsOn && endsOn < today ? "closed" : "active"
-          if (status === "active" && openLocs.has(slId)) status = "closed"
+          const status = endsOn && endsOn < today ? "closed" : "active"
           const ext = { ion_cust_id: String(ionCust), service_type: detail.serviceType?.text || "", recurrence: detail.serviceRepeat?.text || "", captured: "orphan_recovery" }
           tid = (await sql`
-            insert into maintenance.tasks (service_location_id, customer_id, ion_task_id, status, starts_on, ends_on, external_source, external_data)
-            values (${slId}, ${customerId}, ${eid}, ${status}, coalesce(${startsOn}::date, current_date), ${endsOn}::date, 'ion_log', ${sql.json(ext)})
+            insert into maintenance.tasks (customer_id, ion_task_id, status, starts_on, ends_on, external_source, external_data)
+            values (${customerId}, ${eid}, ${status}, coalesce(${startsOn}::date, current_date), ${endsOn}::date, 'ion_log', ${sql.json(ext)})
             returning id`)[0].id
           stats.tasks_created++
-          if (status === "active") openLocs.add(slId)
+          if (slId == null) stats.tasks_created_no_location++
           const freq = mapFreq(detail.serviceRepeat?.text)
           for (const d of (detail.perDayTech || []).filter((x: any) => x.techId)) {
             await sql`
