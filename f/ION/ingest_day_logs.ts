@@ -6,6 +6,13 @@
 // CANONICAL LOG-BASED VISIT INGESTION (LogID = the unique grain; dedup on ion_log_id).
 // Per day: list_day_logs -> get_log_detail (readings/checklist/consumables/tech/notes/failure)
 // -> keep performed (time_in) logs -> per-log UPSERT on ion_log_id + refresh children.
+// TASK + CUSTOMER + LOCATION (ADR 007 §9): a visit's task is the ION EventID
+// (task_schedules.ion_task_id); its customer_id is taken from that TASK (ADR 006); its billing_method
+// comes from the TASK (financial terms live on maintenance.tasks -- NOT task_schedules, whose financial
+// columns were dropped 2026-06-19, which is why reading ts.billing_method had been failing every run).
+// The visit's service_location_id is NOT set here -- it is owned by public.reconcile_visit_locations
+// (derived from the customer's confirmed link-table location); leaving the column untouched lets reconcile
+// fill new visits and never wipes a resolved one on re-scrape.
 // TECH: addLog submittedBy is often blank, so submitted_by FALLS BACK to the day-grid tech
 // (list_day_logs `tech`, which is authoritative and always present); actual_tech_id is resolved
 // inline from public.employees.ion_username aliases so visits land tech-linked.
@@ -102,10 +109,14 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
     const aliasMap: Record<string, string> = {}
     for (const e of empRows) for (const a of (e.ion_username || [])) aliasMap[a] = e.id
 
+    // Per EventID: the task (task_id), its CUSTOMER (customer_id, ADR 006) and billing_method.
+    // billing_method comes from maintenance.tasks (t) -- task_schedules no longer carries it (cols
+    // dropped 2026-06-19). NOT t.service_location_id (ADR 007 §9 -- the visit's location is the
+    // customer's, resolved by reconcile_visit_locations, not copied from the task).
     const taskRows = eventIds.length ? await sql<any[]>`
       SELECT DISTINCT ON (ts.ion_task_id)
-             ts.ion_task_id, ts.task_id, t.service_location_id,
-             ts.billing_method, rt.task_price_cents
+             ts.ion_task_id, ts.task_id, t.customer_id,
+             t.billing_method, rt.task_price_cents
       FROM maintenance.task_schedules ts
       JOIN maintenance.tasks t ON t.id = ts.task_id
       LEFT JOIN ion.recurring_tasks rt ON rt.ion_task_id = ts.ion_task_id
@@ -118,7 +129,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
     for (const v of visits) {
       const tm = tmap[v.event_id]
       v.task_id = tm?.task_id ?? null
-      v.service_location_id = tm?.service_location_id ?? null
+      v.customer_id = tm?.customer_id ?? null
       v.billing_method = tm?.billing_method ?? "per_visit"
       v.price_cents = (tm?.task_price_cents ?? null) ?? priceFromService(v.service_type)
       v.actual_tech_id = (v.submitted_by && aliasMap[v.submitted_by]) ? aliasMap[v.submitted_by] : null
@@ -132,15 +143,15 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
       for (const v of visits) {
         if (!v.ion_log_id || !v.scheduled_date) { skipped++; continue }
         const ins = await tx`INSERT INTO maintenance.visits
-          (service_location_id, task_id, ion_task_id, scheduled_date, visit_date, is_serviceable,
+          (customer_id, task_id, ion_task_id, scheduled_date, visit_date, is_serviceable,
            service_type, price_cents, billing_method, status, visit_type, started_at, ended_at,
            ion_log_id, ion_calendar_id, ion_submitted_by, actual_tech_id, notes, failure_reason, external_source)
-          VALUES (${v.service_location_id}, ${v.task_id}, ${v.event_id}, ${v.scheduled_date}, ${v.scheduled_date},
+          VALUES (${v.customer_id}, ${v.task_id}, ${v.event_id}, ${v.scheduled_date}, ${v.scheduled_date},
            ${v.serviceable}, ${v.service_type}, ${v.price_cents}, ${v.billing_method}, 'completed', 'route',
            ${tsLocal(v.scheduled_date, v.time_in)}, ${tsLocal(v.scheduled_date, v.time_out)},
            ${v.ion_log_id}, ${v.ion_calendar_id}, ${v.submitted_by}, ${v.actual_tech_id}, ${v.comment}, ${v.failure_reason}, 'ion_log')
           ON CONFLICT (ion_log_id) WHERE ion_log_id IS NOT NULL DO UPDATE SET
-            service_location_id=EXCLUDED.service_location_id, task_id=EXCLUDED.task_id, ion_task_id=EXCLUDED.ion_task_id,
+            customer_id=COALESCE(EXCLUDED.customer_id, maintenance.visits.customer_id), task_id=EXCLUDED.task_id, ion_task_id=EXCLUDED.ion_task_id,
             scheduled_date=EXCLUDED.scheduled_date, visit_date=EXCLUDED.visit_date, is_serviceable=EXCLUDED.is_serviceable,
             service_type=EXCLUDED.service_type, price_cents=EXCLUDED.price_cents, billing_method=EXCLUDED.billing_method,
             started_at=EXCLUDED.started_at, ended_at=EXCLUDED.ended_at, ion_calendar_id=EXCLUDED.ion_calendar_id,
