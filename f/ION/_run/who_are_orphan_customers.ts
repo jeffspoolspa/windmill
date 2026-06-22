@@ -12,37 +12,40 @@ function cookieHeader(s: any) {
     .map((c: any) => `${c.name}=${c.value}`).join("; ")
 }
 
-// READ-ONLY: who are the flagged (customer_unmatched) orphan-task customers? Fetch each ION customer
-// detail page and surface name/phone/address + a text snippet. No DB writes.
-export async function main(ids: string[] = ["1807904","2262281","2340243","2408772","2460366","2463288","2499559","2545478","2545500"]) {
+// READ-ONLY: who are these ION customers? Fetch the customer detail page, STRIP <script>/<style>
+// (the page is JS-heavy; the contact info is server-rendered underneath), surface name/email/phone +
+// a clean visible-text snippet. No DB writes.
+export async function main(ids: string[] = ["2408772","2463288","2499559","2545478","2545500"]) {
   const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
   const s = await getOrRefreshSession(ion)
   const o = s.ionOrigin
   const H = { Cookie: cookieHeader(s), "User-Agent": "Mozilla/5.0", Accept: "text/html, */*" }
   const get = (u: string) => fetch(`${o}${u}`, { headers: H, redirect: "manual" }).then((x) => x.text())
 
+  const emailRe = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g
   const phoneRe = /\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/g
   const out: any[] = []
   for (const id of ids) {
-    const row: any = { id }
     try {
-      for (const path of [`/customers/customerTabs.cfm?customerid=${id}`, `/customers/customerInfo.cfm?customerid=${id}`]) {
-        const html = await get(path)
-        const root = parse(html)
-        const text = root.text.replace(/\s+/g, " ").trim()
-        const key = path.includes("customerTabs") ? "tabs" : "info"
-        row[key] = {
-          len: html.length,
-          title: root.querySelector("title")?.text?.trim() || null,
-          input_name: root.querySelector('input[name*="ame" i]')?.getAttribute("value") || null,
-          phones: [...new Set((text.match(phoneRe) || []))].slice(0, 3),
-          snippet: text.slice(0, 500),
-        }
-      }
+      const html = await get(`/customers/customerTabs.cfm?customerid=${id}`)
+      const root = parse(html)
+      root.querySelectorAll("script, style").forEach((n: any) => n.remove())
+      const text = root.text.replace(/\s+/g, " ").trim()
+      // input values often hold first/last name, email, address fields
+      const inputs = root.querySelectorAll("input")
+        .map((i: any) => ({ name: i.getAttribute("name"), value: (i.getAttribute("value") || "").trim() }))
+        .filter((i: any) => i.value && i.name && /name|email|addr|city|state|zip|phone/i.test(i.name))
+        .slice(0, 20)
+      out.push({
+        id,
+        emails: [...new Set((html.match(emailRe) || []))].slice(0, 4),
+        phones: [...new Set((text.match(phoneRe) || []))].slice(0, 4),
+        inputs,
+        snippet: text.slice(0, 700),
+      })
     } catch (e: any) {
-      row.error = String(e?.message ?? e).slice(0, 200)
+      out.push({ id, error: String(e?.message ?? e).slice(0, 200) })
     }
-    out.push(row)
   }
   return out
 }
