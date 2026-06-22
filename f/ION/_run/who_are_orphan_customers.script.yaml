@@ -1,0 +1,9 @@
+summary: 'Read-only: fetch ION customer detail (customerTabs.cfm) for the
+  orphan-task ion_cust_ids and return name/phone/address/snippet so we can see
+  who they are. No writes.'
+description: ''
+lock: '!inline f/ION/_run/who_are_orphan_customers.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
