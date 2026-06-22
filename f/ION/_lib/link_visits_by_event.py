@@ -11,9 +11,8 @@ task_schedules.ion_task_id = event_id. This is ground truth -- it overrides the
 day/window inference (e.g. ION logged a visit against a task whose recorded
 window doesn't cover the visit date).
 
-sl_mismatch flags links where the EventID's task lives on a different
-service_location than the visit (e.g. PARRISH's task stranded on a junk sl) --
-the link is still correct (EventID is authoritative); the sl is a separate cleanup.
+The visit's service_location is NOT set here -- it's derived from the task's CUSTOMER by
+public.reconcile_visit_locations (ADR 007 §9); EventID -> task -> customer_id is the chain.
 event_not_in_db = EventID we haven't synced (would need a get_task_detail capture).
 
 SAFETY: dry_run=True default -> rolls back.
@@ -25,18 +24,17 @@ from f.ION._lib.upsert import _connect
 def link(links, supabase_connection, dry_run=True):
     conn = _connect(supabase_connection)
     stats = {"links": len(links), "linked": 0, "no_event": 0, "event_not_in_db": 0,
-             "sl_mismatch": 0, "examples": [], "dry_run": dry_run, "committed": False}
+             "examples": [], "dry_run": dry_run, "committed": False}
     try:
-        m = {}  # ion_task_id -> (task_id, service_location_id)
+        m = {}  # ion_task_id -> task_id
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT ts.ion_task_id, ts.task_id, t.service_location_id
-                FROM maintenance.task_schedules ts
-                JOIN maintenance.tasks t ON t.id = ts.task_id
-                WHERE ts.ion_task_id IS NOT NULL
+                SELECT ion_task_id, task_id
+                FROM maintenance.task_schedules
+                WHERE ion_task_id IS NOT NULL
             """)
-            for iid, tid, sl in cur.fetchall():
-                m.setdefault(iid, (tid, sl))
+            for iid, tid in cur.fetchall():
+                m.setdefault(iid, tid)
 
         with conn.cursor() as cur:
             for lk in links:
@@ -50,17 +48,13 @@ def link(links, supabase_connection, dry_run=True):
                     if len(stats["examples"]) < 15:
                         stats["examples"].append({"visit_id": vid, "event_id": eid, "note": "task not in DB"})
                     continue
-                tid, tsl = m[eid]
+                tid = m[eid]
                 cur.execute(
                     "UPDATE maintenance.visits SET task_id=%s, updated_at=now() WHERE id=%s AND task_id IS NULL",
                     (tid, vid),
                 )
                 if cur.rowcount:
                     stats["linked"] += 1
-                    if tsl != lk.get("sl"):
-                        stats["sl_mismatch"] += 1
-                        if len(stats["examples"]) < 15:
-                            stats["examples"].append({"visit_id": vid, "event_id": eid, "task_sl": tsl, "visit_sl": lk.get("sl"), "note": "linked; task on different sl"})
 
         if dry_run:
             conn.rollback()
