@@ -1,8 +1,10 @@
 summary: Log-based visit ingestion (dedup ion_log_id). Visit task=EventID;
   customer_id + billing_method from the TASK (ADR 006/007 §9);
-  service_location_id owned by reconcile_visit_locations. dry_run default.
+  service_location_id owned by reconcile_visit_locations. Runs on chromium
+  (ION). dry_run default.
 description: ''
 lock: '!inline f/ION/ingest_day_logs.script.lock'
 has_on_behalf_of: false
 kind: script
 schema: null
+tag: chromium
