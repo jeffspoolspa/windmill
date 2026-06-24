@@ -28,8 +28,8 @@ def gusto_get(url, headers, params=None, max_retries=5):
 
 
 def all_compensations(url, headers):
-    """Gusto paginates employee_compensations with standard ?per=&page= and
-    X-Total-Pages header. per=100 returns up to 100/page."""
+    """Gusto paginates employee_compensations with standard ?per=&page= and the
+    X-Total-Pages header (the employee_compensations_* params are ignored)."""
     comps, page = [], 1
     while True:
         r = gusto_get(url, headers, {"per": 100, "page": page})
@@ -84,18 +84,30 @@ def main(check_start: str = "2026-05-01", check_end: str = "2026-05-31"):
         for comp in all_compensations(url, headers):
             emp = comp.get("employee_uuid")
             gross = float(comp.get("gross_pay") or 0)
-            ot, unknown = 0.0, []
+            ot, unknown, line_total, excl_total = 0.0, [], 0.0, 0.0
             for arr in ("hourly_compensations", "fixed_compensations", "paid_time_off"):
                 for line in (comp.get(arr) or []):
                     nm, amt = line.get("name", ""), float(line.get("amount") or 0)
                     if amt == 0:
                         continue
+                    line_total += amt
+                    if nm in EXCLUDED:
+                        excl_total += amt
+                        continue
                     if nm in OT_LABELS:
                         ot += amt
-                    elif nm in KNOWN_EARNINGS or nm in EXCLUDED:
+                    elif nm in KNOWN_EARNINGS:
                         pass
                     else:
                         unknown.append(nm)
+            # INTEGRITY: sum of earning lines (minus reimbursements) must equal
+            # Gusto's gross_pay. Proves no line was dropped / mis-handled, which
+            # in turn backs the OT subtotal (OT is one of those lines).
+            recon = round(line_total - excl_total, 2)
+            if abs(recon - round(gross, 2)) > 0.01:
+                exceptions.append({"type": "gross_mismatch", "employee_uuid": emp,
+                                   "payroll": puid, "lines_recon": recon,
+                                   "gusto_gross": round(gross, 2)})
             if unknown:
                 exceptions.append({"type": "unknown_earning", "employee_uuid": emp,
                                    "payroll": puid, "names": sorted(set(unknown))})

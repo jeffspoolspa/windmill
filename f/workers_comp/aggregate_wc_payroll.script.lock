@@ -9,4 +9,4 @@ idna==3.18
 requests==2.34.2
 typing-extensions==4.15.0
 urllib3==2.7.0
-wmill==1.738.0
+wmill==1.739.0
