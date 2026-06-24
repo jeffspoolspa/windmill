@@ -27,6 +27,22 @@ def gusto_get(url, headers, params=None, max_retries=5):
     return resp
 
 
+def all_compensations(url, headers):
+    """Page through employee_compensations (Gusto paginates the payroll-show endpoint)."""
+    comps, page = [], 1
+    while True:
+        full = gusto_get(url, headers,
+                         {"employee_compensations_per": 100,
+                          "employee_compensations_page": page}).json()
+        chunk = full.get("employee_compensations") or []
+        comps.extend(chunk)
+        pag = full.get("employee_compensations_pagination") or {}
+        if not pag.get("has_more") or not chunk:
+            break
+        page += 1
+    return comps
+
+
 def main(check_start: str = "2026-05-01", check_end: str = "2026-05-31"):
     company_id = wmill.get_variable("f/gusto/company_id")
     token = wmill.get_variable("f/gusto/personal_access_token")
@@ -48,6 +64,7 @@ def main(check_start: str = "2026-05-01", check_end: str = "2026-05-31"):
     win_start = (cs - timedelta(days=45)).isoformat()
     pr = gusto_get(f"{GUSTO_API}/v1/companies/{company_id}/payrolls", headers,
                    {"processing_statuses": "processed",
+                    "payroll_types": "regular,off_cycle",
                     "start_date": win_start, "end_date": check_end, "per": 100})
     pr.raise_for_status()
     payrolls = []
@@ -61,9 +78,9 @@ def main(check_start: str = "2026-05-01", check_end: str = "2026-05-31"):
 
     for p in payrolls:
         puid = p["payroll_uuid"]
-        full = gusto_get(f"{GUSTO_API}/v1/companies/{company_id}/payrolls/{puid}", headers).json()
+        url = f"{GUSTO_API}/v1/companies/{company_id}/payrolls/{puid}"
         pg = 0.0
-        for comp in (full.get("employee_compensations") or []):
+        for comp in all_compensations(url, headers):
             emp = comp.get("employee_uuid")
             gross = float(comp.get("gross_pay") or 0)
             ot, unknown = 0.0, []
