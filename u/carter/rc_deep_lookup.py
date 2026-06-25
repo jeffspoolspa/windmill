@@ -52,7 +52,7 @@ def main(phone_number: str, days_back: int = 90, transcribe: bool = False):
     end = datetime.utcnow()
     day = start
 
-    while day &lt;= end:
+    while day <= end:
         df = day.strftime('%Y-%m-%dT00:00:00.000Z')
         dt = day.strftime('%Y-%m-%dT23:59:59.000Z')
 
