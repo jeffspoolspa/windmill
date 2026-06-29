@@ -283,14 +283,20 @@ Output: a JSON object with:
 - reasoning: 1 sentence
 
 Style rules:
-- Title Case, 2-7 words. NEVER more than 7 words.
-- Equipment + Action format: "Autofill Valve Replacement", "Pool Pump Diagnosis"
-- Use "&" to join two related items: "Salt Cell Cleaning & Filter Replacement"
-- Use " - " for a qualifier: "Water Chemistry Service - Shock Treatment"
-- Add context when meaningful: "Pre-Purchase Pool Inspection", "VSP Pump Error Diagnosis"
-- Action words: Diagnosis, Replacement, Repair, Install, Delivery, Cleaning, Removal, Check, Clearing, Service
+- Keep it SIMPLE and GENERAL. Use the "[Equipment] [Action]" format:
+  "Pool Pump Install", "Heater Diagnosis", "Filter Repair", "Chemical Delivery",
+  "Skimmer Basket Replacement", "Salt Cell Cleaning".
+- Title Case, 2-4 words. NEVER more than 5 words.
+- Pick ONE equipment/item and ONE action. Do NOT chain two services with "&".
+  Generalize to the main item instead: "Salt Cell Cleaning", NOT "Salt Cell
+  Cleaning & Filter Replacement". If genuinely several unrelated things were done,
+  generalize broadly: "Pool Equipment Repair" or "General Pool Service".
+- Do NOT add qualifiers, model numbers, symptoms, or extra context. Leave them out:
+  "Heater Diagnosis", NOT "VSP Pump Error Diagnosis"; "Pool Inspection", NOT
+  "Pre-Purchase Pool Inspection".
+- Action words: Install, Diagnosis, Repair, Replacement, Delivery, Cleaning, Removal, Service
 - No trailing punctuation
-- Lean on `corrective` over `description`; use `tech_instructions` to disambiguate
+- Lean on `corrective` over `description`; use `tech_instructions` only to identify the equipment
 
 **SPECIAL CUSTOMER RULE — ROBERT O'BRIEN (3-pool property)**
 
@@ -304,7 +310,7 @@ case-insensitive, any order ("ROBERT O'BRIEN", "O'BRIEN, ROBERT",
        (LAP POOL)
        (VOLLEYBALL)
        (SPA)
-3. The tag is REQUIRED. The tag does NOT count toward the 7-word memo limit.
+3. The tag is REQUIRED. The tag does NOT count toward the 5-word memo limit.
 4. Pick the tag by scanning description, corrective, and tech_instructions
    for these keywords (case-insensitive):
        "lap pool"                               → (LAP POOL)
@@ -317,7 +323,7 @@ case-insensitive, any order ("ROBERT O'BRIEN", "O'BRIEN, ROBERT",
    "Heat Exchanger Diagnosis (VOLLEYBALL)"
    "Spa Heater Repair (SPA)"
    "Booster Pump Replacement (LAP POOL)"
-   "Salt Cell Cleaning & Filter Replacement (LAP POOL)"
+   "Salt Cell Cleaning (LAP POOL)"
 
 ❌ WRONG format (do NOT produce any of these):
    "Volleyball Pool Heat Exchanger Diagnosis"    ← pool name in body, no tag
@@ -340,27 +346,27 @@ MEMO_EXAMPLES = [
     {"input": {"customer": "Jones, Mary", "type": "GENERAL SERVICE", "description": "Remove Pool Cover", "corrective": "Removed cover.", "tech_instructions": ""},
      "output": {"memo": "Pool Cover Removal", "confidence": 0.98, "reasoning": "Pool cover removed."}},
     {"input": {"customer": "Brown, Alice", "type": "MAINTENANCE", "description": "Clean salt cell and replace filter.", "corrective": "Cleaned salt cell. Installed the filter no problem.", "tech_instructions": ""},
-     "output": {"memo": "Salt Cell Cleaning & Filter Replacement", "confidence": 0.92, "reasoning": "Both services done."}},
+     "output": {"memo": "Salt Cell Cleaning", "confidence": 0.92, "reasoning": "Two items done; generalized to the main one rather than chaining with '&'."}},
     {"input": {"customer": "Davis, Chuck", "type": "DELIVERY", "description": "Deliver a 50lb bucket of chlorine tabs", "corrective": "Delivered", "tech_instructions": ""},
-     "output": {"memo": "Chlorine Tab Delivery", "confidence": 0.98, "reasoning": "Standard chemical delivery."}},
+     "output": {"memo": "Chemical Delivery", "confidence": 0.98, "reasoning": "Chemical delivery; kept general rather than naming the specific product."}},
     {"input": {"customer": "Wilson, Tom", "type": "GENERAL SERVICE", "description": "Spa Pump running loud. Motor + seal plate needed.", "corrective": "Installed new plate and motor.", "tech_instructions": ""},
-     "output": {"memo": "Spa Pump Motor & Seal Plate Replacement", "confidence": 0.96, "reasoning": "Spa pump motor + seal plate replacement."}},
+     "output": {"memo": "Spa Pump Repair", "confidence": 0.96, "reasoning": "Motor + seal plate work on the spa pump; generalized to a single repair."}},
     {"input": {"customer": "Anderson, Pat", "type": "POOL INSPECTION", "description": "Pool Inspection. Due diligence 3/25 or 3/26. Potential buyer access.", "corrective": ".", "tech_instructions": ""},
-     "output": {"memo": "Pre-Purchase Pool Inspection", "confidence": 0.93, "reasoning": "Pool inspection for potential buyer."}},
+     "output": {"memo": "Pool Inspection", "confidence": 0.93, "reasoning": "Inspection; dropped the 'pre-purchase' qualifier to keep it simple."}},
     {"input": {"customer": "Miller, Sam", "type": "DIAGNOSIS", "description": "Heater not firing", "corrective": "Replaced thermistor.", "tech_instructions": "Customer reports gas heater showing IF code intermittently"},
-     "output": {"memo": "Gas Heater Diagnosis & Thermistor Replacement", "confidence": 0.93, "reasoning": "Tech instructions clarified gas heater + IF code; thermistor replaced."}},
+     "output": {"memo": "Gas Heater Repair", "confidence": 0.93, "reasoning": "Tech instructions identify a gas heater; generalized the diagnosis + part swap to a repair."}},
     {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Replace lid assembly on commercial chlorinator on the volleyball pool.", "corrective": "Installed new lid assembly. Tested and functional.", "tech_instructions": ""},
-     "output": {"memo": "Commercial Chlorinator Lid Assembly Replacement (VOLLEYBALL)", "confidence": 0.95, "reasoning": "Volleyball pool chlorinator lid replaced."}},
+     "output": {"memo": "Chlorinator Repair (VOLLEYBALL)", "confidence": 0.95, "reasoning": "Volleyball pool chlorinator lid replaced; generalized to a chlorinator repair."}},
     {"input": {"customer": "ROBERT O'BRIEN", "type": "DIAGNOSIS", "description": "Heater not firing", "corrective": "Replaced thermistor", "tech_instructions": "Spa heater issue - check IF code"},
-     "output": {"memo": "Spa Heater Diagnosis & Thermistor Replacement (SPA)", "confidence": 0.93, "reasoning": "Tech instructions specified spa heater."}},
+     "output": {"memo": "Spa Heater Repair (SPA)", "confidence": 0.93, "reasoning": "Tech instructions specified spa heater; generalized to a repair."}},
     {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Replaced O-ring", "corrective": "O-ring replaced", "tech_instructions": ""},
      "output": {"memo": "O-Ring Replacement", "confidence": 0.45, "reasoning": "O'Brien WO but no pool name in any field - cannot determine which pool."}},
     {"input": {"customer": "O'BRIEN, ROBERT", "type": "DIAGNOSIS", "description": "Travis received call the Vball pool drained on Saturday. Need to diagnose. Customer filling, equipment off.", "corrective": "Diagnosed. Volley ball heat exchanger cracked draining pool. Shut off bypass to faulty heat pump.", "tech_instructions": ""},
      "output": {"memo": "Heat Exchanger Diagnosis (VOLLEYBALL)", "confidence": 0.95, "reasoning": "Vball/volleyball mentioned in both description and corrective — heat exchanger diagnosis on the volleyball pool."}},
     {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Lap pool booster pump making grinding noise", "corrective": "Replaced booster pump motor and seal", "tech_instructions": ""},
-     "output": {"memo": "Booster Pump Motor & Seal Replacement (LAP POOL)", "confidence": 0.96, "reasoning": "Lap pool explicitly named; booster pump motor + seal replacement."}},
+     "output": {"memo": "Booster Pump Repair (LAP POOL)", "confidence": 0.96, "reasoning": "Lap pool explicitly named; motor + seal work generalized to a booster pump repair."}},
     {"input": {"customer": "O'BRIEN, ROBERT", "type": "GENERAL SERVICE", "description": "Salt cell needs cleaning on volleyball", "corrective": "Cleaned salt cell, replaced o-rings", "tech_instructions": ""},
-     "output": {"memo": "Salt Cell Cleaning & O-Ring Replacement (VOLLEYBALL)", "confidence": 0.94, "reasoning": "Volleyball pool salt cell cleaning + o-ring replacement."}},
+     "output": {"memo": "Salt Cell Cleaning (VOLLEYBALL)", "confidence": 0.94, "reasoning": "Volleyball pool salt cell cleaning; dropped the secondary o-ring item."}},
 ]
 
 
