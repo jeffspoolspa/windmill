@@ -666,15 +666,13 @@ def record_qbo_payment(customer_id, invoice_id, amount, charge_result, wo_num, i
                         access_token, realm_id):
     """Create QBO Payment linked to invoice, with charge_id in CCTransId for reconciliation."""
     charge_id = charge_result.get("charge_id", "")
-    auth_code = charge_result.get("auth_code", "")
     card_type = charge_result.get("card_type", "")
     card_last4 = charge_result.get("card_last4", "")
     pmt_method_id = (QBO_PMT_METHOD_ACH if charge_result.get("payment_type") == "ach"
                      else QBO_PMT_METHOD_CC)
 
-    private_note = (f"Auto-charge | WO# {wo_num} | Inv# {invoice_num} | "
-                    f"Charge ID: {charge_id} | Auth: {auth_code} | "
-                    f"{card_type} x{card_last4} | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    private_note = (f"WO# {wo_num} | Inv# {invoice_num} | "
+                    f"Charge ID: {charge_id} | {card_type} x{card_last4}")
 
     payment_data = {
         "CustomerRef": {"value": customer_id},
