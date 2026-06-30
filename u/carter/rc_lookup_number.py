@@ -20,6 +20,27 @@ def safe_get(platform, url, params, max_retries=5):
                 raise
     raise Exception("Max retries exceeded")
 
+def _coerce_int(v, default):
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str):
+        v = v.strip()
+        return int(v) if v else default
+    return int(v)
+
+def _coerce_bool(v, default):
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ('true', '1', 'yes', 'y', 't')
+    return bool(v)
+
 def main(
     phone_number: str,
     days_back: int = 30,
@@ -36,6 +57,13 @@ def main(
         transcribe: If True, transcribe recordings via OpenAI (costs ~$0.006/min)
         include_legs: If True, check call legs for park location recordings
     """
+    # --- Coerce args (MCP/string-arg safety; deployed schema is null) ---
+    if phone_number is None:
+        return {"error": "phone_number is required"}
+    days_back = _coerce_int(days_back, 30)
+    transcribe = _coerce_bool(transcribe, False)
+    include_legs = _coerce_bool(include_legs, True)
+
     # --- Normalize phone number ---
     digits = re.sub(r'\D', '', phone_number)
     if len(digits) == 11 and digits.startswith('1'):
