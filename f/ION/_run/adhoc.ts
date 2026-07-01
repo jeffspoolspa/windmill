@@ -12,7 +12,7 @@ import { main as getLogDetail } from "/f/ION/api/get_log_detail"
 // CURRENT: re-scrape get_log_detail for the June visits of the reconcile-diff tasks and refresh
 // their consumables_usage (chems may have been added in ION after our nightly ingest ran).
 // Same DELETE+reinsert per visit as f/ION/ingest_day_logs. DRY_RUN=true previews additions only.
-const DRY_RUN = true
+const DRY_RUN = false
 const TASKS = ["5764078","5764017","5210399","5139937","5723168","5617095","5233998","5764072",
   "5723141","5973386","5111205","4076559","4225225","5381779","5958693","5937721","5939498","5943034"]
 
