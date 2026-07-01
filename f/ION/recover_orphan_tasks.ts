@@ -133,7 +133,10 @@ export async function main(limit = 250) {
         } else {
           // ADR 007 §9: task carries customer_id (best-effort) + NO service_location_id. Pull task detail
           // when we have a CustomerID to navigate ION; else a minimal stub. customer_id IS NULL = flag.
-          let startsOn: any = null, endsOn: any = null, perDayTech: any[] = [], serviceType = "", recurrence = ""
+          // billing_type is captured from the ION task edit form's InvoiceType so captured tasks carry
+          // the SAME external_data shape as the recurring sync (Do Not Invoice / list vs separate
+          // consumables) -- the reconcile needs it to know whether/how a task's consumables bill.
+          let startsOn: any = null, endsOn: any = null, perDayTech: any[] = [], serviceType = "", recurrence = "", billingType = ""
           if (ionCust) {
             try {
               const { detail } = await getTaskDetail(s, eid, ionCust)
@@ -142,13 +145,14 @@ export async function main(limit = 250) {
               perDayTech = detail.perDayTech || []
               serviceType = detail.serviceType?.text || ""
               recurrence = detail.serviceRepeat?.text || ""
+              billingType = detail.invoiceType?.text || ""
             } catch (e: any) {
               if (stats.examples.length < 12) stats.examples.push({ eid, note: "get_task_detail failed; created stub", error: String(e?.message ?? e).slice(0, 120) })
             }
           }
           const status = endsOn && endsOn < today ? "closed" : "active"
           const needsFix = customerId == null
-          const ext: any = { ion_cust_id: ionCust ? String(ionCust) : null, service_type: serviceType, recurrence, captured: "orphan_recovery" }
+          const ext: any = { ion_cust_id: ionCust ? String(ionCust) : null, service_type: serviceType, recurrence, billing_type: billingType, captured: "orphan_recovery" }
           if (needsFix) ext.needs_fix = ionCust ? "customer_unmatched" : "no_customerid_on_log"
           tid = (await sql`
             insert into maintenance.tasks (customer_id, ion_task_id, status, starts_on, ends_on, external_source, external_data)

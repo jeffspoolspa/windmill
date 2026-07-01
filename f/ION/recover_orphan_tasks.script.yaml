@@ -1,8 +1,8 @@
-summary: 'Recover orphan-visit tasks (every visit gets a task). SELF-HEAL: an
-  unmatched ION CustomerID adopts an unlinked Customer by email/name/phone (sets
-  ion_cust_id); only a truly-new customer stays NULL + needs_fix. No
-  service_location_id (ADR 007 §9). Committing, batched, advisory-locked.
-  chromium.'
+summary: 'Recover orphan-visit tasks (every visit gets a task). SELF-HEAL:
+  unmatched ION CustomerID adopts an unlinked Customer by email/name/phone.
+  Captures billing_type from the ION task InvoiceType (full external_data
+  shape). No service_location_id (ADR 007 §9). Committing, batched,
+  advisory-locked.'
 description: ''
 lock: '!inline f/ION/recover_orphan_tasks.script.lock'
 has_on_behalf_of: false
