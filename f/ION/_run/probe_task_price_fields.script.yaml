@@ -1,9 +1,0 @@
-summary: 'Throwaway: dump ION task-form price-related fields for The Farm (flat)
-  + HERRIN (green pool) to find where the customer price/flat amount lives vs
-  Technician Per-Stop Pay.'
-description: ''
-lock: '!inline f/ION/_run/probe_task_price_fields.script.lock'
-has_on_behalf_of: false
-kind: script
-schema: null
-tag: chromium
