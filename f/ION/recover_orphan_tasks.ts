@@ -136,7 +136,7 @@ export async function main(limit = 250) {
           // billing_type is captured from the ION task edit form's InvoiceType so captured tasks carry
           // the SAME external_data shape as the recurring sync (Do Not Invoice / list vs separate
           // consumables) -- the reconcile needs it to know whether/how a task's consumables bill.
-          let startsOn: any = null, endsOn: any = null, perDayTech: any[] = [], serviceType = "", recurrence = "", billingType = "", stopPayFixed = ""
+          let startsOn: any = null, endsOn: any = null, perDayTech: any[] = [], serviceType = "", recurrence = "", billingType = "", itemCost = ""
           if (ionCust) {
             try {
               const { detail } = await getTaskDetail(s, eid, ionCust)
@@ -146,26 +146,30 @@ export async function main(limit = 250) {
               serviceType = detail.serviceType?.text || ""
               recurrence = detail.serviceRepeat?.text || ""
               billingType = detail.invoiceType?.text || ""
-              stopPayFixed = detail.stopPayFixed || ""
+              itemCost = detail.itemCost || ""
             } catch (e: any) {
               if (stats.examples.length < 12) stats.examples.push({ eid, note: "get_task_detail failed; created stub", error: String(e?.message ?? e).slice(0, 120) })
             }
           }
-          // FINANCIAL TERMS (a task carries its own rate, ADR 007 §9). Derive from the ION task
-          // edit form so captured tasks reconcile against the ION invoice like recurring ones:
+          // FINANCIAL TERMS (a task carries its own rate, ADR 007 §9). Derive from the ION task edit form
+          // so captured tasks reconcile against the ION invoice like recurring ones:
           //   method: invoiceType "Flat..." -> flat_rate_monthly, else per_visit.
-          //   per-visit rate: the price is written into the service description as "@ $X.XX"
-          //     (GREEN POOL / ONE TIME / long-form POOL MAINTENANCE). Fall back to the
-          //     "POOL MAINTENANCE <N>" tier number (== the rate ~99% of the time).
-          //   flat rate: StopPayFixed (the fixed-$ field), else an "@ $" in the description.
-          // Leaving these null is what made captured tasks compute $0 labor and under-bill.
+          //   CUSTOMER PRICE = the "Custom Pricing" field = detail.itemCost. Verified 2026-07-01: The Farm
+          //     flat $1190 lives in itemcost="1190.00"; StopPayFixed="0.00" is the Technician Per-Stop Pay
+          //     (tech comp, NOT the bill) -- do NOT use it.
+          //   flat rate: itemCost (the monthly amount), else null (flag; never derivable from tech pay).
+          //   per-visit rate: itemCost override if set, else the "@ $X.XX" in the description
+          //     (GREEN POOL / ONE TIME), else the "POOL MAINTENANCE <N>" tier (== rate ~99% of the time).
           const isFlat = /FLAT/i.test(billingType)
+          const custom = parseFloat(String(itemCost).replace(/[^0-9.]/g, "")) || 0
           const atPrice = serviceType.match(/@\s*\$?([0-9]+(?:\.[0-9]+)?)/)
           const tier = serviceType.match(/POOL MAINTENANCE\s+([0-9]+)/i)
-          const stopFixed = parseFloat(String(stopPayFixed).replace(/[^0-9.]/g, "")) || 0
           const billingMethod = isFlat ? "flat_rate_monthly" : "per_visit"
-          const ppvCents = isFlat ? null : (atPrice ? Math.round(parseFloat(atPrice[1]) * 100) : tier ? parseInt(tier[1]) * 100 : null)
-          const flatCents = isFlat ? (Math.round(stopFixed * 100) || (atPrice ? Math.round(parseFloat(atPrice[1]) * 100) : null)) : null
+          const ppvCents = isFlat ? null
+            : (custom > 0 ? Math.round(custom * 100)
+               : atPrice ? Math.round(parseFloat(atPrice[1]) * 100)
+               : tier ? parseInt(tier[1]) * 100 : null)
+          const flatCents = isFlat ? (custom > 0 ? Math.round(custom * 100) : null) : null
           const status = endsOn && endsOn < today ? "closed" : "active"
           const needsFix = customerId == null
           const ext: any = { ion_cust_id: ionCust ? String(ionCust) : null, service_type: serviceType, recurrence, billing_type: billingType, captured: "orphan_recovery" }

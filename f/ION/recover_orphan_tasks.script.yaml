@@ -1,7 +1,8 @@
 summary: Recover orphan-visit tasks. SELF-HEAL unmatched ION CustomerID ->
   unlinked Customer by email/name/phone. Captures full financial terms
-  (billing_type + method + rate) from the ION task form so captured tasks
-  reconcile like recurring. Committing, batched, advisory-locked.
+  (billing_type + method + rate from Custom Pricing/itemCost) from the ION task
+  form so captured tasks reconcile like recurring. Committing, batched,
+  advisory-locked.
 description: ''
 lock: '!inline f/ION/recover_orphan_tasks.script.lock'
 has_on_behalf_of: false
