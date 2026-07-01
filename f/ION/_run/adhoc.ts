@@ -10,9 +10,9 @@ import { getTaskDetail } from "/f/ION/_lib/task_detail"
 
 // PERMANENT AD-HOC ION RUNNER. Override main()'s body for any one-off ION task; redeploy
 // (createScript with parent_hash) then run via runScriptByPath -> getJob for the result.
-// One reusable script instead of a pile of throwaway _run/ scripts.
+// One reusable script instead of a pile of throwaway _run/ scripts. Keep DRY_RUN=true at rest.
 //
-// CURRENT JOB: backfill the labor rate on rate-less tasks from the ION task edit form.
+// LAST JOB: backfill the labor rate on rate-less tasks from the ION task edit form.
 // RULE (Carter 2026-07-01): the customer price is "Custom Pricing" = detail.itemCost.
 //   - itemCost EMPTY or 0 -> the rate is what's parsed from the description ("@ $X.XX", else the
 //                            "POOL MAINTENANCE <N>" tier).
@@ -21,7 +21,7 @@ import { getTaskDetail } from "/f/ION/_lib/task_detail"
 //   - flat_rate  -> flat_rate_monthly_cents = itemCost (labor = the flat, regardless of visits).
 //   StopPayFixed is Technician Per-Stop Pay (tech comp) -- never the bill.
 export async function main() {
-  const DRY_RUN = false   // <-- flip to false to COMMIT
+  const DRY_RUN = true   // <-- flip to false to COMMIT
 
   const cfg = (await wmill.getResource("u/carter/supabase")) as any
   const sql = postgres({ host: cfg.host, port: cfg.port, database: cfg.dbname, username: cfg.user, password: cfg.password, ssl: "require" as const, prepare: false, max: 3 })

@@ -1,7 +1,8 @@
 summary: "Permanent ad-hoc ION runner. Override main()'s body for one-off ION
   tasks (login + getTaskDetail etc.), redeploy, run via runScriptByPath ->
-  getJob. Avoids throwaway _run scripts. CURRENT: backfill rate-less task rates
-  from the ION task form (Custom Pricing/itemCost). dry_run flag in body."
+  getJob. Avoids throwaway _run scripts. Body holds the last job (currently:
+  rate-less task rate backfill from Custom Pricing/itemCost). DRY_RUN flag in
+  body."
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false
