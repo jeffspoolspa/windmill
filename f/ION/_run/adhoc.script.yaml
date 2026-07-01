@@ -1,6 +1,6 @@
 summary: 'Permanent ad-hoc ION runner. Override main() body; run via
-  runScriptByPath -> getJob. CURRENT: re-scrape June visit consumables for the
-  diff tasks (late-added chems) - WRITE.'
+  runScriptByPath -> getJob. CURRENT: dump all ION logs for SUGARMILL event
+  5139937 across June (find missing chlorine).'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false
