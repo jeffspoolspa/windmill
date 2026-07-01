@@ -21,7 +21,7 @@ import { getTaskDetail } from "/f/ION/_lib/task_detail"
 //   - flat_rate  -> flat_rate_monthly_cents = itemCost (labor = the flat, regardless of visits).
 //   StopPayFixed is Technician Per-Stop Pay (tech comp) -- never the bill.
 export async function main() {
-  const DRY_RUN = true   // <-- flip to false to COMMIT
+  const DRY_RUN = false   // <-- flip to false to COMMIT
 
   const cfg = (await wmill.getResource("u/carter/supabase")) as any
   const sql = postgres({ host: cfg.host, port: cfg.port, database: cfg.dbname, username: cfg.user, password: cfg.password, ssl: "require" as const, prepare: false, max: 3 })
