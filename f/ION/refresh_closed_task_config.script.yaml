@@ -1,0 +1,9 @@
+summary: 'Pre-billing: re-pull ION config for expired tasks with visits in the
+  month; rewrite stale financial terms (dry_run default)'
+description: Run ONCE before freezing a month. Expired tasks aren't re-synced
+  daily; this re-pulls getTaskDetail and rewrites
+  billing_method/rate/billing_type to match ION.
+lock: '!inline f/ION/refresh_closed_task_config.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
