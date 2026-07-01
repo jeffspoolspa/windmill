@@ -136,7 +136,7 @@ export async function main(limit = 250) {
           // billing_type is captured from the ION task edit form's InvoiceType so captured tasks carry
           // the SAME external_data shape as the recurring sync (Do Not Invoice / list vs separate
           // consumables) -- the reconcile needs it to know whether/how a task's consumables bill.
-          let startsOn: any = null, endsOn: any = null, perDayTech: any[] = [], serviceType = "", recurrence = "", billingType = ""
+          let startsOn: any = null, endsOn: any = null, perDayTech: any[] = [], serviceType = "", recurrence = "", billingType = "", stopPayFixed = ""
           if (ionCust) {
             try {
               const { detail } = await getTaskDetail(s, eid, ionCust)
@@ -146,17 +146,33 @@ export async function main(limit = 250) {
               serviceType = detail.serviceType?.text || ""
               recurrence = detail.serviceRepeat?.text || ""
               billingType = detail.invoiceType?.text || ""
+              stopPayFixed = detail.stopPayFixed || ""
             } catch (e: any) {
               if (stats.examples.length < 12) stats.examples.push({ eid, note: "get_task_detail failed; created stub", error: String(e?.message ?? e).slice(0, 120) })
             }
           }
+          // FINANCIAL TERMS (a task carries its own rate, ADR 007 §9). Derive from the ION task
+          // edit form so captured tasks reconcile against the ION invoice like recurring ones:
+          //   method: invoiceType "Flat..." -> flat_rate_monthly, else per_visit.
+          //   per-visit rate: the price is written into the service description as "@ $X.XX"
+          //     (GREEN POOL / ONE TIME / long-form POOL MAINTENANCE). Fall back to the
+          //     "POOL MAINTENANCE <N>" tier number (== the rate ~99% of the time).
+          //   flat rate: StopPayFixed (the fixed-$ field), else an "@ $" in the description.
+          // Leaving these null is what made captured tasks compute $0 labor and under-bill.
+          const isFlat = /FLAT/i.test(billingType)
+          const atPrice = serviceType.match(/@\s*\$?([0-9]+(?:\.[0-9]+)?)/)
+          const tier = serviceType.match(/POOL MAINTENANCE\s+([0-9]+)/i)
+          const stopFixed = parseFloat(String(stopPayFixed).replace(/[^0-9.]/g, "")) || 0
+          const billingMethod = isFlat ? "flat_rate_monthly" : "per_visit"
+          const ppvCents = isFlat ? null : (atPrice ? Math.round(parseFloat(atPrice[1]) * 100) : tier ? parseInt(tier[1]) * 100 : null)
+          const flatCents = isFlat ? (Math.round(stopFixed * 100) || (atPrice ? Math.round(parseFloat(atPrice[1]) * 100) : null)) : null
           const status = endsOn && endsOn < today ? "closed" : "active"
           const needsFix = customerId == null
           const ext: any = { ion_cust_id: ionCust ? String(ionCust) : null, service_type: serviceType, recurrence, billing_type: billingType, captured: "orphan_recovery" }
           if (needsFix) ext.needs_fix = ionCust ? "customer_unmatched" : "no_customerid_on_log"
           tid = (await sql`
-            insert into maintenance.tasks (customer_id, ion_task_id, status, starts_on, ends_on, external_source, external_data)
-            values (${customerId}, ${eid}, ${status}, coalesce(${startsOn}::date, current_date), ${endsOn}::date, 'ion_log', ${sql.json(ext)})
+            insert into maintenance.tasks (customer_id, ion_task_id, status, starts_on, ends_on, billing_method, price_per_visit_cents, flat_rate_monthly_cents, external_source, external_data)
+            values (${customerId}, ${eid}, ${status}, coalesce(${startsOn}::date, current_date), ${endsOn}::date, ${billingMethod}, ${ppvCents}, ${flatCents}, 'ion_log', ${sql.json(ext)})
             returning id`)[0].id
           stats.tasks_created++
           if (needsFix) stats.tasks_created_needs_customer++
