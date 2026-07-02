@@ -1,6 +1,6 @@
 summary: 'Permanent ad-hoc ION runner. Override main() body; run via
-  runScriptByPath -> getJob. CURRENT: discover allTransactions.cfm params
-  (transactionRpt form) + probe XLS for June.'
+  runScriptByPath -> getJob. CURRENT: prime transactionRpt.cfm (POST June/Tasks)
+  then GET allTransactions.cfm XLS; show columns.'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false
