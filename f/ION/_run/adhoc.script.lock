@@ -2,6 +2,7 @@
   "dependencies": {
     "playwright": "1.40.0",
     "windmill-client": "latest",
+    "postgres": "latest",
     "node-html-parser": "latest"
   }
 }
@@ -14,6 +15,7 @@
       "dependencies": {
         "node-html-parser": "latest",
         "playwright": "1.40.0",
+        "postgres": "latest",
         "windmill-client": "latest",
       },
     },
@@ -44,6 +46,8 @@
     "playwright": ["playwright@1.40.0", "", { "dependencies": { "playwright-core": "1.40.0" }, "optionalDependencies": { "fsevents": "2.3.2" }, "bin": { "playwright": "cli.js" } }, "sha512-gyHAgQjiDf1m34Xpwzaqb76KgfzYrhK7iih+2IzcOCoZWr/8ZqmdBw+t0RU85ZmfJMgtgAiNtBQ/KS2325INXw=="],
 
     "playwright-core": ["playwright-core@1.40.0", "", { "bin": { "playwright-core": "cli.js" } }, "sha512-fvKewVJpGeca8t0ipM56jkVSU6Eo0RmFvQ/MaCQNDYm+sdvKkMBBWTE1FdeMqIdumRaXXjZChWHvIzCGM/tA/Q=="],
+
+    "postgres": ["postgres@3.4.9", "", {}, "sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw=="],
 
     "windmill-client": ["windmill-client@1.745.0", "", {}, "sha512-tV9wJMIca9acVdBHjEWMWy3TymOlfPZFnA/EvJJYJo0gX2QqxmP1oHMoqsFK4OAKSKYhepjELqnWxbml9wuTGQ=="],
 
