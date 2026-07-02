@@ -2,20 +2,13 @@
 //node-html-parser@6.1.13
 //playwright@1.40.0
 import "playwright@1.40.0"
-import * as wmill from "windmill-client"
-import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
-import { fetchTaskFormHtml } from "/f/ION/_lib/task_detail"
-import { parse } from "node-html-parser"
+import { main as updateTask } from "/f/ION/api/update_task"
 
 // PERMANENT AD-HOC ION RUNNER. Override main() body; run via runScriptByPath -> getJob.
-// CURRENT: dump the InvoiceType select options (value->text) for WAITES task 5954394 so we can pick
-// the value for "Per Visit Itemized (list consumables)".
+// CURRENT: DRY-RUN the ION task-edit endpoint on WAITES (5954394 / cust 1128297): set InvoiceType
+// to 9 = "Per Visit Itemized (list consumables)". dry_run=true returns the payload without writing.
 export async function main() {
-  const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
-  const s: any = await getOrRefreshSession(ion)
-  const html = await fetchTaskFormHtml(s, "5954394", "1128297")
-  const form = parse(html)
-  const sel = form.querySelector('select[name="InvoiceType"]')
-  const opts = sel ? sel.querySelectorAll("option").map((o: any) => ({ value: o.getAttribute("value"), selected: o.getAttribute("selected") != null, text: (o.text || "").replace(/\s+/g, " ").trim() })) : []
-  return { invoice_type_options: opts }
+  const r: any = await updateTask("5954394", "1128297", { InvoiceType: "9" }, true)
+  return { dry_run: r.dry_run, would_post_to: r.would_post_to, changed: r.changed, field_count: r.field_count,
+    invoice_type_in_payload: r.payload_preview?.InvoiceType, itemcost: r.payload_preview?.itemcost, stopPayFixed: r.payload_preview?.StopPayFixed }
 }
