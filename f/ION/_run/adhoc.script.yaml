@@ -1,6 +1,6 @@
 summary: 'Permanent ad-hoc ION runner. Override main() body; run via
-  runScriptByPath -> getJob. CURRENT: flip 19 DNI tasks to InvoiceType 9 (Per
-  Visit Itemized list consumables), verify each.'
+  runScriptByPath -> getJob. CURRENT: re-pull June transactions (load) after
+  DNI-flip rebuilds.'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false
