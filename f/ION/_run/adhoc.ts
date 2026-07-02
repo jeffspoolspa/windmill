@@ -7,9 +7,8 @@ import { parse } from "node-html-parser"
 import * as wmill from "windmill-client"
 
 // PERMANENT AD-HOC ION RUNNER. Override main() body; run via runScriptByPath -> getJob.
-// CURRENT: download ION's consumables_detail report (consumablesDetailByTech.cfm) for ALL of June
-// (every day, not just service days) and show SUGARMILL rows -- to find the 8 liquid chlorine and
-// see the date they were recorded. Inlined from f/ION/consumables_usage/d (avoids import re-lock).
+// CURRENT: download ION's consumables_detail report for ALL of June, show SUGARMILL rows (find the
+// 8 liquid chlorine + record date). Clears ExtJS popups (MyServiceWin3 etc.) that intercept the menu click.
 export async function main() {
   const ion = {
     loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"),
@@ -32,7 +31,12 @@ export async function main() {
     await page.locator('button[data-bs-target="#navbarToggleContent"]').click()
     await page.locator('text=ION POOL CARE').click()
     await page.waitForLoadState('networkidle')
-    try { await page.locator('#MyPrintWin .x-tool-close').click({ timeout: 2000 }) } catch {}
+    await page.waitForTimeout(2500)
+    // nuclear: remove ExtJS popup windows + masks that intercept clicks
+    await page.evaluate(() => {
+      document.querySelectorAll('div.resizable.ui-draggable, div[id*="MyServiceWin"], div[id*="MyPrintWin"]').forEach((el) => el.remove())
+      document.querySelectorAll('.modal-backdrop, .x-mask').forEach((el) => el.remove())
+    })
     await page.locator('#menuItem13 a').click()
     await page.locator('.ovalbutton:has-text("Service Reports")').click()
     await page.waitForTimeout(1000)
