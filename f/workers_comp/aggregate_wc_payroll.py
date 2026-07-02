@@ -1,5 +1,5 @@
 import time, requests, wmill
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from collections import defaultdict
 
 GUSTO_API = "https://api.gusto.com"
@@ -45,7 +45,16 @@ def all_compensations(url, headers):
     return comps
 
 
-def main(check_start: str = "2026-05-01", check_end: str = "2026-05-31"):
+def main(check_start: str = "", check_end: str = ""):
+    # Default to the previous COMPLETED calendar month (you file last month's
+    # payroll). Pass explicit YYYY-MM-DD strings to override.
+    if not check_start or not check_end:
+        first_this = date.today().replace(day=1)
+        last_prev = first_this - timedelta(days=1)
+        first_prev = last_prev.replace(day=1)
+        check_start = check_start or first_prev.isoformat()
+        check_end = check_end or last_prev.isoformat()
+
     company_id = wmill.get_variable("f/gusto/company_id")
     token = wmill.get_variable("f/gusto/personal_access_token")
     headers = {"Authorization": f"Bearer {token}",
@@ -100,9 +109,6 @@ def main(check_start: str = "2026-05-01", check_end: str = "2026-05-31"):
                         pass
                     else:
                         unknown.append(nm)
-            # INTEGRITY: sum of earning lines (minus reimbursements) must equal
-            # Gusto's gross_pay. Proves no line was dropped / mis-handled, which
-            # in turn backs the OT subtotal (OT is one of those lines).
             recon = round(line_total - excl_total, 2)
             if abs(recon - round(gross, 2)) > 0.01:
                 exceptions.append({"type": "gross_mismatch", "employee_uuid": emp,
