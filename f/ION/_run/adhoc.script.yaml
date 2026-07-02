@@ -1,6 +1,6 @@
 summary: 'Permanent ad-hoc ION runner. Override main() body for one-off ION
-  jobs. CURRENT: probe ALTMAN task 5664059 day roster (our schedules say 3 days,
-  reality is 1/wk).'
+  jobs. CURRENT: reconcile day rosters for 3 tasks with stale schedule rows
+  (ALTMAN, WINDING RIVER, ZEH).'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false
