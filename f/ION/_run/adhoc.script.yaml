@@ -1,6 +1,6 @@
 summary: 'Permanent ad-hoc ION runner. Override main() body; run via
-  runScriptByPath -> getJob. CURRENT: retry June transactions load (ION 500 was
-  transient).'
+  runScriptByPath -> getJob. CURRENT: isolate XLS 500 - try May vs June vs
+  single-day.'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false
