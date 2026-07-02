@@ -22,7 +22,7 @@ TARGETS = [
     (8375, "9145", "WEXFORD HOA"),
 ]
 
-def main(dry_run: bool = True):
+def main(dry_run: bool = False):
     resource_path = "u/carter/quickbooks_api"
     resource = wmill.get_resource(resource_path)
     r = requests.post(
