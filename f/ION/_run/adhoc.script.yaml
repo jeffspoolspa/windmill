@@ -1,6 +1,6 @@
 summary: 'Permanent ad-hoc ION runner. Override main() body; run via
-  runScriptByPath -> getJob. CURRENT: re-scrape BARTH (5978326) June visit
-  consumables (write).'
+  runScriptByPath -> getJob. CURRENT: dump WAITES task InvoiceType options +
+  current selection.'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false
