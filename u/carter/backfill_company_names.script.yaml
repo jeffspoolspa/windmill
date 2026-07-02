@@ -1,5 +1,5 @@
-summary: 'One-off: set QBO CompanyName = DisplayName for 12 commercial customers
-  missing it, then refresh the Customers.company cache.'
+summary: 'One-off: clear QBO CompanyName for 4 residential customers wrongly
+  carrying one, then clear the Customers.company cache.'
 description: ''
 lock: '!inline u/carter/backfill_company_names.script.lock'
 has_on_behalf_of: false
