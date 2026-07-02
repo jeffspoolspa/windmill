@@ -1,6 +1,6 @@
 summary: 'Permanent ad-hoc ION runner. Override main() body; run via
-  runScriptByPath -> getJob. CURRENT: update_task DRY-RUN WAITES InvoiceType
-  1->9 (test edit endpoint).'
+  runScriptByPath -> getJob. CURRENT: LIVE update_task WAITES InvoiceType->9,
+  then re-read to verify.'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false

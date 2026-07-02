@@ -2,13 +2,18 @@
 //node-html-parser@6.1.13
 //playwright@1.40.0
 import "playwright@1.40.0"
-import { main as updateTask } from "/f/ION/api/update_task"
+import * as wmill from "windmill-client"
+import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
+import { updateTask, getTaskDetail } from "/f/ION/_lib/task_detail"
 
 // PERMANENT AD-HOC ION RUNNER. Override main() body; run via runScriptByPath -> getJob.
-// CURRENT: DRY-RUN the ION task-edit endpoint on WAITES (5954394 / cust 1128297): set InvoiceType
-// to 9 = "Per Visit Itemized (list consumables)". dry_run=true returns the payload without writing.
+// CURRENT: LIVE-write WAITES (5954394 / cust 1128297) InvoiceType -> 9 (Per Visit Itemized list
+// consumables), then re-read the task to confirm ION reflects the change.
 export async function main() {
-  const r: any = await updateTask("5954394", "1128297", { InvoiceType: "9" }, true)
-  return { dry_run: r.dry_run, would_post_to: r.would_post_to, changed: r.changed, field_count: r.field_count,
-    invoice_type_in_payload: r.payload_preview?.InvoiceType, itemcost: r.payload_preview?.itemcost, stopPayFixed: r.payload_preview?.StopPayFixed }
+  const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
+  const s: any = await getOrRefreshSession(ion)
+  const write: any = await updateTask(s, "5954394", "1128297", { InvoiceType: "9" }, false)
+  const { detail }: any = await getTaskDetail(s, "5954394", "1128297")
+  return { committed: write.committed, status: write.status, changed: write.changed,
+    now_invoice_type: detail.invoiceType, now_service_type: detail.serviceType?.text, itemcost: detail.itemCost }
 }
