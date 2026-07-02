@@ -1,0 +1,11 @@
+summary: Pull ION All Transactions report (TransactionType=Tasks) for a month
+  via raw session fetch; parse task_id+amount; optional load into
+  billing_audit.ion_task_transactions.
+description: On-demand monthly ION transaction-report pull. Replaces manual XLS
+  download. Raw fetch (GET->POST->GET with a cookie jar to prime the ColdFusion
+  session).
+lock: '!inline f/ION/transactions_report.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
+tag: chromium
