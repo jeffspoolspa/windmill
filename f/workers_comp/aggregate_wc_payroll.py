@@ -84,7 +84,8 @@ def main(check_start: str = "", check_end: str = ""):
             payrolls.append(p)
 
     by_code = defaultdict(lambda: {"gross": 0.0, "ot": 0.0})
-    exceptions, payroll_gross, emps_paid = [], {}, set()
+    exceptions, emps_paid = [], set()
+    payroll_gross = defaultdict(float)   # keyed by check_date; accumulate (dupes possible)
 
     for p in payrolls:
         puid = p["payroll_uuid"]
@@ -132,7 +133,7 @@ def main(check_start: str = "", check_end: str = ""):
             by_code[code]["gross"] += gross
             by_code[code]["ot"] += ot
             emps_paid.add(emp)
-        payroll_gross[p.get("check_date")] = round(pg, 2)
+        payroll_gross[p.get("check_date")] += pg
         time.sleep(0.1)
 
     report = {c: {"gross_wages": round(v["gross"], 2), "overtime_pay": round(v["ot"], 2)}
@@ -145,7 +146,7 @@ def main(check_start: str = "", check_end: str = ""):
         "portal_inputs_by_class_code": report,
         "grand_total_gross_wages": round(sum(v["gross"] for v in by_code.values()), 2),
         "grand_total_overtime_pay": round(sum(v["ot"] for v in by_code.values()), 2),
-        "per_payroll_gross_check": payroll_gross,
+        "per_payroll_gross_check": {k: round(v, 2) for k, v in payroll_gross.items()},
         "distinct_employees_paid": len(emps_paid),
         "exceptions": exceptions,
         "exceptions_count": len(exceptions),
