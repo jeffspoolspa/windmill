@@ -81,10 +81,10 @@ export async function main(month: string, dry_run: boolean = true) {
           await sql`
             update maintenance.tasks set
               billing_method = ${d.billingMethod},
-              price_per_visit_cents = ${d.ppvCents},
-              flat_rate_monthly_cents = ${d.flatCents},
+              price_per_visit_cents = ${d.ppvCents}::int,
+              flat_rate_monthly_cents = ${d.flatCents}::int,
               external_data = external_data
-                || jsonb_build_object('billing_type', ${d.billingType}, 'service_type', ${d.serviceType},
+                || jsonb_build_object('billing_type', ${d.billingType}::text, 'service_type', ${d.serviceType}::text,
                                       'config_refreshed_at', to_char(now(), 'YYYY-MM-DD"T"HH24:MI:SSZ'))
             where id = ${t.id}`
         }
