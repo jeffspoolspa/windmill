@@ -1,62 +1,50 @@
 //bun-extra-requirements:
-//playwright@1.48.0
-//chromium-bidi@0.8.0
 //node-html-parser@6.1.13
-import { chromium } from "playwright@1.40.0"
-import { parse } from "node-html-parser"
+//playwright@1.40.0
+import "playwright@1.40.0"
 import * as wmill from "windmill-client"
+import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
 
 // PERMANENT AD-HOC ION RUNNER. Override main() body; run via runScriptByPath -> getJob.
-// CURRENT: download ION's consumables_detail report for ALL of June, show SUGARMILL rows (find the
-// 8 liquid chlorine + record date). Clears ExtJS popups (MyServiceWin3 etc.) that intercept the menu click.
+// CURRENT: discover the consumablesDetailByTech.cfm report endpoint by hitting ION directly with the
+// saved session (bypasses UI/popups). Report what URLs return, and any consumables report href found.
+function cookieHeader(s: any) {
+  const host = new URL(s.ionOrigin).hostname
+  return s.cookies.filter((c: any) => { const d = c.domain.replace(/^\./, ""); return host === d || host.endsWith("." + d) })
+    .map((c: any) => `${c.name}=${c.value}`).join("; ")
+}
+
 export async function main() {
-  const ion = {
-    loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"),
-    username: await wmill.getVariable("f/ION/USERNAME"),
-    password: await wmill.getVariable("f/ION/PASSWORD"),
+  const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
+  const s: any = await getOrRefreshSession(ion)
+  const o = s.ionOrigin
+  const cf = s.cfClientId || s.cf_clientid || null
+  const H = { Cookie: cookieHeader(s), "User-Agent": "Mozilla/5.0", Accept: "text/html, */*" }
+  const get = async (u: string) => {
+    const r = await fetch(`${o}${u}`, { headers: H, redirect: "manual" })
+    return { url: u, status: r.status, len: (await r.text()).length }
   }
-  const start_date = "2026-06-01", end_date = "2026-06-30"
-  const browser = await chromium.launch({
-    executablePath: "/usr/bin/chromium",
-    args: ['--no-sandbox', '--single-process', '--no-zygote', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-  })
-  const context = await browser.newContext({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", acceptDownloads: true })
-  const page = await context.newPage()
-  try {
-    await page.goto(ion.loginUrl)
-    await page.locator('#txtUserName').fill(ion.username)
-    await page.locator('#txtPassword').fill(ion.password)
-    await page.locator('button:has-text("Log In")').click()
-    await page.waitForLoadState('networkidle')
-    await page.locator('button[data-bs-target="#navbarToggleContent"]').click()
-    await page.locator('text=ION POOL CARE').click()
-    await page.waitForLoadState('networkidle')
-    await page.waitForTimeout(2500)
-    // nuclear: remove ExtJS popup windows + masks that intercept clicks
-    await page.evaluate(() => {
-      document.querySelectorAll('div.resizable.ui-draggable, div[id*="MyServiceWin"], div[id*="MyPrintWin"]').forEach((el) => el.remove())
-      document.querySelectorAll('.modal-backdrop, .x-mask').forEach((el) => el.remove())
-    })
-    await page.locator('#menuItem13 a').click()
-    await page.locator('.ovalbutton:has-text("Service Reports")').click()
-    await page.waitForTimeout(1000)
-    await page.locator('#rptStart').evaluate((el, val) => { (el as HTMLInputElement).value = val as string; el.dispatchEvent(new Event('change', { bubbles: true })) }, start_date)
-    await page.locator('#rptEnd').evaluate((el, val) => { (el as HTMLInputElement).value = val as string; el.dispatchEvent(new Event('change', { bubbles: true })) }, end_date)
-    await page.waitForTimeout(2000)
-    const downloadPromise = page.waitForEvent('download')
-    await page.locator('a[href*="consumablesDetailByTech.cfm"]').first().click()
-    const download = await downloadPromise
-    const path = await download.path()
-    const html = await Bun.file(path!).text()
-    const root = parse(html)
-    const table = root.querySelector('table')
-    if (!table) throw new Error('No table found')
-    const rows = table.querySelectorAll('tr').map((r: any) => r.querySelectorAll('td, th').map((c: any) => c.text.trim()))
-    const header = rows.slice(0, 4)
-    const sugarmill = rows.filter((row: string[]) => row.some((c) => /sugarmill/i.test(c)))
-    const chlorine = sugarmill.filter((row: string[]) => row.some((c) => /chlorine/i.test(c)))
-    return { total_rows: rows.length, header, sugarmill_count: sugarmill.length, chlorine, sugarmill }
-  } finally {
-    await browser.close()
+  const grab = async (u: string) => {
+    const r = await fetch(`${o}${u}`, { headers: H, redirect: "manual" })
+    return await r.text()
   }
+  // 1) reports shell + service reports page -- look for the consumables report href/param shape
+  const candidates = [
+    "/reports/reports.cfm",
+    "/reports/serviceReports.cfm",
+    `/reports/consumablesDetailByTech.cfm?rptStart=${"2026-06-01"}&rptEnd=${"2026-06-30"}${cf ? `&_cf_clientid=${cf}` : ""}&_cf_nodebug=true&_cf_nocache=true&_cf_rc=1`,
+  ]
+  const statuses = []
+  for (const c of candidates) { try { statuses.push(await get(c)) } catch (e: any) { statuses.push({ url: c, error: String(e?.message ?? e).slice(0, 120) }) } }
+
+  // pull any consumables* hrefs from the two picker pages
+  let hrefs: string[] = []
+  for (const p of ["/reports/reports.cfm", "/reports/serviceReports.cfm"]) {
+    try { const body = await grab(p); hrefs.push(...[...body.matchAll(/href="([^"]*consumabl[^"]*)"/gi)].map((m) => m[1])) } catch {}
+  }
+  // snippet of the direct report body (first 600 chars) to see if it returned a data table
+  let directSnippet = ""
+  try { directSnippet = (await grab(candidates[2])).slice(0, 600) } catch (e: any) { directSnippet = "ERR " + String(e?.message ?? e).slice(0, 120) }
+
+  return { has_cf_clientid: !!cf, statuses, consumables_hrefs: [...new Set(hrefs)].slice(0, 20), directSnippet }
 }
