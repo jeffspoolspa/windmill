@@ -3,14 +3,17 @@
 //playwright@1.40.0
 //postgres@3.4.4
 import "playwright@1.40.0"
+import * as wmill from "windmill-client"
+import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
+import { getTaskDetail } from "/f/ION/_lib/task_detail"
 
-// PERMANENT AD-HOC ION RUNNER (inert baseline).
-//
-// Usage: override main() with a one-off body (keep the bun-extra-requirements header), deploy via
-// createScript with parent_hash (versions in place), run via runScriptByPath (NO args -- hardcode
-// params in the body), fetch the result via getJob. Reset to this baseline when done.
-// Gotchas: runScriptByPath can resolve the PREVIOUS hash right after createScript -- check
-// script_hash in getJob and re-run if stale. Chromium tag required for anything using the ION session.
+// PERMANENT AD-HOC ION RUNNER. CURRENT: ALTMAN (task 5664059 / cust 1124217) -- our task_schedules
+// carry 3 ACTIVE day rows (Mon/Tue/Thu) but she is serviced 1x/week (Tuesdays). Dump ION's live
+// day1-7 roster + ServiceRepeat to see whether ION has 3 days or our sync drifted.
 export async function main() {
-  return { noop: true, note: "adhoc runner is at its inert baseline -- override main() for one-off ION jobs" }
+  const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
+  const s: any = await getOrRefreshSession(ion)
+  const { detail }: any = await getTaskDetail(s, "5664059", "1124217")
+  return { serviceType: detail.serviceType?.text, serviceRepeat: detail.serviceRepeat?.text,
+           perDayTech: detail.perDayTech, startsOn: detail.startsOn, endsOn: detail.endsOn }
 }

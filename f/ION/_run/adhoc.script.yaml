@@ -1,6 +1,6 @@
-summary: 'Permanent ad-hoc ION runner. Override main() body for one-off ION jobs
-  (createScript parent_hash -> runScriptByPath -> getJob). CURRENT: inert
-  baseline (no-op).'
+summary: 'Permanent ad-hoc ION runner. Override main() body for one-off ION
+  jobs. CURRENT: probe ALTMAN task 5664059 day roster (our schedules say 3 days,
+  reality is 1/wk).'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false
