@@ -1,76 +1,52 @@
 //bun-extra-requirements:
 //node-html-parser@6.1.13
 //playwright@1.40.0
-import { chromium } from "playwright@1.40.0"
+import "playwright@1.40.0"
 import * as wmill from "windmill-client"
 import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
 import { parse } from "node-html-parser"
 
-// EXPERIMENT: why does the raw POST to transactionRpt.cfm not prime the report criteria while a real
-// browser submit does? Steps:
-//  1. browser: goto form, set June/Tasks, capture the POST's FULL headers, submit, confirm XLS link.
-//  2. in-page XLS fetch (expected 200 = browser-primed).
-//  3. raw GET XLS with the browser's post-submit cookies (tests: is cookie/session state sufficient?).
-//  4. raw POST with the EXACT captured browser headers + same cookies, then raw GET XLS again.
-//  5. also: does the raw POST response echo our posted dates (criteria acknowledged?) - grep rptStart value.
+// CLEAN EXPERIMENT (no browser in this run): does a RAW fetch POST prime the CF session criteria?
+// Prior successes were all within minutes of a real browser submit (confounded). Here: force a FRESH
+// login (new JSESSIONID, criteria definitely unprimed), then raw GET form -> raw POST June/Tasks with
+// the EXACT header template captured from Chrome -> raw GET XLS (two header variants). If XLS 200 =>
+// raw POST DOES prime and earlier failures were something else. If 500 => only a navigation POST primes.
+const UA = "Mozilla/5.0"
 export async function main() {
   const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
-  const s: any = await getOrRefreshSession(ion)
+  const s: any = await getOrRefreshSession(ion, { forceRefresh: true }) // fresh session scope
   const o = s.ionOrigin
-  const out: any = {}
+  const jar = new Map<string, string>()
+  for (const c of (s.cookies || [])) { const d = (c.domain || "").replace(/^\./, ""); if ("ionpoolcare.com".endsWith(d) || d.endsWith("ionpoolcare.com")) jar.set(c.name, c.value) }
+  const cookieStr = () => [...jar.entries()].map(([k, v]) => `${k}=${v}`).join("; ")
+  const merge = (res: any) => { for (const line of ((res.headers.getSetCookie?.() || []) as string[])) { const kv = line.split(";")[0]; const i = kv.indexOf("="); if (i > 0) jar.set(kv.slice(0, i).trim(), kv.slice(i + 1).trim()) } }
+  const out: any = { seeded_cookies: [...jar.keys()] }
 
-  const browser = await chromium.launch({ executablePath: "/usr/bin/chromium", args: ['--no-sandbox', '--single-process', '--no-zygote', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] })
-  try {
-    const context = await browser.newContext({ userAgent: "Mozilla/5.0", acceptDownloads: true })
-    await context.addCookies((s.cookies || []).map((c: any) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path || "/", secure: !!c.secure, httpOnly: !!c.httpOnly })))
-    const page = await context.newPage()
-    let postHeaders: any = null, postData: string | null = null
-    page.on("request", async (r: any) => {
-      if (r.method() === "POST" && r.url().includes("transactionRpt")) {
-        try { postHeaders = await r.allHeaders() } catch { postHeaders = r.headers() }
-        postData = r.postData()
-      }
-    })
-    await page.goto(`${o}/reports/transactionRpt.cfm`, { waitUntil: "domcontentloaded" })
-    await page.evaluate(() => {
-      const g = (id: string) => document.getElementById(id) as any
-      if (g("rptStart")) g("rptStart").value = "2026-06-01"
-      if (g("rptEnd")) g("rptEnd").value = "2026-06-30"
-      const tt = document.querySelector('select[name="TransactionType"]') as any; if (tt) tt.value = "Tasks"
-      const wf = document.querySelector('input[name="WorkFrom"]') as any; if (wf) wf.value = "06/01/2026"
-      const wt = document.querySelector('input[name="WorkTo"]') as any; if (wt) wt.value = "06/30/2026"
-    })
-    await Promise.all([page.waitForLoadState("networkidle").catch(() => {}), page.evaluate(() => (document.getElementById("rpt") as any).submit())])
-    await page.waitForTimeout(1200)
-    const afterHtml = await page.content()
-    out.browser_submit = { has_xls_link: /allTransactions/i.test(afterHtml), post_headers: postHeaders, post_data: postData }
+  // GET form, browser-like headers
+  const gh = () => ({ cookie: cookieStr(), "user-agent": UA, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", "accept-language": "en-US,en;q=0.9", "sec-fetch-dest": "document", "sec-fetch-mode": "navigate", "sec-fetch-site": "same-origin", "upgrade-insecure-requests": "1", referer: `${o}/main.cfm` })
+  const r1 = await fetch(`${o}/reports/transactionRpt.cfm`, { headers: gh(), redirect: "manual" }); merge(r1)
+  out.get_form = { status: r1.status, len: (await r1.text()).length, cookies_now: [...jar.keys()] }
 
-    // 2) in-page XLS fetch
-    const inpage: any = await page.evaluate(async (u: string) => { const r = await fetch(u, { credentials: "include" }); const t = await r.text(); return { status: r.status, len: t.length } }, `${o}/reports/_xls/allTransactions.cfm`)
-    out.inpage_xls = inpage
+  // POST with the exact captured Chrome header template
+  const postBody = "rptOffice=0&CustomerType=0&TransactionType=Tasks&SyncStatus=0&Routes=0&rptStart=2026-06-01&rptEnd=2026-06-30&ServiceItem=&WOItem=&WorkFrom=06%2F01%2F2026&WorkTo=06%2F30%2F2026"
+  const ph: Record<string, string> = {
+    cookie: cookieStr(), "user-agent": UA, origin: o, referer: `${o}/reports/transactionRpt.cfm`,
+    accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "accept-language": "en-US,en;q=0.9", "cache-control": "max-age=0", "content-type": "application/x-www-form-urlencoded",
+    priority: "u=0, i", "sec-fetch-dest": "document", "sec-fetch-mode": "navigate", "sec-fetch-site": "same-origin", "sec-fetch-user": "?1", "upgrade-insecure-requests": "1",
+  }
+  const r2 = await fetch(`${o}/reports/transactionRpt.cfm`, { method: "POST", headers: ph, body: postBody, redirect: "manual" }); merge(r2)
+  const b2 = await r2.text()
+  out.post = { status: r2.status, len: b2.length, echoes_dates: b2.includes("2026-06-01"), has_xls_link: /allTransactions/i.test(b2) }
 
-    // post-submit cookies from the browser
-    const cookies = await context.cookies(o)
-    out.cookie_names = cookies.map((c: any) => c.name)
-    const cookieStr = cookies.map((c: any) => `${c.name}=${c.value}`).join("; ")
-
-    // 3) raw GET XLS with browser's post-submit cookies
-    const raw1 = await fetch(`${o}/reports/_xls/allTransactions.cfm`, { headers: { Cookie: cookieStr, "User-Agent": "Mozilla/5.0", Accept: "text/html, */*" }, redirect: "manual" })
-    out.raw_get_with_browser_cookies = { status: raw1.status, len: (await raw1.text()).length }
-
-    // 4) raw POST with EXACT captured headers (swap cookie for current) then raw GET XLS
-    if (postHeaders && postData) {
-      const H: Record<string, string> = {}
-      for (const [k, v] of Object.entries(postHeaders)) { const lk = k.toLowerCase(); if ([":authority", ":method", ":path", ":scheme", "content-length", "host"].includes(lk)) continue; H[k] = String(v) }
-      H["cookie"] = cookieStr
-      const rp = await fetch(`${o}/reports/transactionRpt.cfm`, { method: "POST", headers: H, body: postData, redirect: "manual" })
-      const rpBody = await rp.text()
-      out.raw_post_exact_headers = { status: rp.status, len: rpBody.length, echoes_dates: rpBody.includes("2026-06-01"), has_xls_link: /allTransactions/i.test(rpBody) }
-      const raw2 = await fetch(`${o}/reports/_xls/allTransactions.cfm`, { headers: { Cookie: cookieStr, "User-Agent": "Mozilla/5.0", Accept: "text/html, */*" }, redirect: "manual" })
-      const b2 = await raw2.text()
-      const table = parse(b2).querySelector("table")
-      out.raw_xls_after_raw_post = { status: raw2.status, len: b2.length, rows: table ? table.querySelectorAll("tr").length : 0 }
-    }
-    return out
-  } finally { await browser.close() }
+  // XLS variant A: minimal headers
+  const ra = await fetch(`${o}/reports/_xls/allTransactions.cfm`, { headers: { cookie: cookieStr(), "user-agent": UA, accept: "text/html, */*" }, redirect: "manual" })
+  const ba = await ra.text()
+  out.xls_minimal = { status: ra.status, len: ba.length }
+  // XLS variant B: browser-like nav headers
+  const rb = await fetch(`${o}/reports/_xls/allTransactions.cfm`, { headers: { ...gh(), referer: `${o}/reports/transactionRpt.cfm` }, redirect: "manual" })
+  const bb = await rb.text()
+  const table = parse(bb).querySelector("table")
+  out.xls_browserlike = { status: rb.status, len: bb.length, rows: table ? table.querySelectorAll("tr").length : 0 }
+  return out
 }
