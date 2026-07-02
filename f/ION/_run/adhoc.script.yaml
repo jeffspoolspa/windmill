@@ -1,6 +1,6 @@
 summary: 'Permanent ad-hoc ION runner. Override main() body; run via
-  runScriptByPath -> getJob. CURRENT: dump all SUGARMILL 06/15 logs w/ detail
-  (find where the non-serviceable chlorine log drops).'
+  runScriptByPath -> getJob. CURRENT: discover allTransactions.cfm params
+  (transactionRpt form) + probe XLS for June.'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false
