@@ -1,0 +1,9 @@
+summary: 'One-off: set QBO CompanyName = DisplayName for 12 commercial customers
+  missing it, then refresh the Customers.company cache.'
+description: Commercial customers (HOAs etc.) had no CompanyName in QBO so the
+  company-field commercial/residential rule missed them. QBO is the source;
+  Customers.company is a cache.
+lock: '!inline u/carter/backfill_company_names.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
