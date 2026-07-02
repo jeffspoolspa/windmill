@@ -1,6 +1,6 @@
 summary: 'Permanent ad-hoc ION runner. Override main() body; run via
-  runScriptByPath -> getJob. CURRENT: browser network-capture of the real
-  transaction-report submit+XLS to learn the exact request.'
+  runScriptByPath -> getJob. CURRENT: capture transaction-report priming POST +
+  fetch XLS in-page (download-safe).'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
 has_on_behalf_of: false
