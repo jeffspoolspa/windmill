@@ -1,35 +1,57 @@
 //bun-extra-requirements:
 //node-html-parser@6.1.13
 //playwright@1.40.0
-import "playwright@1.40.0"
+import { chromium } from "playwright@1.40.0"
 import * as wmill from "windmill-client"
 import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
 import { parse } from "node-html-parser"
 
 // PERMANENT AD-HOC ION RUNNER. Override main() body; run via runScriptByPath -> getJob.
-// CURRENT: dump the full transactionRpt.cfm <form> -- every input/select/button with all attrs, plus
-// the _CF_checkrpt() body and any submit trigger -- to reproduce the exact browser POST.
-function cookieHeader(s: any) {
-  const host = new URL(s.ionOrigin).hostname
-  return s.cookies.filter((c: any) => { const d = c.domain.replace(/^\./, ""); return host === d || host.endsWith("." + d) })
-    .map((c: any) => `${c.name}=${c.value}`).join("; ")
-}
-
+// CURRENT: reuse the cached session cookies in a real browser, load transactionRpt.cfm, submit
+// June/Tasks the way the page does, follow the All Transactions XLS -- and CAPTURE the exact
+// requests (method, url, postData) so we can replicate the pull as a raw fetch afterward.
 export async function main() {
   const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
   const s: any = await getOrRefreshSession(ion)
   const o = s.ionOrigin
-  const H = { Cookie: cookieHeader(s), "User-Agent": "Mozilla/5.0", Accept: "text/html, */*" }
-  const body = await (await fetch(`${o}/reports/transactionRpt.cfm`, { headers: H, redirect: "manual" })).text()
-  const root = parse(body)
-  const form = root.querySelector("form#rpt") || root.querySelector("form")
-  const controls = form ? form.querySelectorAll("input, select, button, a").map((el: any) => ({
-    tag: el.tagName, name: el.getAttribute("name") || null, id: el.getAttribute("id") || null,
-    type: el.getAttribute("type") || null, value: el.getAttribute("value") || null,
-    onclick: (el.getAttribute("onclick") || "").slice(0, 120) || null, href: (el.getAttribute("href") || "").slice(0, 80) || null,
-    text: (el.text || "").trim().slice(0, 40) || null,
-  })).filter((c: any) => c.name || c.onclick || c.type === "submit" || /submit|view|report|xls|search/i.test(c.text || "")) : []
-  const checkFn = (body.match(/function\s+_CF_checkrpt[\s\S]{0,600}?\}/) || [])[0] || null
-  const submitCtx = (body.match(/[^;{}]*\.submit\(\)[^;]*/g) || []).slice(0, 6)
-  return { controls, _CF_checkrpt: checkFn, submit_calls: submitCtx }
+  const browser = await chromium.launch({ executablePath: "/usr/bin/chromium", args: ['--no-sandbox', '--single-process', '--no-zygote', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] })
+  const context = await browser.newContext({ userAgent: "Mozilla/5.0", acceptDownloads: true })
+  await context.addCookies((s.cookies || []).map((c: any) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path || "/", secure: !!c.secure, httpOnly: !!c.httpOnly })))
+  const page = await context.newPage()
+  const captured: any[] = []
+  page.on("request", (r: any) => {
+    const u = r.url()
+    if (/transactionRpt\.cfm|_xls\/|allTransactions/i.test(u)) captured.push({ method: r.method(), url: u, postData: (r.postData() || "").slice(0, 800) })
+  })
+  try {
+    await page.goto(`${o}/reports/transactionRpt.cfm`, { waitUntil: "domcontentloaded" })
+    // set criteria the way the page does, then submit the form directly
+    await page.evaluate(() => {
+      const g = (id: string) => document.getElementById(id) as any
+      const setSel = (name: string, val: string) => { const el = document.querySelector(`select[name="${name}"]`) as any; if (el) el.value = val }
+      if (g("rptStart")) g("rptStart").value = "2026-06-01"
+      if (g("rptEnd")) g("rptEnd").value = "2026-06-30"
+      setSel("TransactionType", "Tasks")
+      const wf = document.querySelector('input[name="WorkFrom"]') as any; if (wf) wf.value = "06/01/2026"
+      const wt = document.querySelector('input[name="WorkTo"]') as any; if (wt) wt.value = "06/30/2026"
+    })
+    const rpt = await page.$("#rpt")
+    if (rpt) { await Promise.all([page.waitForLoadState("networkidle").catch(() => {}), page.evaluate(() => (document.getElementById("rpt") as any).submit())]) }
+    await page.waitForTimeout(1500)
+    // after submit: is the XLS link present? capture href, then fetch it in-page
+    const afterHtml = await page.content()
+    const xlsHref = (afterHtml.match(/href="([^"]*allTransactions[^"]*)"/i) || [])[1]?.replace(/&amp;/g, "&") || null
+    let xls: any = null
+    if (xlsHref) {
+      const u = xlsHref.startsWith("http") ? xlsHref : `${o}${xlsHref.startsWith("/") ? "" : "/reports/"}${xlsHref}`
+      const resp = await page.goto(u, { waitUntil: "domcontentloaded" })
+      const body = await page.content()
+      const table = parse(body).querySelector("table")
+      const rows = table ? table.querySelectorAll("tr").map((tr: any) => tr.querySelectorAll("td,th").map((c: any) => c.text.trim().replace(/\s+/g, " "))).filter((x: string[]) => x.some((c) => c)) : []
+      xls = { url: u, status: resp?.status() ?? null, rows: rows.length, head: rows.slice(0, 6).map((x: string[]) => x.join(" | ")) }
+    }
+    return { xls_href_found: xlsHref, xls, captured }
+  } finally {
+    await browser.close()
+  }
 }
