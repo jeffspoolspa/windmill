@@ -1,5 +1,5 @@
-summary: Build task_billing_periods (invoice promises) — task-driven; financial
-  terms read from the task; day-price model; flat-task effective months
+summary: Build task_billing_periods (invoice promises) — task-driven; ADR 007 §9
+  location; Model B priced consumables; locked-month skip
 description: ''
 lock: '!inline f/billing_audit/build_task_billing_periods.script.lock'
 has_on_behalf_of: false
