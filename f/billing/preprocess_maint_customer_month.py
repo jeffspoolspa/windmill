@@ -112,9 +112,10 @@ def get_maintenance_class_id(access_token, realm_id):
     return _QBO_CLASS_CACHE["id"], _QBO_CLASS_CACHE["name"]
 
 
-def enrich_invoice(qbo_invoice_id, memo, access_token, realm_id, dry_run):
-    """Sparse-update one QBO invoice: CustomerMemo '[Month] Pool Maintenance',
-    ClassRef maintenance, DueDate = 15th of the month after the invoice date.
+def enrich_invoice(qbo_invoice_id, memo, set_memo, access_token, realm_id, dry_run):
+    """Sparse-update one QBO invoice: ClassRef maintenance + DueDate = 15th of
+    the month after the invoice date, and (recurring tasks only) CustomerMemo
+    '[Month] Pool Maintenance' — job invoices keep their own memos.
     Returns the applied values (for the cache write-back)."""
     class_id, class_name = get_maintenance_class_id(access_token, realm_id)
     inv = qbo_query(f"SELECT * FROM Invoice WHERE Id = '{qbo_invoice_id}'",
@@ -126,22 +127,24 @@ def enrich_invoice(qbo_invoice_id, memo, access_token, realm_id, dry_run):
     y, m = int(txn[:4]), int(txn[5:7])
     y2, m2 = (y + 1, 1) if m == 12 else (y, m + 1)
     due = f"{y2}-{m2:02d}-15"
+    body = {"Id": inv["Id"], "SyncToken": inv["SyncToken"], "sparse": True,
+            "ClassRef": {"value": class_id},
+            "DueDate": due}
+    if set_memo:
+        body["CustomerMemo"] = {"value": memo}
     if not dry_run:
         resp = requests.post(
             f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/invoice",
             headers={"Authorization": f"Bearer {access_token}",
                      "Accept": "application/json", "Content-Type": "application/json"},
-            json={"Id": inv["Id"], "SyncToken": inv["SyncToken"], "sparse": True,
-                  "CustomerMemo": {"value": memo},
-                  "ClassRef": {"value": class_id},
-                  "DueDate": due},
+            json=body,
             timeout=60,
         )
         if not resp.ok:
             raise Exception(f"enrich failed for invoice {qbo_invoice_id}: {resp.text[:300]}")
     # cache write-back uses the CANONICAL casing — billing.invoices has a CHECK
     # allowing 'Maintenance' (not QBO's literal 'MAINTENANCE' class name)
-    return {"memo": memo, "class": "Maintenance", "due_date": due}
+    return {"memo": memo if set_memo else None, "class": "Maintenance", "due_date": due}
 
 
 def apply_customer_credits(qbo_customer_id, target_date, access_token, realm_id, dry_run):
@@ -277,21 +280,28 @@ def main(qbo_customer_id: str, billing_month: str, dry_run: bool = True):
         # maintenance, due date = 15th of the month after the invoice date.
         # Cache-checked: only invoices whose cached memo/class/due_date differ
         # get a QBO round-trip (idempotent re-runs are free).
+        # RECURRING task invoices only: green-pool / one-time job invoices keep
+        # their job-specific memos (e.g. 'Green Pool Recovery') — class and due
+        # date still standardize for everything maintenance bills.
         target_memo = f"{MONTH_NAMES[mon - 1]} Pool Maintenance"
         cur.execute(
-            """SELECT i.qbo_invoice_id, i.memo, i.qbo_class, i.due_date
+            """SELECT i.qbo_invoice_id, i.memo, i.qbo_class, i.due_date,
+                      (t.category = 'recurring') AS recurring
                FROM billing_audit.task_billing_periods tbp
                JOIN billing.invoices i ON i.qbo_invoice_id = tbp.qbo_invoice_id
+               LEFT JOIN maintenance.tasks t ON t.id = tbp.task_id
                WHERE tbp.qbo_customer_id = %s AND tbp.billing_month = %s
                  AND tbp.locked_at IS NULL""",
             (qbo_customer_id, month),
         )
-        to_enrich = [
-            r[0] for r in cur.fetchall()
-            if not (r[1] == target_memo
-                    and "maintenance" in (r[2] or "").lower()
-                    and r[3] is not None and r[3].day == 15)
-        ]
+        to_enrich = {}  # qbo_invoice_id -> set_memo (bool)
+        for r in cur.fetchall():
+            inv_id, cur_memo, cur_class, cur_due, recurring = r
+            set_memo = bool(recurring) and cur_memo != target_memo
+            base_ok = ("maintenance" in (cur_class or "").lower()
+                       and cur_due is not None and cur_due.day == 15)
+            if set_memo or not base_ok:
+                to_enrich[inv_id] = set_memo
 
         # Cache-first credit check: billing.customer_payments mirrors QBO
         # Payments AND CreditMemos (type='credit_memo') with unapplied_amt,
@@ -314,10 +324,10 @@ def main(qbo_customer_id: str, billing_month: str, dry_run: bool = True):
         enriched = {}
         if cached_credits or to_enrich:
             access_token, realm_id = refresh_qbo_token()
-            for inv_id in to_enrich:
+            for inv_id, set_memo in to_enrich.items():
                 try:
                     enriched[inv_id] = enrich_invoice(
-                        inv_id, target_memo, access_token, realm_id, dry_run)
+                        inv_id, target_memo, set_memo, access_token, realm_id, dry_run)
                 except Exception as e:
                     enrichment_error = str(e)[:500]
                     break
@@ -340,7 +350,7 @@ def main(qbo_customer_id: str, billing_month: str, dry_run: bool = True):
         for inv_id, vals in enriched.items():
             cur.execute(
                 """UPDATE billing.invoices
-                   SET memo = %s, qbo_class = %s, due_date = %s
+                   SET memo = coalesce(%s, memo), qbo_class = %s, due_date = %s
                    WHERE qbo_invoice_id = %s""",
                 (vals["memo"], vals["class"], vals["due_date"], inv_id),
             )
