@@ -195,10 +195,24 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
         #      processing_status (pending -> ion_matched | needs_review).
         #      Same transaction: a dry_run rolls these back too. ----
         ion_stamped = {}
+        backfilled = {}
         with conn.cursor() as cur:
             for month in sorted({m for (_, m) in groups}):
                 cur.execute("SELECT billing_audit.match_promises_to_ion(%s)", (month,))
                 n = cur.fetchone()[0]
+                # CDC-truncation backstop: stamped promises whose invoice is
+                # in QBO but never reached the cache (a burst window overflows
+                # the CDC response cap and the cursor jumps past the dropped
+                # rows). Pull them by DocNumber via the canonical refresh —
+                # the upsert fires the link trigger + preprocess queue.
+                if not dry_run:
+                    try:
+                        from f.billing.backfill_missing_invoices import main as backfill
+                        bf = backfill(month.strftime("%Y-%m"))
+                        if bf.get("found_in_qbo"):
+                            backfilled[month.strftime("%Y-%m")] = bf["found_in_qbo"]
+                    except Exception as e:
+                        print(f"  backfill {month}: {e}")
                 # true-up the trigger-maintained live chem totals from the
                 # authoritative CPV view (catalog price edits, task
                 # recategorization) — the hourly drift backstop
@@ -309,6 +323,7 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
             "month_coverage": coverage,
             "skipped_unbilled_months": skipped_months,
             "ion_stamped": ion_stamped,
+            "cache_backfilled": backfilled,
         }
     except Exception:
         conn.rollback()
