@@ -33,9 +33,11 @@
 #
 # External APIs:
 #   - QBO: query Payment/CreditMemo/Invoice per customer; POST payment
-#     (credit application). NO invoice /send here — sending belongs to the
-#     send step; auto-emailing would mark EmailSent and let the paid+sent
-#     auto-promote skip an unreviewed hold.
+#     (credit application); sparse-update Invoice (ENRICHMENT: CustomerMemo
+#     '[Month] Pool Maintenance', ClassRef maintenance, DueDate = 15th of the
+#     month after the invoice date — cache-checked so re-runs are free).
+#     NO invoice /send here — sending belongs to the send step; auto-emailing
+#     would mark EmailSent and let the paid+sent auto-promote skip a hold.
 #
 # Why this exists:
 #   Credits used to be applied inside the monthly_autopay flow by
@@ -54,6 +56,12 @@ import wmill
 
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
+
+MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December"]
+# QBO Class id for 'maintenance', looked up once per process (the drainer runs
+# many customers in one process, so this caches across the whole tick)
+_QBO_CLASS_CACHE: dict = {}
 
 
 def refresh_qbo_token():
@@ -90,6 +98,48 @@ def qbo_query(q, access_token, realm_id):
     if not r.ok:
         raise Exception(f"QBO query failed: {r.text[:300]}")
     return r.json().get("QueryResponse", {})
+
+
+def get_maintenance_class_id(access_token, realm_id):
+    if "id" not in _QBO_CLASS_CACHE:
+        classes = qbo_query("SELECT Id, Name FROM Class WHERE Active = true",
+                            access_token, realm_id).get("Class", [])
+        match = next((c for c in classes if "maintenance" in (c.get("Name") or "").lower()), None)
+        if not match:
+            raise Exception("QBO Class 'maintenance' not found")
+        _QBO_CLASS_CACHE["id"] = match["Id"]
+        _QBO_CLASS_CACHE["name"] = match["Name"]
+    return _QBO_CLASS_CACHE["id"], _QBO_CLASS_CACHE["name"]
+
+
+def enrich_invoice(qbo_invoice_id, memo, access_token, realm_id, dry_run):
+    """Sparse-update one QBO invoice: CustomerMemo '[Month] Pool Maintenance',
+    ClassRef maintenance, DueDate = 15th of the month after the invoice date.
+    Returns the applied values (for the cache write-back)."""
+    class_id, class_name = get_maintenance_class_id(access_token, realm_id)
+    inv = qbo_query(f"SELECT * FROM Invoice WHERE Id = '{qbo_invoice_id}'",
+                    access_token, realm_id).get("Invoice", [])
+    if not inv:
+        raise Exception(f"invoice {qbo_invoice_id} not found in QBO")
+    inv = inv[0]
+    txn = inv.get("TxnDate")  # 'YYYY-MM-DD'
+    y, m = int(txn[:4]), int(txn[5:7])
+    y2, m2 = (y + 1, 1) if m == 12 else (y, m + 1)
+    due = f"{y2}-{m2:02d}-15"
+    if not dry_run:
+        resp = requests.post(
+            f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/invoice",
+            headers={"Authorization": f"Bearer {access_token}",
+                     "Accept": "application/json", "Content-Type": "application/json"},
+            json={"Id": inv["Id"], "SyncToken": inv["SyncToken"], "sparse": True,
+                  "CustomerMemo": {"value": memo},
+                  "ClassRef": {"value": class_id},
+                  "DueDate": due},
+            timeout=60,
+        )
+        if not resp.ok:
+            raise Exception(f"enrich failed for invoice {qbo_invoice_id}: {resp.text[:300]}")
+    return {"memo": memo, "class": class_name, "due_date": due}
 
 
 def apply_customer_credits(qbo_customer_id, target_date, access_token, realm_id, dry_run):
@@ -221,6 +271,26 @@ def main(qbo_customer_id: str, billing_month: str, dry_run: bool = True):
             return {"customer": qbo_customer_id, "month": month,
                     "action": "no linked periods — nothing to preprocess"}
 
+        # Enrichment targets: memo '[Month] Pool Maintenance', class
+        # maintenance, due date = 15th of the month after the invoice date.
+        # Cache-checked: only invoices whose cached memo/class/due_date differ
+        # get a QBO round-trip (idempotent re-runs are free).
+        target_memo = f"{MONTH_NAMES[mon - 1]} Pool Maintenance"
+        cur.execute(
+            """SELECT i.qbo_invoice_id, i.memo, i.qbo_class, i.due_date
+               FROM billing_audit.task_billing_periods tbp
+               JOIN billing.invoices i ON i.qbo_invoice_id = tbp.qbo_invoice_id
+               WHERE tbp.qbo_customer_id = %s AND tbp.billing_month = %s
+                 AND tbp.locked_at IS NULL""",
+            (qbo_customer_id, month),
+        )
+        to_enrich = [
+            r[0] for r in cur.fetchall()
+            if not (r[1] == target_memo
+                    and "maintenance" in (r[2] or "").lower()
+                    and r[3] is not None and r[3].day == 15)
+        ]
+
         # Cache-first credit check: billing.customer_payments mirrors QBO
         # Payments AND CreditMemos (type='credit_memo') with unapplied_amt,
         # healed by webhooks + the 15-min CDC poll. Only when the cache shows
@@ -237,40 +307,64 @@ def main(qbo_customer_id: str, billing_month: str, dry_run: bool = True):
         cached_credits = cur.fetchall()
 
         credit_error = None
+        enrichment_error = None
         credits = []
-        if cached_credits:
+        enriched = {}
+        if cached_credits or to_enrich:
             access_token, realm_id = refresh_qbo_token()
-            try:
-                credits = apply_customer_credits(
-                    qbo_customer_id, target_date, access_token, realm_id, dry_run)
-            except Exception as e:
-                credit_error = str(e)[:500]
+            for inv_id in to_enrich:
+                try:
+                    enriched[inv_id] = enrich_invoice(
+                        inv_id, target_memo, access_token, realm_id, dry_run)
+                except Exception as e:
+                    enrichment_error = str(e)[:500]
+                    break
+            if cached_credits:
+                try:
+                    credits = apply_customer_credits(
+                        qbo_customer_id, target_date, access_token, realm_id, dry_run)
+                except Exception as e:
+                    credit_error = str(e)[:500]
 
         if dry_run:
             return {"customer": qbo_customer_id, "month": month, "dry_run": True,
                     "linked_periods": linked,
+                    "would_enrich": {k: v for k, v in enriched.items()},
+                    "enrichment_error": enrichment_error,
                     "cached_unapplied_credits": len(cached_credits),
                     "would_apply_credits": credits, "credit_error": credit_error}
 
-        if credit_error:
+        # keep the invoice cache truthful immediately (CDC heals within 15 min)
+        for inv_id, vals in enriched.items():
+            cur.execute(
+                """UPDATE billing.invoices
+                   SET memo = %s, qbo_class = %s, due_date = %s
+                   WHERE qbo_invoice_id = %s""",
+                (vals["memo"], vals["class"], vals["due_date"], inv_id),
+            )
+
+        op_error = enrichment_error or credit_error
+        op_reason = "enrichment_error" if enrichment_error else "credit_error"
+        if op_error:
             # sticky operational hold; only a clean re-run clears it
             cur.execute(
                 """UPDATE billing_audit.task_billing_periods
                    SET processing_status = 'needs_review',
-                       needs_review_reason = 'credit_error',
+                       needs_review_reason = %s,
                        pre_processed_at = now(),
-                       notes = left(coalesce(notes || ' | ', '') || 'credit_error: ' || %s, 2000),
+                       notes = left(coalesce(notes || ' | ', '') || %s || ': ' || %s, 2000),
                        updated_at = now()
                    WHERE qbo_customer_id = %s AND billing_month = %s
                      AND locked_at IS NULL AND processing_status <> 'processed'""",
-                (credit_error, qbo_customer_id, month),
+                (op_reason, op_reason, op_error, qbo_customer_id, month),
             )
         else:
             cur.execute(
                 """UPDATE billing_audit.task_billing_periods
                    SET pre_processed_at = now(),
                        credits_applied = %s::jsonb,
-                       needs_review_reason = CASE WHEN needs_review_reason = 'credit_error'
+                       needs_review_reason = CASE WHEN needs_review_reason
+                                                  IN ('credit_error', 'enrichment_error')
                                                   THEN NULL ELSE needs_review_reason END,
                        updated_at = now()
                    WHERE qbo_customer_id = %s AND billing_month = %s
@@ -311,7 +405,9 @@ def main(qbo_customer_id: str, billing_month: str, dry_run: bool = True):
         changed = cur.fetchone()[0]
         conn.commit()
         return {"customer": qbo_customer_id, "month": month, "dry_run": False,
-                "linked_periods": linked, "credits_applied": credits,
-                "credit_error": credit_error, "rows_projected": changed}
+                "linked_periods": linked, "enriched": list(enriched.keys()),
+                "enrichment_error": enrichment_error,
+                "credits_applied": credits, "credit_error": credit_error,
+                "rows_projected": changed}
     finally:
         conn.close()
