@@ -178,7 +178,18 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.25,
             for qid, cust, month, is_lastday, line_items in cur.fetchall():
                 lc, cons = _parse_invoice(line_items)
                 if lc <= 0:
-                    continue  # carries no maintenance labor
+                    # No labor REVENUE — but a QC/chem-only invoice is still a
+                    # maintenance invoice and its CONSUMABLES still bill (the
+                    # documented QC rule). Skipping them made every QC-invoiced
+                    # chemical read as under-billed (BEANE, June 2026). Only
+                    # skip invoices with no maintenance line at all
+                    # (repairs/parts).
+                    is_maint = any(
+                        MAINT_KEYWORDS.search((li or {}).get("item_name") or "")
+                        for li in (line_items or [])
+                        if (li or {}).get("line_type") == "item")
+                    if not is_maint:
+                        continue
                 e = inv.setdefault((cust, month), {"lastday": _bucket(), "all": _bucket()})
                 targets = [e["all"]] + ([e["lastday"]] if is_lastday else [])
                 for b in targets:
