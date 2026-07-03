@@ -474,9 +474,21 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
                         (p["qbo_invoice_id"],))
                     update_attempt(conn, cur, attempt["id"], email_sent=True)
                     conn.commit()
+            # invoice delivered -> the month's processing is DONE (Carter):
+            # collection now lives on the invoice balance + roster
+            # payment_issue. Projection never demotes processed.
+            if emails["invoice"]:
+                cur.execute(
+                    """UPDATE billing_audit.task_billing_periods
+                       SET processing_status = 'processed',
+                           processed_at = coalesce(processed_at, now()),
+                           updated_at = now()
+                       WHERE id = %s""", (period_id,))
+                conn.commit()
             return {"period": period_id, "customer": p["customer_name"],
                     "status": "charge_declined", "error": charge_result.get("error"),
-                    "invoice_sent": emails["invoice"]}
+                    "invoice_sent": emails["invoice"],
+                    "processed": emails["invoice"] or None}
         update_attempt(conn, cur, attempt["id"], status="charge_succeeded",
                        charge_id=charge_result.get("charge_id"),
                        raw_result=_dumps(charge_result))
