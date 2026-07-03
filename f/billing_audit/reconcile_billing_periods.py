@@ -199,6 +199,9 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
             for month in sorted({m for (_, m) in groups}):
                 cur.execute("SELECT billing_audit.match_promises_to_ion(%s)", (month,))
                 n = cur.fetchone()[0]
+                # keep the chem-flag snapshot fresh (the projection + Bills UI
+                # read it; the live view costs ~3.5s so it's snapshotted)
+                cur.execute("SELECT billing_audit.refresh_chem_flags(%s)", (month,))
                 cur.execute(
                     "SELECT billing_audit.project_maint_processing_status(%s)", (month,))
                 if n:

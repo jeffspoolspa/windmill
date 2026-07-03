@@ -21,8 +21,14 @@
 # Tables touched:
 #   billing_audit.task_billing_periods   [r/w]  the customer-month's periods;
 #                                               stamps pre_processed_at,
-#                                               credits_applied, credit_error
-#   billing.invoices                     [read] linked-invoice sanity only
+#                                               credits_applied, credit_error,
+#                                               autopay_customer_id (the tag
+#                                               processing charges through)
+#   billing.customer_payments            [r/w]  cache-first credit check (QBO
+#                                               is only called when this shows
+#                                               unapplied maint credit);
+#                                               decremented after apply
+#   billing.autopay_customers            [read] active-roster FK for the tag
 #   (projection fn touches processing_status/needs_review_reason)
 #
 # External APIs:
@@ -215,19 +221,36 @@ def main(qbo_customer_id: str, billing_month: str, dry_run: bool = True):
             return {"customer": qbo_customer_id, "month": month,
                     "action": "no linked periods — nothing to preprocess"}
 
-        access_token, realm_id = refresh_qbo_token()
+        # Cache-first credit check: billing.customer_payments mirrors QBO
+        # Payments AND CreditMemos (type='credit_memo') with unapplied_amt,
+        # healed by webhooks + the 15-min CDC poll. Only when the cache shows
+        # unapplied maint credit do we touch QBO at all — the common case
+        # (no credits) costs zero QBO calls and no token refresh.
+        cur.execute(
+            """SELECT qbo_payment_id, type, unapplied_amt
+               FROM billing.customer_payments
+               WHERE qbo_customer_id = %s
+                 AND coalesce(unapplied_amt, 0) > 0
+                 AND memo ILIKE '%%maint%%'""",
+            (qbo_customer_id,),
+        )
+        cached_credits = cur.fetchall()
+
         credit_error = None
         credits = []
-        try:
-            credits = apply_customer_credits(
-                qbo_customer_id, target_date, access_token, realm_id, dry_run)
-        except Exception as e:
-            credit_error = str(e)[:500]
+        if cached_credits:
+            access_token, realm_id = refresh_qbo_token()
+            try:
+                credits = apply_customer_credits(
+                    qbo_customer_id, target_date, access_token, realm_id, dry_run)
+            except Exception as e:
+                credit_error = str(e)[:500]
 
         if dry_run:
             return {"customer": qbo_customer_id, "month": month, "dry_run": True,
-                    "linked_periods": linked, "would_apply_credits": credits,
-                    "credit_error": credit_error}
+                    "linked_periods": linked,
+                    "cached_unapplied_credits": len(cached_credits),
+                    "would_apply_credits": credits, "credit_error": credit_error}
 
         if credit_error:
             # sticky operational hold; only a clean re-run clears it
@@ -254,6 +277,33 @@ def main(qbo_customer_id: str, billing_month: str, dry_run: bool = True):
                      AND locked_at IS NULL AND processing_status <> 'processed'""",
                 (json.dumps(credits), qbo_customer_id, month),
             )
+            # keep the payments cache truthful immediately (CDC heals it within
+            # 15 min anyway; this avoids a pointless QBO round-trip on retry)
+            for entry in credits:
+                applied_amt = sum(t["amount"] for t in entry.get("applied_to", []))
+                src_id = entry.get("payment_id") or entry.get("credit_memo_id")
+                if src_id and applied_amt:
+                    cur.execute(
+                        """UPDATE billing.customer_payments
+                           SET unapplied_amt = greatest(0, coalesce(unapplied_amt,0) - %s)
+                           WHERE qbo_payment_id = %s""",
+                        (applied_amt, src_id),
+                    )
+
+        # autopay tag: FK the period to its ACTIVE roster row. Purely a tag —
+        # the charge decision happens in processing, which follows this link
+        # to the roster row's payment method (autopay_customers.payment_method_id
+        # -> billing.customer_payment_methods).
+        cur.execute(
+            """UPDATE billing_audit.task_billing_periods tbp
+               SET autopay_customer_id = ac.id, updated_at = now()
+               FROM billing.autopay_customers ac
+               WHERE ac.qbo_customer_id = tbp.qbo_customer_id AND ac.is_active
+                 AND tbp.qbo_customer_id = %s AND tbp.billing_month = %s
+                 AND tbp.locked_at IS NULL
+                 AND tbp.autopay_customer_id IS DISTINCT FROM ac.id""",
+            (qbo_customer_id, month),
+        )
         cur.execute(
             "SELECT billing_audit.project_maint_processing_status(%s, %s)",
             (month, qbo_customer_id),

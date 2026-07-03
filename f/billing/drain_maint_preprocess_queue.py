@@ -72,6 +72,20 @@ def main(max_per_tick: int = MAX_PER_TICK, dry_run: bool = False):
         )
         conn.commit()
 
+        # Refresh the chem-flag snapshot ONCE per tick (only when there is
+        # work): the underlying view recomputes the whole fleet's CPV rollup
+        # (~3.5s), so it must never run per-customer. The projection reads the
+        # snapshot (indexed) — a full month's drain evaluates flags in
+        # milliseconds each after this one payment.
+        cur.execute(
+            """SELECT DISTINCT billing_month FROM billing_audit.maint_preprocess_queue
+               WHERE finished_at IS NULL AND attempts < %s""",
+            (MAX_ATTEMPTS,),
+        )
+        for (m,) in cur.fetchall():
+            cur.execute("SELECT billing_audit.refresh_chem_flags(%s)", (m,))
+        conn.commit()
+
         for _ in range(max_per_tick):
             # Claim the oldest live entry (SKIP LOCKED: a concurrent manual
             # drain can't double-claim).
