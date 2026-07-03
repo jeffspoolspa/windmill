@@ -453,7 +453,10 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
         return {"period": period_id, "customer": p["customer_name"], "status": "dry_run",
                 "plan": f"charge {channel} {(p['pm_brand'] or p['pm_type'] or '')} "
                         f"····{p['pm_last4'] or '?'} "
-                        f"{balance:.2f} for invoice #{invoice_num}, receipt then invoice to {p['email']}"
+                        f"{balance:.2f} for invoice #{invoice_num}, "
+                        + (f"receipt to {p['email']} (invoice already emailed — no resend)"
+                           if p["email_status"] == "EmailSent"
+                           else f"receipt then invoice to {p['email']}")
                         + (" [roster PM dead — would switch to QBO default]" if switched_pm else "")}
 
     if prior and prior["status"] == "charge_uncertain":
