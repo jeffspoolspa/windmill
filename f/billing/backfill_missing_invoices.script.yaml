@@ -1,0 +1,25 @@
+summary: Backfill cache-missing QBO invoices by DocNumber (CDC truncation repair)
+description: Finds billing periods whose stamped ION invoice number has no
+  billing.invoices row, queries QBO by DocNumber, and refreshes each through
+  refresh_invoice's canonical upsert — firing the link trigger and the
+  preprocess queue. Repairs gaps left by CDC response truncation during
+  month-end sync bursts. Idempotent.
+lock: '!inline f/billing/backfill_missing_invoices.script.lock'
+concurrency_key: qbo_api
+concurrency_time_window_s: 5
+concurrent_limit: 1
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    billing_month:
+      type: string
+      description: "'YYYY-MM' (required)"
+    dry_run:
+      type: boolean
+      description: report missing/found without refreshing
+      default: false
+  required:
+    - billing_month
