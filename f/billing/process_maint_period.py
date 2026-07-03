@@ -314,12 +314,22 @@ SELECT tbp.id, tbp.billing_month, tbp.qbo_customer_id, tbp.qbo_invoice_id,
        ac.id AS autopay_id, ac.email AS autopay_email,
        pm.id AS cpm_id, pm.qbo_payment_method_id, pm.type AS pm_type,
        pm.card_brand AS pm_brand, pm.last_four AS pm_last4,
-       pm.is_active AS pm_active, pm.auto_disabled_at, pm.deactivated_at
+       pm.is_active AS pm_active, pm.auto_disabled_at, pm.deactivated_at,
+       dpm.id AS dpm_id, dpm.qbo_payment_method_id AS dpm_qbo_id,
+       dpm.type AS dpm_type, dpm.card_brand AS dpm_brand, dpm.last_four AS dpm_last4
 FROM billing_audit.task_billing_periods tbp
 LEFT JOIN public."Customers" c ON c.qbo_customer_id = tbp.qbo_customer_id
 LEFT JOIN billing.invoices i ON i.qbo_invoice_id = tbp.qbo_invoice_id
 LEFT JOIN billing.autopay_customers ac ON ac.id = tbp.autopay_customer_id AND ac.is_active
 LEFT JOIN billing.customer_payment_methods pm ON pm.id = ac.payment_method_id
+LEFT JOIN LATERAL (
+  SELECT pm2.id, pm2.qbo_payment_method_id, pm2.type, pm2.card_brand, pm2.last_four
+  FROM billing.customer_payment_methods pm2
+  WHERE pm2.qbo_customer_id = tbp.qbo_customer_id
+    AND pm2.is_active AND pm2.auto_disabled_at IS NULL AND pm2.deactivated_at IS NULL
+  ORDER BY pm2.is_default DESC, pm2.fetched_at DESC
+  LIMIT 1
+) dpm ON true
 WHERE tbp.id = %s
 """
 
@@ -349,6 +359,20 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
     on_autopay = p["autopay_id"] is not None
     pm_ok = (p["cpm_id"] is not None and p["pm_active"]
              and p["auto_disabled_at"] is None and p["deactivated_at"] is None)
+    switched_pm = False
+    if on_autopay and not pm_ok and p["dpm_id"] is not None:
+        # the roster's linked method is gone from the customer's QBO wallet
+        # (card replaced in QBO -> refresh deactivated the old row). Fall back
+        # to their CURRENT default — the customer's own wallet choice — and
+        # re-point the roster so the switch is visible and durable.
+        p["cpm_id"], p["qbo_payment_method_id"] = p["dpm_id"], p["dpm_qbo_id"]
+        p["pm_type"], p["pm_brand"], p["pm_last4"] = (
+            p["dpm_type"], p["dpm_brand"], p["dpm_last4"])
+        pm_ok = switched_pm = True
+        if not dry_run:
+            cur.execute("SELECT public.maint_billing_autopay_set_pm(%s, %s)",
+                        (p["qbo_customer_id"], p["cpm_id"]))
+            conn.commit()
     # customer_payment_methods.type is 'ach' | 'credit_card'
     is_bank = (p["pm_type"] or "").lower() in ("ach", "bank_account") \
         or "bank" in (p["pm_type"] or "").lower()
@@ -404,7 +428,8 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
         return {"period": period_id, "customer": p["customer_name"], "status": "dry_run",
                 "plan": f"charge {channel} {(p['pm_brand'] or p['pm_type'] or '')} "
                         f"····{p['pm_last4'] or '?'} "
-                        f"{balance:.2f} for invoice #{invoice_num}, receipt then invoice to {p['email']}"}
+                        f"{balance:.2f} for invoice #{invoice_num}, receipt then invoice to {p['email']}"
+                        + (" [roster PM dead — would switch to QBO default]" if switched_pm else "")}
 
     if prior and prior["status"] == "charge_uncertain":
         attempt = prior  # REUSE the persisted idempotency key — Intuit dedupes
@@ -486,6 +511,7 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
             "charged": charge_result.get("amount"), "charge_id": charge_result.get("charge_id"),
             "qbo_payment_id": rec["qbo_payment_id"],
             "receipt_sent": emails["receipt"], "invoice_sent": emails["invoice"],
+            "pm_switched_to_qbo_default": switched_pm or None,
             "email_errors": emails["errors"] or None}
 
 
