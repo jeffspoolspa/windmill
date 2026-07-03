@@ -96,6 +96,13 @@ def main(max_per_tick: int = MAX_PER_TICK, dry_run: bool = False):
         )
         conn.commit()
 
+        # Peer-group snapshot (chem median buckets): cheap upsert so a
+        # customer whose first visit just landed gets a group before their
+        # invoice preprocesses (the views read the snapshot, not the live
+        # derivation — that recompute was the statement-timeout culprit).
+        cur.execute("SELECT billing_audit.refresh_customer_peer_groups()")
+        conn.commit()
+
         # Chem flags need no refresh step: customer_month_chem_live is
         # trigger-maintained per ingested consumable, and the medians/flags
         # are views over it (~500 rows/month) — always current, milliseconds
