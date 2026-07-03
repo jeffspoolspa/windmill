@@ -374,7 +374,9 @@ def main(qbo_customer_id: str, billing_month: str, dry_run: bool = True):
             cur.execute(
                 """UPDATE billing_audit.task_billing_periods
                    SET pre_processed_at = now(),
-                       credits_applied = %s::jsonb,
+                       -- APPEND, never overwrite: a re-run with nothing new to
+                       -- apply must not erase the history of what was applied
+                       credits_applied = coalesce(credits_applied, '[]'::jsonb) || %s::jsonb,
                        needs_review_reason = CASE WHEN needs_review_reason
                                                   IN ('credit_error', 'enrichment_error')
                                                   THEN NULL ELSE needs_review_reason END,
