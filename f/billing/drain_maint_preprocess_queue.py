@@ -73,6 +73,27 @@ def main(max_per_tick: int = MAX_PER_TICK, dry_run: bool = False):
                ON CONFLICT (qbo_customer_id, billing_month) WHERE finished_at IS NULL
                DO NOTHING"""
         )
+        # Sticky op errors self-heal too: enrichment_error/credit_error are
+        # usually transient burst collisions (QBO throttle / ION still
+        # touching the invoice mid-sync). Re-enqueue at most every 30 min —
+        # a clean re-run clears the flag; a persistent failure stays visible
+        # in Needs Review between retries.
+        cur.execute(
+            """INSERT INTO billing_audit.maint_preprocess_queue (qbo_customer_id, billing_month)
+               SELECT DISTINCT tbp.qbo_customer_id, tbp.billing_month
+               FROM billing_audit.task_billing_periods tbp
+               WHERE tbp.needs_review_reason IN ('enrichment_error', 'credit_error')
+                 AND tbp.processing_status = 'needs_review'
+                 AND tbp.locked_at IS NULL
+                 AND NOT EXISTS (
+                       SELECT 1 FROM billing_audit.maint_preprocess_queue q
+                       WHERE q.qbo_customer_id = tbp.qbo_customer_id
+                         AND q.billing_month = tbp.billing_month
+                         AND (q.finished_at IS NULL
+                              OR q.enqueued_at > now() - interval '30 minutes'))
+               ON CONFLICT (qbo_customer_id, billing_month) WHERE finished_at IS NULL
+               DO NOTHING"""
+        )
         conn.commit()
 
         # Chem flags need no refresh step: customer_month_chem_live is
