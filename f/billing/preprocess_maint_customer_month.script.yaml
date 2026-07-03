@@ -1,0 +1,31 @@
+summary: 'Preprocess one maintenance customer-month: apply credits (no email),
+  stamp periods, project processing_status'
+description: Stage-3 preprocessing of the maintenance billing pipeline. Applies
+  the customer's unapplied maint Payments/CreditMemos to open month-end invoices
+  (customer-scoped QBO queries, no invoice-send side effect), stamps
+  pre_processed_at + credits_applied on billing_audit.task_billing_periods, then
+  calls billing_audit.project_maint_processing_status. Called serially by
+  f/billing/drain_maint_preprocess_queue.
+lock: '!inline f/billing/preprocess_maint_customer_month.script.lock'
+concurrency_key: qbo_writer
+concurrency_time_window_s: 5
+concurrent_limit: 1
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    billing_month:
+      type: string
+      description: "'YYYY-MM' or 'YYYY-MM-01'"
+    dry_run:
+      type: boolean
+      description: report-only (no QBO writes, no period stamps)
+      default: true
+    qbo_customer_id:
+      type: string
+      description: QBO customer id whose month is being preprocessed
+  required:
+    - qbo_customer_id
+    - billing_month
