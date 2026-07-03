@@ -246,8 +246,11 @@ def record_qbo_payment(customer_id, invoice_id, amount, charge_result, invoice_n
     return {"success": True, "qbo_payment_id": resp.json().get("Payment", {}).get("Id")}
 
 
-def send_receipt_then_invoice(payment_id, invoice_id, email, access_token, realm_id):
-    """RECEIPT FIRST (payment/send), then the invoice copy (invoice/send)."""
+def send_receipt_then_invoice(payment_id, invoice_id, email, access_token, realm_id,
+                              send_invoice=True):
+    """RECEIPT FIRST (payment/send), then the invoice copy (invoice/send).
+    send_invoice=False skips the invoice copy (already delivered — never
+    resend; manual "Send invoice copies" is the only resend path)."""
     out = {"receipt": False, "invoice": False, "errors": []}
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json",
                "Content-Type": "application/octet-stream"}
@@ -261,6 +264,8 @@ def send_receipt_then_invoice(payment_id, invoice_id, email, access_token, realm
         out["receipt"] = r.ok
         if not r.ok:
             out["errors"].append(f"receipt: HTTP {r.status_code} {r.text[:150]}")
+    if not send_invoice:
+        return out
     r = requests.post(
         f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/invoice/{invoice_id}/send?sendTo={email}",
         headers=headers, timeout=60)
@@ -402,26 +407,46 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
                 "error": "payment_orphan — human recovery required"}
 
     if channel == "email":
-        # non-autopay: invoice email only, no charge
+        # non-autopay: invoice email only, no charge. NEVER resend an
+        # already-delivered invoice (manual "Send invoice copies" is the only
+        # resend path) — already sent just moves to processed, like WOs.
+        already_sent = p["email_status"] == "EmailSent"
         if dry_run:
             return {"period": period_id, "customer": p["customer_name"], "status": "dry_run",
-                    "plan": f"send invoice #{invoice_num} to {p['email']} (no autopay)"}
-        attempt = create_attempt(conn, cur, invoice_num, p["qbo_invoice_id"], "email",
-                                 None, balance, dry_run)
-        emails = send_receipt_then_invoice(None, p["qbo_invoice_id"], p["email"],
-                                           access_token, realm_id)
-        ok = emails["invoice"]
-        update_attempt(conn, cur, attempt["id"],
-                       status="succeeded" if ok else "email_failed",
-                       email_sent=ok, error_message=None if ok else "; ".join(emails["errors"]),
-                       raw_result=_dumps(emails))
+                    "plan": (f"invoice #{invoice_num} already emailed — move to processed"
+                             if already_sent else
+                             f"send invoice #{invoice_num} to {p['email']} (no autopay)")}
+        ok = already_sent
+        errors = None
+        if not already_sent:
+            attempt = create_attempt(conn, cur, invoice_num, p["qbo_invoice_id"], "email",
+                                     None, balance, dry_run)
+            emails = send_receipt_then_invoice(None, p["qbo_invoice_id"], p["email"],
+                                               access_token, realm_id)
+            ok = emails["invoice"]
+            errors = emails["errors"] or None
+            update_attempt(conn, cur, attempt["id"],
+                           status="succeeded" if ok else "email_failed",
+                           email_sent=ok,
+                           error_message=None if ok else "; ".join(emails["errors"]),
+                           raw_result=_dumps(emails))
+            if ok:
+                cur.execute("UPDATE billing.invoices SET email_status='EmailSent' WHERE qbo_invoice_id=%s",
+                            (p["qbo_invoice_id"],))
+                conn.commit()
         if ok:
-            cur.execute("UPDATE billing.invoices SET email_status='EmailSent' WHERE qbo_invoice_id=%s",
-                        (p["qbo_invoice_id"],))
+            # invoice delivered = the month's processing is done
+            cur.execute(
+                """UPDATE billing_audit.task_billing_periods
+                   SET processing_status = 'processed',
+                       processed_at = coalesce(processed_at, now()),
+                       updated_at = now()
+                   WHERE id = %s""", (period_id,))
             conn.commit()
         return {"period": period_id, "customer": p["customer_name"],
-                "status": "invoice_sent" if ok else "email_failed",
-                "errors": emails["errors"] or None}
+                "status": ("processed" if already_sent
+                           else "invoice_sent" if ok else "email_failed"),
+                "errors": errors}
 
     # autopay charge path
     if dry_run:
@@ -510,10 +535,15 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
                 "status": "payment_orphan", "error": rec["error"]}
     update_attempt(conn, cur, attempt["id"], qbo_payment_id=rec["qbo_payment_id"])
 
-    # RECEIPT first, then the invoice copy
+    # RECEIPT first, then the invoice copy — but never RESEND an invoice the
+    # customer already got (pre-charge send from ION/manual); receipt is
+    # always new (this payment just happened)
+    invoice_already_sent = p["email_status"] == "EmailSent"
     emails = send_receipt_then_invoice(rec["qbo_payment_id"], p["qbo_invoice_id"],
-                                       p["email"], access_token, realm_id)
-    final = "succeeded" if emails["invoice"] or emails["receipt"] else "email_failed"
+                                       p["email"], access_token, realm_id,
+                                       send_invoice=not invoice_already_sent)
+    invoice_delivered = emails["invoice"] or invoice_already_sent
+    final = "succeeded" if invoice_delivered or emails["receipt"] else "email_failed"
     update_attempt(conn, cur, attempt["id"], status=final,
                    email_sent=emails["invoice"], raw_result=_dumps(emails))
 
@@ -527,7 +557,7 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
         """UPDATE billing.invoices
            SET balance = 0, email_status = CASE WHEN %s THEN 'EmailSent' ELSE email_status END
            WHERE qbo_invoice_id = %s""",
-        (emails["invoice"], p["qbo_invoice_id"]))
+        (invoice_delivered, p["qbo_invoice_id"]))
     conn.commit()
     cur.execute("SELECT billing_audit.project_maint_processing_status(%s, %s)",
                 (p["billing_month"], p["qbo_customer_id"]))
@@ -536,7 +566,8 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
     return {"period": period_id, "customer": p["customer_name"], "status": final,
             "charged": charge_result.get("amount"), "charge_id": charge_result.get("charge_id"),
             "qbo_payment_id": rec["qbo_payment_id"],
-            "receipt_sent": emails["receipt"], "invoice_sent": emails["invoice"],
+            "receipt_sent": emails["receipt"],
+            "invoice_sent": emails["invoice"] or ("already" if invoice_already_sent else False),
             "pm_switched_to_qbo_default": switched_pm or None,
             "email_errors": emails["errors"] or None}
 
