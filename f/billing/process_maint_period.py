@@ -32,9 +32,6 @@
 #                                               payment_method_id); declines bump
 #                                               consecutive_declines/payment_status
 #   billing.customer_payment_methods    [read]  the exact card/bank charged
-#   billing.autopay_transactions        [write] the maintenance reporting record
-#                                               (Processing tab + projection's
-#                                               autopay_charged gate)
 #   billing.invoices                    [r/w]   balance/email_status cache update
 #                                               after charge+send (fires the
 #                                               auto-promote trigger)
@@ -223,7 +220,7 @@ def record_qbo_payment(customer_id, invoice_id, amount, charge_result, invoice_n
     charge_id = charge_result.get("charge_id", "")
     pmt_method_id = (QBO_PMT_METHOD_ACH if charge_result.get("payment_type") == "ach"
                      else QBO_PMT_METHOD_CC)
-    note = (f"Auto-charge | {month_label} Pool Maintenance | Inv# {invoice_num} | "
+    note = (f"{month_label} Pool Maintenance | Inv# {invoice_num} | "
             f"Charge ID: {charge_id} | "
             f"Auth: {charge_result.get('auth_code', '')} | "
             f"{charge_result.get('card_type', '')} x{charge_result.get('card_last4', '')} | "
@@ -287,14 +284,16 @@ def latest_attempt(cur, qbo_invoice_id):
 
 def create_attempt(conn, cur, invoice_number, qbo_invoice_id, channel, cpm_id,
                    charge_amount, dry_run):
+    # channel column check allows email|ach|credit_card
+    db_channel = "credit_card" if channel == "card" else channel
     cur.execute(
         """INSERT INTO billing.processing_attempts
              (invoice_number, qbo_invoice_id, stage, status, idempotency_key,
               payment_method, charge_amount, dry_run, channel, customer_payment_method_id)
            VALUES (%s, %s, 'maint', 'pending', %s, %s, %s, %s, %s, %s)
            RETURNING *""",
-        (invoice_number, qbo_invoice_id, str(uuid.uuid4()), channel, charge_amount,
-         dry_run, channel, cpm_id))
+        (invoice_number, qbo_invoice_id, str(uuid.uuid4()), db_channel, charge_amount,
+         dry_run, db_channel, cpm_id))
     conn.commit()
     return dict(cur.fetchone())
 
@@ -306,25 +305,6 @@ def update_attempt(conn, cur, attempt_id, **fields):
     conn.commit()
 
 
-def record_autopay_txn(conn, cur, p, charge_result, qbo_payment_id, emails, status):
-    """The maintenance reporting record (Processing tab + projection gate)."""
-    cur.execute(
-        """INSERT INTO billing.autopay_transactions
-             (billing_month, qbo_customer_id, customer_name, payment_method, card_type,
-              last_four, charge_amount, charge_id, charge_status, charged_at,
-              qbo_payment_id, qbo_invoice_ids, qbo_invoice_numbers,
-              receipt_emailed, invoice_emailed, email_address, emailed_at,
-              status, dry_run, verified, verified_at)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),%s,%s,%s,%s,%s,%s,now(),%s,false,true,now())""",
-        (p["month_key"], p["qbo_customer_id"], p["customer_name"],
-         charge_result.get("payment_type"), charge_result.get("card_type"),
-         charge_result.get("card_last4"), charge_result.get("amount"),
-         charge_result.get("charge_id"), charge_result.get("status"),
-         qbo_payment_id, [p["qbo_invoice_id"]], [p["doc_number"]],
-         emails.get("receipt", False), emails.get("invoice", False), p["email"], status))
-    conn.commit()
-
-
 LOAD_PERIOD = """
 SELECT tbp.id, tbp.billing_month, tbp.qbo_customer_id, tbp.qbo_invoice_id,
        tbp.processing_status, tbp.locked_at,
@@ -333,6 +313,7 @@ SELECT tbp.id, tbp.billing_month, tbp.qbo_customer_id, tbp.qbo_invoice_id,
        i.doc_number, i.balance, i.email_status,
        ac.id AS autopay_id, ac.email AS autopay_email,
        pm.id AS cpm_id, pm.qbo_payment_method_id, pm.type AS pm_type,
+       pm.card_brand AS pm_brand, pm.last_four AS pm_last4,
        pm.is_active AS pm_active, pm.auto_disabled_at, pm.deactivated_at
 FROM billing_audit.task_billing_periods tbp
 LEFT JOIN public."Customers" c ON c.qbo_customer_id = tbp.qbo_customer_id
@@ -368,7 +349,10 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
     on_autopay = p["autopay_id"] is not None
     pm_ok = (p["cpm_id"] is not None and p["pm_active"]
              and p["auto_disabled_at"] is None and p["deactivated_at"] is None)
-    channel = ("ach" if on_autopay and pm_ok and "bank" in (p["pm_type"] or "").lower()
+    # customer_payment_methods.type is 'ach' | 'credit_card'
+    is_bank = (p["pm_type"] or "").lower() in ("ach", "bank_account") \
+        or "bank" in (p["pm_type"] or "").lower()
+    channel = ("ach" if on_autopay and pm_ok and is_bank
                else "card" if on_autopay and pm_ok else "email")
 
     # already settled -> just make sure the invoice went out
@@ -418,7 +402,8 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
     # autopay charge path
     if dry_run:
         return {"period": period_id, "customer": p["customer_name"], "status": "dry_run",
-                "plan": f"charge {channel} ····{(p['pm_type'] or '')} "
+                "plan": f"charge {channel} {(p['pm_brand'] or p['pm_type'] or '')} "
+                        f"····{p['pm_last4'] or '?'} "
                         f"{balance:.2f} for invoice #{invoice_num}, receipt then invoice to {p['email']}"}
 
     if prior and prior["status"] == "charge_uncertain":
@@ -481,9 +466,8 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
     update_attempt(conn, cur, attempt["id"], status=final,
                    email_sent=emails["invoice"], raw_result=_dumps(emails))
 
-    # reporting record + roster health + cache update (fires auto-promote)
-    record_autopay_txn(conn, cur, p, charge_result, rec["qbo_payment_id"], emails,
-                       "charge_success")
+    # roster health + cache update (fires auto-promote); the attempt row IS
+    # the reporting record (Processing tab + projection's autopay_charged)
     cur.execute(
         """UPDATE billing.autopay_customers
            SET consecutive_declines = 0, payment_status = 'good', updated_at = now()
