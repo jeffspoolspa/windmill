@@ -139,7 +139,9 @@ def enrich_invoice(qbo_invoice_id, memo, access_token, realm_id, dry_run):
         )
         if not resp.ok:
             raise Exception(f"enrich failed for invoice {qbo_invoice_id}: {resp.text[:300]}")
-    return {"memo": memo, "class": class_name, "due_date": due}
+    # cache write-back uses the CANONICAL casing — billing.invoices has a CHECK
+    # allowing 'Maintenance' (not QBO's literal 'MAINTENANCE' class name)
+    return {"memo": memo, "class": "Maintenance", "due_date": due}
 
 
 def apply_customer_credits(qbo_customer_id, target_date, access_token, realm_id, dry_run):
