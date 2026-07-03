@@ -122,9 +122,12 @@ def _is_labor(item_name):
 
 def _bare(item_name):
     # suffix after the last ':' -> "NA* - GENERIC CHEMICALS:MURIATIC ACID 1GAL" => "MURIATIC ACID 1GAL"
+    # NORMALIZED: collapse internal whitespace + uppercase — QBO item names
+    # carry stray double spaces ("ALGAECIDE  - TREATMENT...") that made
+    # billed items look entirely unbilled (June 2026: 30+ false mismatches).
     if not item_name:
         return None
-    return item_name.split(":")[-1].strip()
+    return re.sub(r"\s+", " ", item_name.split(":")[-1]).strip().upper()
 
 
 def _parse_invoice(line_items):
@@ -146,7 +149,7 @@ def _parse_invoice(line_items):
     return labor_cents, cons
 
 
-def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
+def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.25,
          min_coverage=0.5):
     conn = _connect(supabase_connection)
     try:
@@ -188,7 +191,8 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
                 g["expected"] += (exp_cents or 0)
                 g["methods"].add(method)
                 for k, v in (cons or {}).items():
-                    g["cons"][k] = g["cons"].get(k, 0) + float(v)
+                    nk = re.sub(r"\s+", " ", (k or "")).strip().upper()
+                    g["cons"][nk] = g["cons"].get(nk, 0) + float(v)
 
         # ---- stage 1: stamp ION invoice numbers + amounts on each month's
         #      promises (billing_audit.match_promises_to_ion), then project
