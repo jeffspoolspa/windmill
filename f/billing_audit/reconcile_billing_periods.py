@@ -9,10 +9,8 @@ the ACTUAL QBO maintenance invoices, and stamp the result back on each promise.
 
 Match rule (confirmed with Carter + empirically, 2026-06-02):
   - A maintenance invoice is DATED THE LAST DAY OF THE MONTH and carries a
-    maintenance-LABOR line. LABOR services = POOL MAINTENANCE* / HALF HOUR
-    MAINTENANCE / FLAT RATE / CHEMICAL TESTING / GREEN POOL / SPA CLEAN /
-    QUALITY CONTROL (all 'Services:' labor lines, e.g. CHEMICAL TESTING =
-    "LABOR TO TEST AND BALANCE"). Chemicals are separate GENERIC CHEMICALS:* lines.
+    maintenance-LABOR line: item_name matching POOL MAINTENANCE* / HALF HOUR
+    MAINTENANCE / FLAT RATE. Chemicals are separate GENERIC CHEMICALS:* lines.
   - Grain is ~1 month-end invoice PER CUSTOMER (a few multi-pool customers have
     >1). So we reconcile at (qbo_customer_id, billing_month): roll the month's
     promises up to the customer, compare to the customer's month-end invoice(s),
@@ -20,7 +18,6 @@ Match rule (confirmed with Carter + empirically, 2026-06-02):
     rows (exact 1:1 for the single-task majority; shared for multi-task).
 
 Per (customer, billing_month) we set, on every matching task_billing_period row:
-  qbo_invoice_id        representative month-end maintenance invoice (max labor)
   invoice_labor_cents   SUM of maintenance-labor line amounts (customer-month)
   labor_ok              |invoiced_labor - expected_labor| <= labor_tol_cents
   consumables_ok        no item we recorded was under-billed beyond cons_tol
@@ -28,23 +25,55 @@ Per (customer, billing_month) we set, on every matching task_billing_period row:
   reconciled_at         now()
   notes                 short diff summary; flags partial_coverage + multi_invoice
 
-BILLING-COVERAGE GATE: a closed month is only reconciled once its monthly billing
-run has fired (>= min_coverage of the month's promise-customers have a month-end
-maintenance invoice). Unbilled/in-progress months are left as visits_accruing.
+NOTE (2026-07 pipeline): this script NO LONGER writes qbo_invoice_id — the
+billing.invoices link trigger (trg_link_invoice_to_maint_period, DocNumber ->
+ion_invoice_number) is the single FK writer. This script is the detailed
+VERDICT writer; its status/labor_ok/consumables_ok writes re-project
+processing_status via trg_reproject_on_gate_change. It also calls
+billing_audit.match_promises_to_ion + project_maint_processing_status per
+month (stage 1 of the pipeline) so ION stamping rides the same schedule.
 
-COVERAGE CAVEAT: maintenance.visits starts 2026-04-06, so APRIL is a PARTIAL
-month (week 1 missing); rows in PARTIAL_MONTHS get a 'partial_coverage' note. Only
-closed months (billing_month < this month) are considered.
+COVERAGE CAVEAT: maintenance.visits currently starts 2026-04-06, so APRIL is a
+PARTIAL month (week 1 missing) -> per_visit April promises undercount by ~1 visit
+and will read as mismatch; flat_rate_monthly April promises are unaffected (full
+month). Rows in PARTIAL_MONTHS get a 'partial_coverage' note. The current/future
+month (no invoice yet) is left untouched as 'visits_accruing' -- only months that
+have closed (billing_month < this month) are reconciled.
 
 SAFETY: dry_run=True default -> UPDATE in a transaction, gather the summary, then
 ROLLBACK. Set dry_run=False to commit.
 """
 
 import datetime
+import re
 from f.ION._lib.upsert import _connect
 
-LABOR_PATTERNS = ("POOL MAINTENANCE", "HALF HOUR MAINTENANCE", "FLAT RATE",
-                  "CHEMICAL TESTING", "GREEN POOL", "SPA CLEAN", "QUALITY CONTROL")
+# TWO classifiers, two purposes (don't conflate them):
+#
+# (1) IS_MAINTENANCE -- defines WHICH invoices are maintenance invoices (the set that
+#     must map 1:1 to a task). This is the AUTHORITATIVE rule from the billing-audit
+#     skill (f/billing_audit/load_month.classify_invoice): the invoice has ANY line
+#     whose item name contains one of NINE labor keywords. INCLUDES QUALITY CONTROL
+#     and HALF HOUR (they make an invoice a maintenance invoice even though they don't
+#     count as labor revenue). Verified: May = 518 such invoices (non-void), matching
+#     the billing run. (The old billing_audit.maintenance_invoices table shows 521
+#     because it never excluded the 3 voids -- we classify fresh, void-excluded.)
+MAINT_KEYWORDS = re.compile(
+    r"(POOL MAINTENANCE|FLAT RATE|CHEMICAL TESTING|SPA CLEAN|FOUNTAIN CLEAN"
+    r"|QUALITY CONTROL|GREEN POOL|HALF HOUR|ONE TIME CLEAN)", re.I)
+#
+# (2) LABOR_$ -- the subset that counts as LABOR REVENUE for the dollar reconcile.
+#     EXCLUDES HALF HOUR (a consumable add-on, per Carter) and QUALITY CONTROL
+#     (non-billable labor; its consumables still bill). Also excludes the generic
+#     "Services:LABOR" (one-time/repair) and "Services:FREIGHT" by requiring a
+#     specific recurring SKU. SALT CELL CLEAN is a CONSUMABLE add-on (Carter, 2026-06-03),
+#     NOT per-visit labor -- it billed as "Services:SALT CELL CLEAN" qty1 ~$50 on e.g.
+#     RALEIGH's invoice but is not a maintenance visit; counting it inflated both the labor
+#     dollars and (via its qty) the visit count. Excluded from labor; tracked as consumable.
+LABOR_INCLUDE = re.compile(
+    r"(POOL MAINTENANCE|FLAT RATE|CHEMICAL TESTING|GREEN POOL|SPA CLEAN"
+    r"|FOUNTAIN CLEAN|ONE TIME CLEAN)", re.I)
+LABOR_EXCLUDE = ("HALF HOUR MAINTENANCE", "QUALITY CONTROL", "SALT CELL CLEAN")
 PARTIAL_MONTHS = {datetime.date(2026, 4, 1)}  # visits sync started 2026-04-06
 
 FETCH_PROMISES = """
@@ -54,20 +83,23 @@ SELECT id, qbo_customer_id, billing_month, billing_method,
 FROM billing_audit.task_billing_periods
 WHERE qbo_customer_id IS NOT NULL
   AND billing_month < date_trunc('month', now())::date   -- only closed months
+  AND locked_at IS NULL                                  -- skip finalized months
 """
 
 FETCH_INVOICES = """
 SELECT qbo_invoice_id, qbo_customer_id,
-       date_trunc('month', txn_date)::date AS billing_month, line_items
+       date_trunc('month', txn_date)::date AS billing_month,
+       (txn_date = (date_trunc('month', txn_date) + interval '1 month' - interval '1 day')::date) AS is_lastday,
+       line_items
 FROM billing.invoices
 WHERE qbo_customer_id IS NOT NULL
   AND line_items IS NOT NULL
-  AND txn_date = (date_trunc('month', txn_date) + interval '1 month' - interval '1 day')::date
+  AND COALESCE(total_amt, 0) <> 0   -- exclude VOIDED invoices (QBO zeroes total on void)
+  AND date_trunc('month', txn_date)::date < date_trunc('month', now())::date
 """
 
 UPDATE = """
 UPDATE billing_audit.task_billing_periods SET
-  qbo_invoice_id      = %(qbo_invoice_id)s,
   invoice_labor_cents = %(invoice_labor_cents)s,
   labor_ok            = %(labor_ok)s,
   consumables_ok      = %(consumables_ok)s,
@@ -81,7 +113,11 @@ WHERE id = %(id)s
 
 def _is_labor(item_name):
     n = (item_name or "").upper()
-    return any(p in n for p in LABOR_PATTERNS)
+    if any(p in n for p in LABOR_EXCLUDE):
+        return False
+    # Must match a specific recurring-maintenance SKU. A bare "Services:" prefix is
+    # NOT enough -- "Services:LABOR" / "Services:FREIGHT" are one-time/non-maintenance.
+    return bool(LABOR_INCLUDE.search(n))
 
 
 def _bare(item_name):
@@ -115,18 +151,32 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
     conn = _connect(supabase_connection)
     try:
         # ---- load the customer-month maintenance invoices ----
-        inv = {}  # (cust, month) -> {labor_cents, cons{}, ids[(labor,id)]}
+        # Window rule (validated 2026-06-02): the monthly billing run dates every
+        # recurring maintenance invoice to the LAST DAY of the month, so last-day is
+        # the precise window. But a customer's only maintenance invoice is sometimes
+        # OFF-CYCLE (dated mid-month). So we accumulate BOTH a "lastday" bucket and an
+        # "all-month" bucket per (cust, month); at reconcile time we prefer last-day
+        # and fall back to all-month only when there is NO last-day labor invoice.
+        # (An unconditional all-month sum over-counts: it folds in one-time/add-on
+        # invoices -- FOUNTAIN CLEAN, repairs -- that aren't the recurring promise.)
+        # Voided invoices are already excluded in SQL (total_amt = 0).
+        def _bucket():
+            return {"labor": 0, "cons": {}, "ids": []}
+
+        inv = {}  # (cust, month) -> {"lastday": bucket, "all": bucket}
         with conn.cursor() as cur:
             cur.execute(FETCH_INVOICES)
-            for qid, cust, month, line_items in cur.fetchall():
+            for qid, cust, month, is_lastday, line_items in cur.fetchall():
                 lc, cons = _parse_invoice(line_items)
                 if lc <= 0:
-                    continue  # not the maintenance-labor invoice
-                e = inv.setdefault((cust, month), {"labor": 0, "cons": {}, "ids": []})
-                e["labor"] += lc
-                for k, v in cons.items():
-                    e["cons"][k] = e["cons"].get(k, 0) + v
-                e["ids"].append((lc, qid))
+                    continue  # carries no maintenance labor
+                e = inv.setdefault((cust, month), {"lastday": _bucket(), "all": _bucket()})
+                targets = [e["all"]] + ([e["lastday"]] if is_lastday else [])
+                for b in targets:
+                    b["labor"] += lc
+                    for k, v in cons.items():
+                        b["cons"][k] = b["cons"].get(k, 0) + v
+                    b["ids"].append((lc, qid))
 
         # ---- load the promises, group to customer-month ----
         groups = {}  # (cust, month) -> {row_ids[], expected, our_cons{}, methods set}
@@ -139,6 +189,20 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
                 g["methods"].add(method)
                 for k, v in (cons or {}).items():
                     g["cons"][k] = g["cons"].get(k, 0) + float(v)
+
+        # ---- stage 1: stamp ION invoice numbers + amounts on each month's
+        #      promises (billing_audit.match_promises_to_ion), then project
+        #      processing_status (pending -> ion_matched | needs_review).
+        #      Same transaction: a dry_run rolls these back too. ----
+        ion_stamped = {}
+        with conn.cursor() as cur:
+            for month in sorted({m for (_, m) in groups}):
+                cur.execute("SELECT billing_audit.match_promises_to_ion(%s)", (month,))
+                n = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT billing_audit.project_maint_processing_status(%s)", (month,))
+                if n:
+                    ion_stamped[month.strftime("%Y-%m")] = n
 
         # ---- billing-coverage gate: only reconcile months whose monthly billing
         #      run has actually fired. A closed month with almost no month-end
@@ -169,17 +233,25 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
             if month not in reconcilable:
                 continue  # month not billed yet -> leave as visits_accruing
             partial = month in PARTIAL_MONTHS
-            iv = inv.get((cust, month))
+            entry = inv.get((cust, month))
+            iv, offcycle = None, False
+            if entry:
+                if entry["lastday"]["labor"] > 0:
+                    iv = entry["lastday"]                 # precise: recurring billing run
+                elif entry["all"]["labor"] > 0:
+                    iv = entry["all"]                     # fallback: off-cycle-only customer
+                    offcycle = True
             note_bits = []
             if partial:
                 note_bits.append("partial_coverage:visits_start_2026-04-06")
 
             if not iv:
                 status, labor_ok, cons_ok = "missed", False, None
-                qbo_id, invoiced = None, None
+                invoiced = None
             else:
                 invoiced = iv["labor"]
-                qbo_id = max(iv["ids"])[1]  # invoice with the largest labor
+                if offcycle:
+                    note_bits.append("offcycle_fallback")
                 if len(iv["ids"]) > 1:
                     note_bits.append("multi_invoice:%d" % len(iv["ids"]))
                 diff = invoiced - g["expected"]
@@ -201,7 +273,7 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
             note = "; ".join(note_bits)[:500] or None
             for rid in g["ids"]:
                 updates.append({
-                    "id": rid, "qbo_invoice_id": qbo_id,
+                    "id": rid,
                     "invoice_labor_cents": invoiced, "labor_ok": labor_ok,
                     "consumables_ok": cons_ok, "status": status, "notes": note,
                 })
@@ -232,6 +304,7 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.01,
             "by_month_status": by_month,
             "month_coverage": coverage,
             "skipped_unbilled_months": skipped_months,
+            "ion_stamped": ion_stamped,
         }
     except Exception:
         conn.rollback()
