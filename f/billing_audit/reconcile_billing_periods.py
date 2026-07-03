@@ -1,5 +1,6 @@
 # requirements:
 # psycopg2-binary
+# requests
 
 """
 f/billing_audit/reconcile_billing_periods
