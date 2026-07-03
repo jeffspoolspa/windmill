@@ -100,6 +100,9 @@ value:
           dry_run:
             type: javascript
             expr: flow_input.dry_run
+          only_qbo_customer_ids:
+            type: javascript
+            expr: flow_input.only_qbo_customer_ids
           test_mode:
             type: javascript
             expr: flow_input.test_mode
@@ -218,6 +221,7 @@ schema:
     - dry_run
     - test_mode
     - test_qbo_customer_id
+    - only_qbo_customer_ids
   properties:
     billing_month:
       type: string
@@ -227,6 +231,14 @@ schema:
       type: boolean
       description: If true, simulate without making any changes
       default: true
+    only_qbo_customer_ids:
+      type: array
+      description: 'Optional batch filter from the /maintenance/billing/process UI:
+        charge only these QBO customer ids (each still sweeps all their unpaid
+        maint invoices). Ignored when test_mode is set.'
+      default: null
+      items:
+        type: string
     test_mode:
       type: boolean
       description: If true, process only a single customer specified by test_qbo_customer_id
