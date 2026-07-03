@@ -39,7 +39,10 @@ import wmill
 from f.billing.preprocess_maint_customer_month import main as preprocess
 
 SUPABASE_RESOURCE = "u/carter/supabase"
-MAX_PER_TICK = 10
+# cache-first credits made most customer-months pure DB work (~ms each);
+# 50/tick drains a full month-end batch in ~20 min while QBO-touching
+# customers still serialize through the qbo_writer key
+MAX_PER_TICK = 50
 MAX_ATTEMPTS = 3
 
 
