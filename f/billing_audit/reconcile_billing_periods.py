@@ -92,11 +92,13 @@ SELECT qbo_invoice_id, qbo_customer_id,
        date_trunc('month', txn_date)::date AS billing_month,
        (txn_date = (date_trunc('month', txn_date) + interval '1 month' - interval '1 day')::date) AS is_lastday,
        line_items
-FROM billing.invoices
+FROM billing.invoices i
 WHERE qbo_customer_id IS NOT NULL
   AND line_items IS NOT NULL
   AND COALESCE(total_amt, 0) <> 0   -- exclude VOIDED invoices (QBO zeroes total on void)
   AND date_trunc('month', txn_date)::date < date_trunc('month', now())::date
+  AND NOT EXISTS (SELECT 1 FROM public.work_orders w      -- WO invoices are a
+                  WHERE w.qbo_invoice_id = i.qbo_invoice_id)  -- different pipeline
 """
 
 UPDATE = """
@@ -160,43 +162,34 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.25,
     conn = _connect(supabase_connection)
     try:
         # ---- load the customer-month maintenance invoices ----
-        # Window rule (validated 2026-06-02): the monthly billing run dates every
-        # recurring maintenance invoice to the LAST DAY of the month, so last-day is
-        # the precise window. But a customer's only maintenance invoice is sometimes
-        # OFF-CYCLE (dated mid-month). So we accumulate BOTH a "lastday" bucket and an
-        # "all-month" bucket per (cust, month); at reconcile time we prefer last-day
-        # and fall back to all-month only when there is NO last-day labor invoice.
-        # (An unconditional all-month sum over-counts: it folds in one-time/add-on
-        # invoices -- FOUNTAIN CLEAN, repairs -- that aren't the recurring promise.)
-        # Voided invoices are already excluded in SQL (total_amt = 0).
+        # EVERY maintenance invoice in the month counts (2026-07-03, Carter):
+        # the promises now cover ALL task categories (recurring, green pool,
+        # one-time, QC visits' chems), so the customer-month compare is
+        # recorded-vs-billed over the customer's WHOLE month — mid-month QC
+        # chem invoices, off-cycle jobs, split re-bills all included. The old
+        # prefer-last-day window dropped legitimate invoices (Revels: 3
+        # invoices billing 8 chlorine read as 4). A maintenance invoice = any
+        # invoice with a maintenance-keyword line (incl. QUALITY CONTROL);
+        # WO invoices are excluded in SQL; voids too (total_amt = 0).
         def _bucket():
             return {"labor": 0, "cons": {}, "ids": []}
 
-        inv = {}  # (cust, month) -> {"lastday": bucket, "all": bucket}
+        inv = {}  # (cust, month) -> bucket over all maintenance invoices
         with conn.cursor() as cur:
             cur.execute(FETCH_INVOICES)
             for qid, cust, month, is_lastday, line_items in cur.fetchall():
                 lc, cons = _parse_invoice(line_items)
-                if lc <= 0:
-                    # No labor REVENUE — but a QC/chem-only invoice is still a
-                    # maintenance invoice and its CONSUMABLES still bill (the
-                    # documented QC rule). Skipping them made every QC-invoiced
-                    # chemical read as under-billed (BEANE, June 2026). Only
-                    # skip invoices with no maintenance line at all
-                    # (repairs/parts).
-                    is_maint = any(
-                        MAINT_KEYWORDS.search((li or {}).get("item_name") or "")
-                        for li in (line_items or [])
-                        if (li or {}).get("line_type") == "item")
-                    if not is_maint:
-                        continue
-                e = inv.setdefault((cust, month), {"lastday": _bucket(), "all": _bucket()})
-                targets = [e["all"]] + ([e["lastday"]] if is_lastday else [])
-                for b in targets:
-                    b["labor"] += lc
-                    for k, v in cons.items():
-                        b["cons"][k] = b["cons"].get(k, 0) + v
-                    b["ids"].append((lc, qid))
+                is_maint = lc > 0 or any(
+                    MAINT_KEYWORDS.search((li or {}).get("item_name") or "")
+                    for li in (line_items or [])
+                    if (li or {}).get("line_type") == "item")
+                if not is_maint:
+                    continue  # repairs/parts/one-off sales — not this pipeline
+                b = inv.setdefault((cust, month), _bucket())
+                b["labor"] += lc
+                for k, v in cons.items():
+                    b["cons"][k] = b["cons"].get(k, 0) + v
+                b["ids"].append((lc, qid))
 
         # ---- load the promises, group to customer-month ----
         groups = {}  # (cust, month) -> {row_ids[], expected, our_cons{}, methods set}
@@ -272,14 +265,9 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.25,
             if month not in reconcilable:
                 continue  # month not billed yet -> leave as visits_accruing
             partial = month in PARTIAL_MONTHS
-            entry = inv.get((cust, month))
-            iv, offcycle = None, False
-            if entry:
-                if entry["lastday"]["labor"] > 0:
-                    iv = entry["lastday"]                 # precise: recurring billing run
-                elif entry["all"]["labor"] > 0:
-                    iv = entry["all"]                     # fallback: off-cycle-only customer
-                    offcycle = True
+            iv = inv.get((cust, month))
+            if iv is not None and iv["labor"] <= 0 and not iv["cons"]:
+                iv = None
             note_bits = []
             if partial:
                 note_bits.append("partial_coverage:visits_start_2026-04-06")
@@ -289,8 +277,6 @@ def main(supabase_connection, dry_run=True, labor_tol_cents=100, cons_tol=0.25,
                 invoiced = None
             else:
                 invoiced = iv["labor"]
-                if offcycle:
-                    note_bits.append("offcycle_fallback")
                 if len(iv["ids"]) > 1:
                     note_bits.append("multi_invoice:%d" % len(iv["ids"]))
                 diff = invoiced - g["expected"]
