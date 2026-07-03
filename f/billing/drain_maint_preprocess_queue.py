@@ -1,5 +1,6 @@
 # requirements:
 # psycopg2-binary
+# requests
 # wmill
 
 # f/billing/drain_maint_preprocess_queue
