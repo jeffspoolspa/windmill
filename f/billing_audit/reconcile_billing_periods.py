@@ -123,12 +123,17 @@ def _is_labor(item_name):
 
 def _bare(item_name):
     # suffix after the last ':' -> "NA* - GENERIC CHEMICALS:MURIATIC ACID 1GAL" => "MURIATIC ACID 1GAL"
-    # NORMALIZED: collapse internal whitespace + uppercase — QBO item names
-    # carry stray double spaces ("ALGAECIDE  - TREATMENT...") that made
-    # billed items look entirely unbilled (June 2026: 30+ false mismatches).
+    # NORMALIZED: collapse internal whitespace + uppercase, and strip the
+    # "NA* - " / "GENERIC CHEMICALS" prefixes that some catalog items carry
+    # WITHOUT the colon ("NA* - GENERIC CHEMICALS CAL HYPO 1LB") — both the
+    # double-space and no-colon variants made billed items look entirely
+    # unbilled (June 2026: 30+ false mismatches each).
     if not item_name:
         return None
-    return re.sub(r"\s+", " ", item_name.split(":")[-1]).strip().upper()
+    n = item_name.split(":")[-1]
+    n = re.sub(r"^\s*NA\*\s*-\s*", "", n, flags=re.I)
+    n = re.sub(r"^\s*GENERIC CHEMICALS\s*", "", n, flags=re.I)
+    return re.sub(r"\s+", " ", n).strip().upper()
 
 
 def _parse_invoice(line_items):
