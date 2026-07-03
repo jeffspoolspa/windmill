@@ -103,7 +103,6 @@ export async function main(month: string, dry_run: boolean = true, load: boolean
       // statuses as soon as the report lands, not on the next hourly reconcile.
       const [m] = await sql`select billing_audit.match_promises_to_ion(${b.monthDate}) as n`
       ionStamped = m?.n ?? 0
-      await sql`select billing_audit.refresh_chem_flags(${b.monthDate})`
       await sql`select billing_audit.project_maint_processing_status(${b.monthDate})`
     } finally { await sql.end().catch(() => {}) }
   }
