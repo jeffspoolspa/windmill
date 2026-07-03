@@ -1,9 +1,10 @@
-summary: Pull ION All Transactions report (TransactionType=Tasks) for a month
-  via headless form submit; parse task_id+amount; optional load into
-  billing_audit.ion_task_transactions.
+summary: ''
 description: ''
 lock: '!inline f/ION/transactions_report.script.lock'
 has_on_behalf_of: false
 kind: script
-schema: null
-tag: chromium
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []

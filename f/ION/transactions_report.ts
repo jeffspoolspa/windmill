@@ -19,6 +19,7 @@ import { parse } from "node-html-parser"
 // the chosen criteria). Symptoms: XLS 500 = no form page loaded this session; XLS 200-but-tiny =
 // page loaded but criteria never submitted. So: goto form -> set fields -> form.submit() -> in-page
 // fetch the XLS (goto would abort on the attachment). ~15s on a chromium worker.
+// See docs/integrations/ion.md ("Two classes of report priming").
 //
 // Columns: Office|Customer|Address|Route|Customer Type|Transaction ID|Transaction Date|
 // Transaction Type|Service Name|Completed By|Amount|Status|Status Date|Additional Info ("Task <id>").
@@ -81,6 +82,7 @@ export async function main(month: string, dry_run: boolean = true, load: boolean
   if (recs.length < 10) throw new Error(`suspiciously few rows (${recs.length}) -- report criteria likely not applied; not loading`)
 
   let loaded = 0
+  let ionStamped = 0
   if (!dry_run && load) {
     const cfg = (await wmill.getResource("u/carter/supabase")) as any
     const sql = postgres({ host: cfg.host, port: cfg.port, database: cfg.dbname, username: cfg.user, password: cfg.password, ssl: "require", max: 3, prepare: false })
@@ -95,8 +97,16 @@ export async function main(month: string, dry_run: boolean = true, load: boolean
           loaded++
         }
       })
+      // stage 1 of the billing pipeline: stamp ION invoice numbers/amounts on
+      // the month's promises + project processing_status (pending -> ion_matched
+      // | needs_review). Rides here so the UI's Refresh button gives stamped
+      // statuses as soon as the report lands, not on the next hourly reconcile.
+      const [m] = await sql`select billing_audit.match_promises_to_ion(${b.monthDate}) as n`
+      ionStamped = m?.n ?? 0
+      await sql`select billing_audit.project_maint_processing_status(${b.monthDate})`
     } finally { await sql.end().catch(() => {}) }
   }
   return { month, parsed_rows: recs.length, distinct_tasks: new Set(recs.map((r) => r.ion_task_id)).size,
-    total_amt_usd: Math.round(recs.reduce((n, r) => n + r.amt_cents, 0)) / 100, loaded: (!dry_run && load) ? loaded : "skipped", sample: recs.slice(0, 3) }
+    total_amt_usd: Math.round(recs.reduce((n, r) => n + r.amt_cents, 0)) / 100, loaded: (!dry_run && load) ? loaded : "skipped",
+    ion_stamped: (!dry_run && load) ? ionStamped : "skipped", sample: recs.slice(0, 3) }
 }
