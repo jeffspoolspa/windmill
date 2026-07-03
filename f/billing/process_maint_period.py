@@ -461,8 +461,22 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
                        payment_status = 'payment_issue', updated_at = now()
                    WHERE id = %s""", (p["autopay_id"],))
             conn.commit()
+            # declined -> the customer still gets the invoice email (the
+            # pay-it-yourself path); the attempt row keeps the decline. No
+            # receipt — no payment happened. Skip if already emailed (retry).
+            emails = {"receipt": False, "invoice": p["email_status"] == "EmailSent"}
+            if p["email_status"] != "EmailSent":
+                emails = send_receipt_then_invoice(None, p["qbo_invoice_id"],
+                                                   p["email"], access_token, realm_id)
+                if emails["invoice"]:
+                    cur.execute(
+                        "UPDATE billing.invoices SET email_status='EmailSent' WHERE qbo_invoice_id=%s",
+                        (p["qbo_invoice_id"],))
+                    update_attempt(conn, cur, attempt["id"], email_sent=True)
+                    conn.commit()
             return {"period": period_id, "customer": p["customer_name"],
-                    "status": "charge_declined", "error": charge_result.get("error")}
+                    "status": "charge_declined", "error": charge_result.get("error"),
+                    "invoice_sent": emails["invoice"]}
         update_attempt(conn, cur, attempt["id"], status="charge_succeeded",
                        charge_id=charge_result.get("charge_id"),
                        raw_result=_dumps(charge_result))
