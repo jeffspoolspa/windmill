@@ -131,7 +131,10 @@ def enrich_invoice(qbo_invoice_id, memo, set_memo, access_token, realm_id, dry_r
             "ClassRef": {"value": class_id},
             "DueDate": due}
     if set_memo:
+        # both memo fields: CustomerMemo = the customer-facing message on the
+        # invoice, PrivateNote = the internal memo
         body["CustomerMemo"] = {"value": memo}
+        body["PrivateNote"] = memo
     if not dry_run:
         resp = requests.post(
             f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/invoice",

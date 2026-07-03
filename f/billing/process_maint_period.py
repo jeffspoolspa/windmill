@@ -216,12 +216,15 @@ def charge_bank_account(bank_id, amount, request_id, invoice_num, customer_name,
 
 
 def record_qbo_payment(customer_id, invoice_id, amount, charge_result, invoice_num,
-                       access_token, realm_id):
-    """QBO Payment linked to the invoice, CCTransId = charge id (reconciliation)."""
+                       month_label, access_token, realm_id):
+    """QBO Payment linked to the invoice, CCTransId = charge id (reconciliation).
+    PrivateNote mirrors the WO engine's receipt memo, with the month label
+    ('June Pool Maintenance') where the WO number goes."""
     charge_id = charge_result.get("charge_id", "")
     pmt_method_id = (QBO_PMT_METHOD_ACH if charge_result.get("payment_type") == "ach"
                      else QBO_PMT_METHOD_CC)
-    note = (f"Maint autopay | Inv# {invoice_num} | Charge ID: {charge_id} | "
+    note = (f"Auto-charge | {month_label} Pool Maintenance | Inv# {invoice_num} | "
+            f"Charge ID: {charge_id} | "
             f"Auth: {charge_result.get('auth_code', '')} | "
             f"{charge_result.get('card_type', '')} x{charge_result.get('card_last4', '')} | "
             f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -460,9 +463,10 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
                          "status": "CAPTURED"}
 
     # record the QBO Payment (retry-safe: a repeat run reuses the charge_id)
+    month_label = datetime.strptime(p["month_key"], "%Y-%m").strftime("%B")
     rec = record_qbo_payment(p["qbo_customer_id"], p["qbo_invoice_id"],
                              charge_result.get("amount", balance), charge_result,
-                             invoice_num, access_token, realm_id)
+                             invoice_num, month_label, access_token, realm_id)
     if not rec["success"]:
         update_attempt(conn, cur, attempt["id"], status="payment_orphan",
                        error_message=f"record_payment failed: {rec['error']}")
