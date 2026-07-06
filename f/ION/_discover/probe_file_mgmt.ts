@@ -42,21 +42,20 @@ export async function main(
   // 1) the file-management JS: every URL + fetch/ajax shape in it
   const js = await (await fetch(`${o}/IPC/js/file_management.js`, { headers: H })).text()
   rec.js_bytes = js.length
-  rec.js_urls = [...new Set([...js.matchAll(/["'\`]([^"'\`]*\.cfm[^"'\`]*)["'\`]/g)].map((m) => m[1]))]
-  // ajax call sites with 80 chars of context
-  rec.js_ajax = [...js.matchAll(/\.(ajax|get|post|load)\s*\(/g)].slice(0, 20).map((m) =>
-    js.slice(Math.max(0, m.index! - 40), m.index! + 180).replace(/\s+/g, " "))
+  rec.js_full = js  // tiny — return it whole
 
   // 2) the addLog page: JS lines invoking file management (params wiring)
   const url = `${o}/tasks/addLog.cfm?calendarID=${calendar_id}&LogID=${log_id}&source=ServiceLog`
   const html = await (await fetch(url, { headers: H, redirect: "manual" })).text()
   rec.page_bytes = html.length
-  rec.page_calls = html.split("\n")
-    .filter((l) => /file_?management|fileManagement|loadFiles|FileList|attachment/i.test(l))
-    .map((l) => l.trim().slice(0, 300))
-    .slice(0, 20)
-  // any element ids/divs that look like the file container
-  rec.page_containers = [...html.matchAll(/id="([^"]*(?:file|File|attach|photo|image)[^"]*)"/g)]
-    .map((m) => m[1]).slice(0, 15)
+  // where do baseUrl / module / signed-url service live on the page?
+  rec.page_signed = html.split("\n")
+    .filter((l) => /getSignedUrl|baseUrl|fileservice|amazonaws|s3|cloudfront|signed/i.test(l))
+    .map((l) => l.trim().slice(0, 300)).slice(0, 20)
+  // the ajax that fills the Loading... div (any .load/.ajax/.get with a url)
+  rec.page_ajax = [...html.matchAll(/\$\.(ajax|get|post|load)\s*\(|\.load\s*\(\s*["'][^"']+["']/g)]
+    .slice(0, 25).map((m) => html.slice(Math.max(0, m.index - 60), m.index + 220).replace(/\s+/g, " "))
+  // iframes/includes fetched after load
+  rec.page_cfm_refs = [...new Set([...html.matchAll(/["'\(]([^"'\(\)]*(?:file|File|upload|photo|image|attach)[^"'\(\)]*\.cfm[^"'\(\)]*)["'\)]/g)].map((m) => m[1]))].slice(0, 15)
   return rec
 }
