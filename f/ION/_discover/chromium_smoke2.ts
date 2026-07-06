@@ -50,5 +50,23 @@ export async function main() {
     ]),
   )
   results.push(await tryRun("version", ["/usr/lib/chromium/chromium", "--version"], 10000))
+  results.push(
+    await tryRun("mitigation flags", [
+      "/usr/lib/chromium/chromium",
+      "--headless",
+      "--no-sandbox",
+      "--no-zygote",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--disable-crashpad",
+      "--disable-breakpad",
+      "--disable-crash-reporter",
+      "--ozone-platform=headless",
+      "--disable-features=DBusClient",
+      "--in-process-gpu",
+      "--dump-dom",
+      "data:text/html,<title>smoketest</title>",
+    ]),
+  )
   return results
 }
