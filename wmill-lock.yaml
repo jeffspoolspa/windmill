@@ -53,6 +53,7 @@ locks:
   f/ION/_discover/_run_wr_commit: ce608e0a35732c09a54ee13bad95a323ba7be3124e2840e2a5955d05ba42a678
   f/ION/_discover/_run_wr_eventid_correct: a37b8bd60d36746e9e3c0b9416fdef637c8b2824c95776bdb3b81a1de51aabff
   f/ION/_discover/backfill_visits: 9ecc1d8e6d0a7ad40ce6ce0b724a3a3bf9c00eff99135288d5cc3f9e95a5ed19
+  f/ION/_discover/chromium_smoke: e071336e27925a3d8180b5f0d1b255ed6f82f3f7374b6cd1f86beef977d30489
   f/ION/_discover/diagnose_unresolved: 970bb7726625741c55c612dec8cd516913db45a0eb0cc8c030580914a3b3b920
   f/ION/_discover/emit_session: 598e9b72e6298c53292e45e5df3aa50fed07f303ee7db9a0f8293827320b4c1c
   f/ION/_discover/load_recurring_tasks_raw: 5c6897253be9aa1ae0e2d8606dbc79e8ddb913eadab33ca358ed592b2d1fb640

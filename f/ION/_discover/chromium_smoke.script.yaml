@@ -1,0 +1,12 @@
+summary: 'DISCOVERY: which chromium launch config works on the chromium worker?'
+description: Tries system chromium with/without --single-process and the bundled
+  playwright chromium; reports pass/fail + version. No ION touch.
+lock: '!inline f/ION/_discover/chromium_smoke.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []
+tag: chromium
