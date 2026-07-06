@@ -1,0 +1,12 @@
+summary: 'DISCOVERY: free space on writable mounts — is self-hosting a browser
+  possible?'
+description: Clean download cruft, report df -h + du of /tmp.
+lock: '!inline f/ION/_discover/disk_probe.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []
+tag: chromium
