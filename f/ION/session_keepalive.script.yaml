@@ -1,0 +1,16 @@
+summary: Keep the injected ION session warm without a browser (raw HTTP)
+description: GETs an ION page with the cached cookies to reset ION's inactivity
+  timer and bumps session_cache.expiresAt so getOrRefreshSession never launches
+  chromium. Runs on the DEFAULT worker (pure HTTP). Pairs with an external login
+  minter.
+lock: '!inline f/ION/session_keepalive.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    extend_minutes:
+      type: integer
+      default: 120
+  required: []
