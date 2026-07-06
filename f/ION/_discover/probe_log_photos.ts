@@ -11,7 +11,8 @@
 import "playwright@1.40.0"
 
 import * as wmill from "windmill-client"
-import { loginToIon, type IonResource } from "/f/ION/_lib/session"
+import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
+import type { IonResource } from "/f/ION/_lib/session"
 import { parse } from "node-html-parser@7.0.2"
 
 function cookieHeader(s: any) {
@@ -36,7 +37,7 @@ export async function main(
     username: await wmill.getVariable("f/ION/USERNAME"),
     password: await wmill.getVariable("f/ION/PASSWORD"),
   }
-  const s = await loginToIon(cred)
+  const s = await getOrRefreshSession(cred)
   const o = s.ionOrigin
   const H = {
     Cookie: cookieHeader(s),
