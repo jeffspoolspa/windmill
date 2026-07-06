@@ -28,9 +28,11 @@ export async function main() {
   try { fs.rmSync(BROWSERS, { recursive: true, force: true }) } catch {}
   fs.mkdirSync(BROWSERS, { recursive: true })
 
-  // playwright's installer resolves the right arm64 build + CDN
+  // playwright's installer resolves the right arm64 build + CDN.
+  // bunx isn't on PATH; use the running bun binary's `x` subcommand.
+  rec.bun = process.execPath
   rec.install = await sh(
-    ["bunx", "playwright@1.40.0", "install", "chromium"],
+    [process.execPath, "x", "playwright@1.40.0", "install", "chromium"],
     { PLAYWRIGHT_BROWSERS_PATH: BROWSERS },
   )
 
