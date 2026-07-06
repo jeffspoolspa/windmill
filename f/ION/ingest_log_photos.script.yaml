@@ -1,0 +1,29 @@
+summary: Ingest service-log photos (uploadList.cfm per log -> visit_photos)
+description: For each visit in the window, fetch
+  /mobileImage/uploadList.cfm?RefID=<LogID>&TypeID=2 (raw HTTP on the cached
+  session) and upsert maintenance.visit_photos on (ion_log_id, guid). Thumbnails
+  are public S3; s3_key feeds getSignedUrl for full-size. Idempotent; catches
+  late uploads.
+lock: '!inline f/ION/ingest_log_photos.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    dry_run:
+      type: boolean
+      default: true
+    end_date:
+      type: string
+      description: ISO date; default today
+      default: ''
+    sess:
+      type: object
+      default: null
+    start_date:
+      type: string
+      description: ISO date; default now-3d
+      default: ''
+  required: []
+tag: chromium
