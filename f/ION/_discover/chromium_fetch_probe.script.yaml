@@ -1,0 +1,14 @@
+summary: 'DISCOVERY: can a job self-provision the pinned chromium build (no
+  worker config)?'
+description: Downloads playwright build 1091 (the 1.40 match) inside the job,
+  extracts via python3 zipfile, chmods, and test-renders. Probes shared-cache
+  writability for cross-job reuse.
+lock: '!inline f/ION/_discover/chromium_fetch_probe.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []
+tag: chromium
