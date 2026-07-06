@@ -70,6 +70,7 @@ locks:
   f/ION/_discover/pw_install_probe: 51ad0677b8cb01bf5abb904faecb2167ca303c930ca7636d027e8d0fe839c6b8
   f/ION/_discover/pw_launch_probe: 4e058da7eab256f16e062e92a61d00b7695dc9b1b623f230e5c3b9b10cd49197
   f/ION/_discover/pw_selfcontained: 30d3575905f0e195f1bc76a43c73a54b5ec4f97be1ccf3e1d6c94a71177f267c
+  f/ION/_discover/pw_system_launch: 8a9bb3359348f9672550fbd9ffa19de010edcade14cdcc3629061ec999be16f1
   f/ION/_discover/qbo_fix_service_addresses: 114dd20d031a3dce70e77d01d38fb52b355564218c159c6093aded9683f79b28
   f/ION/_discover/qbo_fix_service_addresses_commit: 363e0aee44734d78081ec2fef0f01a5fc6b03fdf17a95b7e9baa7edad7782331
   f/ION/_discover/timing_breakdown: dda83936276c376542510be429ad423311c4bdda8fa3f75ea95b1a56c08d4bcc
