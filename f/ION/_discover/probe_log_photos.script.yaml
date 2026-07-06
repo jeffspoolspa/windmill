@@ -1,10 +1,22 @@
-summary: ''
-description: ''
+summary: 'DISCOVERY: do ION service logs expose tech-uploaded photos from addLog.cfm?'
+description: 'For each {log_id, calendar_id}: fetch the raw addLog page and
+  report every img, photo/attachment-ish link, iframe, and raw-text hint so we
+  can see the markup shape. Read-only.'
 lock: '!inline f/ION/_discover/probe_log_photos.script.lock'
+concurrency_key: ion_chromium
+concurrency_time_window_s: 5
+concurrent_limit: 1
 has_on_behalf_of: false
 kind: script
 schema:
   $schema: https://json-schema.org/draft/2020-12/schema
   type: object
-  properties: {}
+  properties:
+    ion:
+      type: object
+      description: optional creds override (defaults to f/ION variables)
+    logs:
+      type: array
+      description: '[{log_id, calendar_id}]'
   required: []
+tag: chromium
