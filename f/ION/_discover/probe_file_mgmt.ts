@@ -48,14 +48,15 @@ export async function main(
   const url = `${o}/tasks/addLog.cfm?calendarID=${calendar_id}&LogID=${log_id}&source=ServiceLog`
   const html = await (await fetch(url, { headers: H, redirect: "manual" })).text()
   rec.page_bytes = html.length
-  // where do baseUrl / module / signed-url service live on the page?
-  rec.page_signed = html.split("\n")
-    .filter((l) => /getSignedUrl|baseUrl|fileservice|amazonaws|s3|cloudfront|signed/i.test(l))
-    .map((l) => l.trim().slice(0, 300)).slice(0, 20)
-  // the ajax that fills the Loading... div (any .load/.ajax/.get with a url)
-  rec.page_ajax = [...html.matchAll(/\$\.(ajax|get|post|load)\s*\(|\.load\s*\(\s*["'][^"']+["']/g)]
-    .slice(0, 25).map((m) => html.slice(Math.max(0, m.index - 60), m.index + 220).replace(/\s+/g, " "))
-  // iframes/includes fetched after load
-  rec.page_cfm_refs = [...new Set([...html.matchAll(/["'\(]([^"'\(\)]*(?:file|File|upload|photo|image|attach)[^"'\(\)]*\.cfm[^"'\(\)]*)["'\)]/g)].map((m) => m[1]))].slice(0, 15)
+  // every distinct .cfm URL the page references anywhere
+  rec.all_cfm = [...new Set([...html.matchAll(/([A-Za-z0-9_\/.-]+\.cfm(?:\?[^"'\s\)<>]*)?)/g)].map((m) => m[1].split("?")[0]))]
+  // context around every Loading spinner — what container is it in, what fills it
+  rec.loading_ctx = [...html.matchAll(/ajaxWheel/g)].slice(0, 6).map((m) =>
+    html.slice(Math.max(0, m.index - 700), m.index + 200).replace(/\s+/g, " ").slice(-850))
+  // openFile/downloadFile invocations + ColdFusion ajax bindings
+  rec.openfile_calls = [...html.matchAll(/(openFile|downloadFile)\s*\(/g)].length
+  rec.cf_bindings = html.split("\n")
+    .filter((l) => /ColdFusion\.(Ajax|navigate|Bind)|cfajax|bindTo|AjaxLink/i.test(l))
+    .map((l) => l.trim().slice(0, 250)).slice(0, 15)
   return rec
 }
