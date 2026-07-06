@@ -1,0 +1,12 @@
+summary: "DISCOVERY: let playwright's installer fetch arm64 chromium into /tmp,
+  render-test"
+description: bunx playwright@1.40.0 install chromium into a /tmp browsers path, then render.
+lock: '!inline f/ION/_discover/pw_install_probe.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []
+tag: chromium
