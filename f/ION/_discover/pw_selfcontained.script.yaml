@@ -1,0 +1,12 @@
+summary: 'DISCOVERY: obtain arm64 chromium via live CDN + launch via playwright
+  lib, one job'
+description: Install chromium (cdn.playwright.dev) into /tmp, launch multi-process, render.
+lock: '!inline f/ION/_discover/pw_selfcontained.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []
+tag: chromium
