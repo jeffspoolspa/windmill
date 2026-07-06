@@ -1,0 +1,12 @@
+summary: 'DISCOVERY: can playwright 1.40 library drive the cached arm64 chromium 120?'
+description: The definitive session.ts test — launch via playwright lib, single
+  vs multi-process.
+lock: '!inline f/ION/_discover/pw_launch_probe.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []
+tag: chromium
