@@ -76,6 +76,7 @@ locks:
   f/ION/_discover/pw_system_launch: 8a9bb3359348f9672550fbd9ffa19de010edcade14cdcc3629061ec999be16f1
   f/ION/_discover/qbo_fix_service_addresses: 114dd20d031a3dce70e77d01d38fb52b355564218c159c6093aded9683f79b28
   f/ION/_discover/qbo_fix_service_addresses_commit: 363e0aee44734d78081ec2fef0f01a5fc6b03fdf17a95b7e9baa7edad7782331
+  f/ION/_discover/session_http_test: f37bcda05963ec6b3b07bb4151e76d1a277f2575001b1895e401259cadd23781
   f/ION/_discover/timing_breakdown: dda83936276c376542510be429ad423311c4bdda8fa3f75ea95b1a56c08d4bcc
   f/ION/_lib/apply_event_links: 0ebe2f1b399a44e7b6e06e20d4298f610c076177e781f8f73a45b4f4b9a672b2
   f/ION/_lib/apply_simple_null_complex: b9620f0f3d39b38e5404b8480f8a28c53d8e7292f08d84143a26c5254817d946
