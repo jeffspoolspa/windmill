@@ -51,6 +51,12 @@ export async function main() {
   )
   results.push(await tryRun("version", ["/usr/lib/chromium/chromium", "--version"], 10000))
   results.push(
+    await tryRun("bundled pinned (post-init-fix)", [
+      "/usr/lib/ms-playwright/chromium-1091/chrome-linux/chrome",
+      ...base,
+    ]),
+  )
+  results.push(
     await tryRun("mitigation flags", [
       "/usr/lib/chromium/chromium",
       "--headless",
