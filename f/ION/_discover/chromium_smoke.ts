@@ -35,7 +35,34 @@ async function attempt(name: string, opts: any) {
 }
 
 export async function main() {
-  const results = []
+  const results: any[] = []
+  // what chromium-ish things exist, and what is the wrapper doing?
+  const fs = await import("fs")
+  const inventory: any = { candidates: [], wrapper_head: null }
+  for (const dir of ["/usr/bin", "/usr/lib/chromium", "/usr/lib/chromium-browser", "/opt/chromium", "/usr/local/bin"]) {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (/chrom/i.test(f)) inventory.candidates.push(`${dir}/${f}`)
+      }
+    } catch {}
+  }
+  try {
+    inventory.wrapper_head = fs.readFileSync("/usr/bin/chromium", "utf8").slice(0, 800)
+  } catch (e: any) {
+    inventory.wrapper_head = `unreadable: ${e?.message}`
+  }
+  results.push(inventory)
+  for (const cand of inventory.candidates) {
+    if (cand === "/usr/bin/chromium") continue
+    try {
+      const st = fs.statSync(cand)
+      if (!st.isFile()) continue
+    } catch { continue }
+    results.push(await attempt(`direct:${cand}`, {
+      executablePath: cand,
+      args: [...BASE_ARGS, "--single-process", "--no-zygote"],
+    }))
+  }
   results.push(await attempt("system_single_process (current prod config)", {
     executablePath: "/usr/bin/chromium",
     args: [...BASE_ARGS, "--single-process", "--no-zygote"],
