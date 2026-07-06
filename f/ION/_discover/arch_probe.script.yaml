@@ -1,0 +1,13 @@
+summary: 'DISCOVERY: worker arch + does the right-arch pinned chromium render
+  from /tmp?'
+description: Detect CPU arch, download the matching playwright build 1091,
+  render-test from /tmp.
+lock: '!inline f/ION/_discover/arch_probe.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []
+tag: chromium
