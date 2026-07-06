@@ -1,0 +1,11 @@
+summary: 'DISCOVERY: find any writable+executable dir in the job sandbox'
+description: Copies /bin/true into candidate dirs and spawns it — exit 0 = writable+exec.
+lock: '!inline f/ION/_discover/exec_paths_probe.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []
+tag: chromium
