@@ -41,6 +41,9 @@ export async function main() {
   rec.install_dir = base
   const exe = `${base}/chrome-linux/chrome`
 
+  // always start clean — a prior partial/corrupt extract poisons the cache
+  try { fs.rmSync(base, { recursive: true, force: true }) } catch {}
+
   // 2) download + extract if missing
   if (!fs.existsSync(exe)) {
     const t0 = Date.now()
@@ -68,8 +71,18 @@ export async function main() {
   // 3) does it render?
   rec.exe_exists = fs.existsSync(exe)
   if (rec.exe_exists) {
-    rec.version = await sh([exe, "--version"], 20000)
-    rec.render = await sh(
+    const st = fs.statSync(exe)
+    rec.exe_bytes = st.size
+    rec.exe_mode = (st.mode & 0o777).toString(8)
+    const fd = fs.openSync(exe, "r")
+    const magic = Buffer.alloc(4)
+    fs.readSync(fd, magic, 0, 4, 0)
+    fs.closeSync(fd)
+    rec.exe_magic = magic.toString("hex") // ELF = 7f454c46
+    try { rec.version = await sh([exe, "--version"], 20000) } catch (e: any) {
+      rec.version = { spawn_error: String(e?.message ?? e).slice(0, 150) }
+    }
+    try { rec.render = await sh(
       [
         exe,
         "--headless",
@@ -82,8 +95,10 @@ export async function main() {
         "data:text/html,<title>smoketest</title><p>pinned works</p>",
       ],
       60000,
-    )
-    rec.render_ok = rec.render.out.includes("pinned works")
+    ) } catch (e: any) {
+      rec.render = { spawn_error: String(e?.message ?? e).slice(0, 150) }
+    }
+    rec.render_ok = !!rec.render?.out?.includes?.("pinned works")
   }
   return rec
 }
