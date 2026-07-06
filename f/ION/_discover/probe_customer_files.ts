@@ -54,21 +54,19 @@ export async function main(customerid = "2513043", ion: IonResource | null = nul
   const main_html = await (await fetch(`${o}/customers/customerTabs.cfm?customerid=${customerid}`, { headers: H, redirect: "manual" })).text()
   rec.customer_page = sweep(main_html)
 
-  // 2) likely file-tab fragments (guessed off CF naming conventions + the cfms found)
+  // 2) the real tabs found on the customer page — Images is the photo surface
   const guesses = [
-    `/customers/customerFiles.cfm?customerid=${customerid}`,
-    `/customers/files.cfm?customerid=${customerid}`,
-    `/customers/customerAttachments.cfm?customerid=${customerid}`,
-    `/files/fileManagement.cfm?customerid=${customerid}`,
-    `/IPC/fileManagement.cfm?customerid=${customerid}`,
+    `/Customers/Images/images.cfm?customerid=${customerid}`,
+    `/Customers/Images/images.cfm`,
+    `/customers/logs/loglist.cfm?customerid=${customerid}`,
   ]
   rec.fragments = {}
   for (const g of guesses) {
     try {
       const r = await fetch(`${o}${g}`, { headers: H, redirect: "manual" })
       const t = await r.text()
-      rec.fragments[g] = { status: r.status, bytes: t.length,
-        hit: /openFile|getSignedUrl/.test(t) ? sweep(t) : undefined }
+      rec.fragments[g] = { status: r.status, bytes: t.length, sweep: sweep(t),
+        head: t.replace(/\s+/g, " ").slice(0, 400) }
     } catch (e: any) { rec.fragments[g] = { error: String(e).slice(0, 120) } }
   }
   return rec
