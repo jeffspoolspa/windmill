@@ -1,0 +1,19 @@
+summary: 'DISCOVERY: customer page + file-tab fragments — where do
+  openFile/getSignedUrl render?'
+description: Fetch customerTabs.cfm and likely file fragments; sweep for
+  signed-url wiring and tab fragment URLs.
+lock: '!inline f/ION/_discover/probe_customer_files.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    customerid:
+      type: string
+      default: '2513043'
+    ion:
+      type: object
+      default: null
+  required: []
+tag: chromium
