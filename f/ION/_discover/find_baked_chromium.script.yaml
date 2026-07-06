@@ -1,0 +1,15 @@
+summary: 'DISCOVERY: is a working chromium pre-baked on the image (immune to apt-150)?'
+description: find every chrome binary on the read-only image, version-check,
+  render-test the non-150 one.
+lock: '!inline f/ION/_discover/find_baked_chromium.script.lock'
+concurrency_key: ion_chromium
+concurrency_time_window_s: 5
+concurrent_limit: 1
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []
+tag: chromium

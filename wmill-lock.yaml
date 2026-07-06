@@ -62,6 +62,7 @@ locks:
   f/ION/_discover/disk_probe: 0ed7839420b177fd78601fdb1e52cb2847b787cc67a9a14cb165da522f0d6096
   f/ION/_discover/emit_session: 598e9b72e6298c53292e45e5df3aa50fed07f303ee7db9a0f8293827320b4c1c
   f/ION/_discover/exec_paths_probe: e75ab8423693904848f1e0a3bc3dc960618642a6716368b1daec90c1306a974a
+  f/ION/_discover/find_baked_chromium: 7fcec8d9e2bae23ac29f33886c4ef4a20d7c80d76c6992891d5664a7a9b055ca
   f/ION/_discover/load_recurring_tasks_raw: 5c6897253be9aa1ae0e2d8606dbc79e8ddb913eadab33ca358ed592b2d1fb640
   f/ION/_discover/parse_normalize_test: 52be141b5c839995f9fae48c6491d17bc5fafd8256ee6726daf5360a61738c63
   f/ION/_discover/probe_completed_logs: 92a319e6c6f252f7cfae36eb5a67eb20e51888717e86529f53416a9936452a25
