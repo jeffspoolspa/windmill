@@ -42,9 +42,26 @@ const CHROMIUM_LAUNCH_ARGS = [
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
+// Prefer playwright 1.40's OWN chromium build (installed by the worker
+// group's init script to a pinned path) — the 2026-07-06 incident: the
+// unpinned distro chromium jumped to 150, which SIGTRAPs on any render
+// under nsjail, killing every ION login. chromium-1091 = the build
+// matching the playwright@1.40.0 pin; bump BOTH together or never.
+const BUNDLED_CHROMIUM =
+  "/usr/lib/ms-playwright/chromium-1091/chrome-linux/chrome"
+
+function chromiumExecutable(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require("fs")
+    if (fs.existsSync(BUNDLED_CHROMIUM)) return BUNDLED_CHROMIUM
+  } catch { /* fall through */ }
+  return "/usr/bin/chromium"
+}
+
 export async function loginToIon(ion: IonResource): Promise<IonSession> {
   const browser = await chromium.launch({
-    executablePath: "/usr/bin/chromium",
+    executablePath: chromiumExecutable(),
     args: CHROMIUM_LAUNCH_ARGS,
   })
   try {
