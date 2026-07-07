@@ -34,7 +34,7 @@ IMPORTANT — sales tax: the invoice TOTAL includes sales tax; our expected and 
 
 Respond with ONLY a JSON object, no code fences:
 {"driver": "...", "normal": "...", "recommend": "..."}
-Each value: EXACTLY ONE sentence — short, plain, specific, with the one or two dollar amounts that matter. The reviewer reads this in five seconds.`
+Each value: EXACTLY ONE short sentence, UNDER 25 WORDS, plain language, at most two dollar amounts — the single most decision-relevant fact only. No compound sentences chaining clauses with commas or dashes. The reviewer reads this in five seconds.`
 
 function cents(n: number | null | undefined): string {
   return n == null ? "—" : `$${(Number(n) / 100).toFixed(2)}`
