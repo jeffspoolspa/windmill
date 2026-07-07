@@ -26,7 +26,6 @@ adjustments = [{"item_name": "SALT 40LB", "amount": 20.0, "reason": "storm goodw
 """
 
 import requests
-import wmill
 from f.service_billing.refresh_invoice import main as refresh_invoice
 from f.service_billing.refresh_invoice import refresh_qbo_token
 
