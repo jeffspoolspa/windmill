@@ -167,6 +167,11 @@ ${photos.length ? `The ${photos.length} attached images are this month's service
       } catch { /* skip unfetchable thumb */ }
     }
 
+    // cache breakpoint at the end of the full context (system alone is under
+    // the 1024-token cache minimum): a re-run on the same customer within
+    // 5 min — the analyze -> eyeball -> re-run loop — reads ~3k tokens at 10%
+    if (content.length) content[content.length - 1].cache_control = { type: "ephemeral" }
+
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
