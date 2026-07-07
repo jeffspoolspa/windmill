@@ -21,7 +21,9 @@ QBO update). Concurrency: qbo_api (shared registry).
 adjustments = [{"item_name": "SALT 40LB", "amount": 20.0, "reason": "storm goodwill"}]
 """
 
+import psycopg2
 import requests
+import wmill
 from f.service_billing.refresh_invoice import main as refresh_invoice
 from f.service_billing.refresh_invoice import refresh_qbo_token
 
@@ -114,6 +116,30 @@ def main(qbo_invoice_id: str, adjustments: list, dry_run: bool = True):
     if not resp.ok:
         raise Exception(f"discount write failed for invoice {qbo_invoice_id}: {resp.text[:400]}")
     updated = resp.json().get("Invoice", {})
+
+    # audit ledger: one row per applied adjustment (reason recorded); the
+    # unique key mirrors the QBO-line identity so retries never double-record
+    sb = wmill.get_resource("u/carter/supabase")
+    conn = psycopg2.connect(host=sb["host"], port=sb.get("port", 6543),
+                            dbname=sb.get("dbname", "postgres"), user=sb["user"],
+                            password=sb["password"], sslmode=sb.get("sslmode", "require"))
+    try:
+        with conn, conn.cursor() as cur:
+            for a in adjustments:
+                desc = f"DISCOUNT — {a.get('item_name', 'invoice')}: {a['reason'].strip()}"
+                if desc in skipped:
+                    continue
+                cur.execute(
+                    """INSERT INTO billing_audit.invoice_adjustments
+                         (qbo_invoice_id, doc_number, item_name, amount_usd, reason)
+                       VALUES (%s, %s, %s, %s, %s)
+                       ON CONFLICT (qbo_invoice_id, item_name, amount_usd, reason) DO NOTHING""",
+                    (qbo_invoice_id, updated.get("DocNumber"),
+                     a.get("item_name", "invoice"), round(float(a["amount"]), 2),
+                     a["reason"].strip()),
+                )
+    finally:
+        conn.close()
 
     # reflect the new lines/total in billing.invoices immediately
     refresh = refresh_invoice(qbo_invoice_id)
