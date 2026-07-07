@@ -1,0 +1,36 @@
+summary: Apply review-workbench draft adjustments as negative DISCOUNT lines on
+  a QBO invoice
+description: One negative SalesItemLine (DISCOUNT item 72) per adjustment with
+  the reason in the description; original lines stay intact so
+  reconcile/sold-record survive. Idempotent (skips identical existing discount
+  lines); refreshes the invoice cache after writing.
+lock: '!inline f/billing/apply_maint_adjustments.script.lock'
+concurrency_key: qbo_api
+concurrency_time_window_s: 0
+concurrent_limit: 1
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    adjustments:
+      type: array
+      items:
+        type: object
+        properties:
+          amount:
+            type: number
+            description: positive dollars off
+          item_name:
+            type: string
+          reason:
+            type: string
+    dry_run:
+      type: boolean
+      default: true
+    qbo_invoice_id:
+      type: string
+  required:
+    - qbo_invoice_id
+    - adjustments
