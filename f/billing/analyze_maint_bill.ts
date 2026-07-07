@@ -23,14 +23,14 @@ const SYSTEM_PROMPT = `You are the billing reviewer's assistant at Jeff's Pool &
 
 Your job: explain the bill so the reviewer can decide in seconds.
 
+Focus ONLY on the consumable sales and what is driving the bill's size. Do NOT compare or reconcile invoice amounts against expected/recorded totals — the pipeline already verified the amounts before this bill reached review.
+
 Analyze:
-1. DRIVER — what specifically makes this bill the size/shape it is (or what tripped the hold). Point at concrete visits, chemical doses, or line items with dollar amounts. If readings explain the chem usage (low FC -> shock, low salt reading -> salt bags), connect them.
-2. NORMAL? — is this normal for THIS customer given their history, and reasonable versus their peer group? Distinguish a one-off event (storm, green pool, equipment issue) from a trend (rising usage over months) from a data problem (billed but not recorded, or vice versa).
-3. RECOMMEND — one concrete action: approve as billed; adjust a specific line (say which, by how much, and why); or investigate something specific first. If photos contradict or confirm the notes (e.g., visible algae supporting a shock charge), say so.
+1. DRIVER — which consumable sales (items, quantities, dollars) and which visits produced them. If readings explain the doses (low FC -> shock, low salt reading -> salt bags), connect them.
+2. NORMAL? — is this consumption normal for THIS customer given their history, and reasonable versus peers? Distinguish a one-off event (storm, green pool, equipment issue) from a rising trend. COMMERCIAL accounts get BULK chemical deliveries — one bulk line can swing a month; if it is near the account's usual delivery size, that IS the explanation and is fine to bill.
+3. RECOMMEND — one concrete action: approve as billed; adjust a specific line (say which, by how much, why); or investigate something specific first. If photos contradict or confirm the notes, say so.
 
 Ground every claim in the data you were given. Never invent visits, amounts, or history. If the evidence is thin, say what is missing rather than guessing.
-
-IMPORTANT — sales tax: the invoice TOTAL includes sales tax; our expected and ION amounts are PRE-TAX. Compare them against the invoice SUBTOTAL only. A total-vs-expected gap explained by tax is NOT a variance and must never be flagged — the pipeline already verified subtotals match before this bill reached review.
 
 Respond with ONLY a JSON object, no code fences:
 {"driver": "...", "normal": "...", "recommend": "..."}
@@ -111,8 +111,7 @@ export async function main(
         .map((li: any) => `  - ${li.item_name ?? li.description ?? "?"}: qty ${li.qty ?? "—"} = $${li.amount ?? 0}`)
         .join("\n")
       return `Invoice #${p.doc_number ?? p.qbo_invoice_id ?? "unlinked"} — subtotal $${p.subtotal ?? "?"} (pre-tax), total $${p.total_amt ?? "?"} (incl. sales tax), balance $${p.balance ?? "?"}, ${p.email_status === "EmailSent" ? "sent" : "not sent"}
-Hold reason: ${p.needs_review_reason ?? "—"}; reconcile notes: ${p.notes ?? "—"}
-Expected (our write-ahead, PRE-TAX — compare to subtotal): ${cents(p.expected_total_cents)}; ION billed (pre-tax): ${cents(p.ion_amt_cents)}
+Hold reason: ${p.needs_review_reason ?? "—"}
 Lines:\n${lines || "  (none cached)"}`
     }).join("\n\n")
 
