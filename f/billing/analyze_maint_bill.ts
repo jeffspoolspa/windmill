@@ -84,7 +84,7 @@ export async function main(
         FROM vis LEFT JOIN chem ON chem.month = vis.month
         GROUP BY 1, 2 ORDER BY 1`,
       sql`
-        SELECT peer_group, provides_chems
+        SELECT peer_group
         FROM billing_audit.customer_peer_group WHERE customer_id = ${customer_id}`,
       sql`
         SELECT item_name, month_qty, month_usd, usual_qty, usual_usd, peer_avg_usd
@@ -129,9 +129,7 @@ Lines:\n${lines || "  (none cached)"}`
       return `${String(h.month).slice(0, 7)}: ${h.visits} visits, chems ${cents(h.chem_cents)}${qty ? ` (${qty})` : ""}`
     }).join("\n")
 
-    const peerBlock = peer.length
-      ? `Peer group: ${peer[0].peer_group}${peer[0].provides_chems ? " (we provide chems)" : ""}`
-      : "Peer group: unknown"
+    const peerBlock = peer.length ? `Peer group: ${peer[0].peer_group}` : "Peer group: unknown"
     const itemsBlock = flagItems.map((it: any) =>
       `${it.item_name}: this month ${it.month_qty ?? 0} ($${it.month_usd ?? 0}) vs usual ${it.usual_qty ?? "—"} ($${it.usual_usd ?? "—"}), peer avg $${it.peer_avg_usd ?? "—"}`,
     ).join("\n")
