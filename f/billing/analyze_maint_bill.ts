@@ -191,7 +191,7 @@ ${photos.length ? `The ${photos.length} attached images are this month's service
     } catch {
       // tolerate prose-wrapped JSON
       const m = jsonText.match(/\{[\s\S]*\}/)
-      if (!m) throw new Error(`model did not return JSON: ${raw.slice(0, 200)}`)
+      if (!m) throw new Error(`model did not return JSON. stop=${data.stop_reason} resp=${JSON.stringify(data).slice(0, 600)}`)
       result = JSON.parse(m[0])
     }
 
