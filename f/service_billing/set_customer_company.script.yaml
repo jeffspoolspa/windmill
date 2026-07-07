@@ -1,0 +1,24 @@
+summary: Set a QBO customer's CompanyName (the commercial marker) + re-sync cache
+description: Company-filled = commercial across task classification and billing
+  peer groups. Sparse-updates the QBO Customer then refresh_customer re-syncs
+  Customers.company.
+lock: '!inline f/service_billing/set_customer_company.script.lock'
+concurrency_key: qbo_api
+concurrency_time_window_s: 0
+concurrent_limit: 1
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    company_name:
+      type: string
+    dry_run:
+      type: boolean
+      default: true
+    qbo_customer_id:
+      type: string
+  required:
+    - qbo_customer_id
+    - company_name
