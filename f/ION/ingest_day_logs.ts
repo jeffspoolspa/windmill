@@ -75,6 +75,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
         event_id: String(d.event_id),
         scheduled_date: toIso(d.scheduled_date) || toIso(day),
         service_type: l.service_type ?? null,
+        service_profile: (d.service_profile && String(d.service_profile).trim()) ? String(d.service_profile).trim() : null,
         serviceable: d.serviceable === true,
         time_in: d.time_in ?? null, time_out: d.time_out ?? null,
         submitted_by: sub,
@@ -144,16 +145,16 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
         if (!v.ion_log_id || !v.scheduled_date) { skipped++; continue }
         const ins = await tx`INSERT INTO maintenance.visits
           (customer_id, task_id, ion_task_id, scheduled_date, visit_date, is_serviceable,
-           service_type, price_cents, billing_method, status, visit_type, started_at, ended_at,
+           service_type, service_profile, price_cents, billing_method, status, visit_type, started_at, ended_at,
            ion_log_id, ion_calendar_id, ion_submitted_by, actual_tech_id, notes, failure_reason, external_source)
           VALUES (${v.customer_id}, ${v.task_id}, ${v.event_id}, ${v.scheduled_date}, ${v.scheduled_date},
-           ${v.serviceable}, ${v.service_type}, ${v.price_cents}, ${v.billing_method}, 'completed', 'route',
+           ${v.serviceable}, ${v.service_type}, ${v.service_profile}, ${v.price_cents}, ${v.billing_method}, 'completed', 'route',
            ${tsLocal(v.scheduled_date, v.time_in)}, ${tsLocal(v.scheduled_date, v.time_out)},
            ${v.ion_log_id}, ${v.ion_calendar_id}, ${v.submitted_by}, ${v.actual_tech_id}, ${v.comment}, ${v.failure_reason}, 'ion_log')
           ON CONFLICT (ion_log_id) WHERE ion_log_id IS NOT NULL DO UPDATE SET
             customer_id=COALESCE(EXCLUDED.customer_id, maintenance.visits.customer_id), task_id=EXCLUDED.task_id, ion_task_id=EXCLUDED.ion_task_id,
             scheduled_date=EXCLUDED.scheduled_date, visit_date=EXCLUDED.visit_date, is_serviceable=EXCLUDED.is_serviceable,
-            service_type=EXCLUDED.service_type, price_cents=EXCLUDED.price_cents, billing_method=EXCLUDED.billing_method,
+            service_type=EXCLUDED.service_type, service_profile=EXCLUDED.service_profile, price_cents=EXCLUDED.price_cents, billing_method=EXCLUDED.billing_method,
             started_at=EXCLUDED.started_at, ended_at=EXCLUDED.ended_at, ion_calendar_id=EXCLUDED.ion_calendar_id,
             ion_submitted_by=EXCLUDED.ion_submitted_by, actual_tech_id=COALESCE(EXCLUDED.actual_tech_id, maintenance.visits.actual_tech_id),
             notes=EXCLUDED.notes, failure_reason=EXCLUDED.failure_reason, updated_at=now()
