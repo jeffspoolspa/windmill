@@ -155,9 +155,16 @@ ${photos.length ? `The ${photos.length} attached images are this month's service
 
     // ---- Claude call (system prompt cached) ----
     const apiKey = await wmill.getVariable("f/service_billing/ANTHROPIC_API_KEY")
+    // thumbnails are ~8KB public S3 — fetch here and send base64 (image URL
+    // blocks count against Anthropic's 10/min URL-fetch limit; base64 doesn't)
     const content: any[] = [{ type: "text", text: contextText }]
     for (const p of photos) {
-      content.push({ type: "image", source: { type: "url", url: p.thumb_url } })
+      try {
+        const r = await fetch(p.thumb_url)
+        if (!r.ok) continue
+        const b64 = Buffer.from(await r.arrayBuffer()).toString("base64")
+        content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } })
+      } catch { /* skip unfetchable thumb */ }
     }
 
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
