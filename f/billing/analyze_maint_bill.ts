@@ -176,7 +176,8 @@ ${photos.length ? `The ${photos.length} attached images are this month's service
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 800,
+        max_tokens: 1500,
+        thinking: { type: "disabled" },
         system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
         messages: [{ role: "user", content }],
       }),
