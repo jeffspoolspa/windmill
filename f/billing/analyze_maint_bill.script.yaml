@@ -1,0 +1,23 @@
+summary: AI bill analysis for the review workbench (Claude, prompt-cached)
+description: Gathers the customer-month's invoice lines, visits
+  (readings/chems/notes), per-item usual-vs-month-vs-peer stats, monthly
+  history, peer group, and up to 12 photo thumbnails; asks Claude for {driver,
+  normal, recommend}; upserts billing_audit.maint_bill_analyses.
+lock: '!inline f/billing/analyze_maint_bill.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    billing_month:
+      type: string
+      description: YYYY-MM-01
+    customer_id:
+      type: integer
+    qbo_customer_id:
+      type: string
+  required:
+    - customer_id
+    - qbo_customer_id
+    - billing_month
