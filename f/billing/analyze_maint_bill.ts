@@ -30,9 +30,11 @@ Analyze:
 
 Ground every claim in the data you were given. Never invent visits, amounts, or history. If the evidence is thin, say what is missing rather than guessing.
 
+IMPORTANT — sales tax: the invoice TOTAL includes sales tax; our expected and ION amounts are PRE-TAX. Compare them against the invoice SUBTOTAL only. A total-vs-expected gap explained by tax is NOT a variance and must never be flagged — the pipeline already verified subtotals match before this bill reached review.
+
 Respond with ONLY a JSON object, no code fences:
 {"driver": "...", "normal": "...", "recommend": "..."}
-Each value: 1-3 sentences, specific, with dollar amounts where relevant.`
+Each value: EXACTLY ONE sentence — short, plain, specific, with the one or two dollar amounts that matter. The reviewer reads this in five seconds.`
 
 function cents(n: number | null | undefined): string {
   return n == null ? "—" : `$${(Number(n) / 100).toFixed(2)}`
@@ -52,7 +54,7 @@ export async function main(
       sql`
         SELECT tbp.id, tbp.expected_total_cents, tbp.ion_amt_cents, tbp.needs_review_reason,
                tbp.notes, tbp.qbo_invoice_id,
-               i.doc_number, i.total_amt, i.balance, i.email_status, i.line_items
+               i.doc_number, i.subtotal, i.total_amt, i.balance, i.email_status, i.line_items
         FROM billing_audit.task_billing_periods tbp
         LEFT JOIN billing.invoices i ON i.qbo_invoice_id = tbp.qbo_invoice_id
         WHERE tbp.qbo_customer_id = ${qbo_customer_id}
@@ -108,9 +110,9 @@ export async function main(
         .filter((li: any) => li.line_type === "item" || !li.line_type)
         .map((li: any) => `  - ${li.item_name ?? li.description ?? "?"}: qty ${li.qty ?? "—"} = $${li.amount ?? 0}`)
         .join("\n")
-      return `Invoice #${p.doc_number ?? p.qbo_invoice_id ?? "unlinked"} — total $${p.total_amt ?? "?"}, balance $${p.balance ?? "?"}, ${p.email_status === "EmailSent" ? "sent" : "not sent"}
+      return `Invoice #${p.doc_number ?? p.qbo_invoice_id ?? "unlinked"} — subtotal $${p.subtotal ?? "?"} (pre-tax), total $${p.total_amt ?? "?"} (incl. sales tax), balance $${p.balance ?? "?"}, ${p.email_status === "EmailSent" ? "sent" : "not sent"}
 Hold reason: ${p.needs_review_reason ?? "—"}; reconcile notes: ${p.notes ?? "—"}
-Expected (our write-ahead): ${cents(p.expected_total_cents)}; ION billed: ${cents(p.ion_amt_cents)}
+Expected (our write-ahead, PRE-TAX — compare to subtotal): ${cents(p.expected_total_cents)}; ION billed (pre-tax): ${cents(p.ion_amt_cents)}
 Lines:\n${lines || "  (none cached)"}`
     }).join("\n\n")
 
