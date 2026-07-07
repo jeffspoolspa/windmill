@@ -1,7 +1,3 @@
-# requirements:
-# psycopg2-binary
-# requests
-
 """
 f/billing/apply_maint_adjustments
 
