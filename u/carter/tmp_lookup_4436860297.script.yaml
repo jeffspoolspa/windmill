@@ -1,6 +1,7 @@
-summary: 'One-off: deep lookup + transcribe for (443) 686-0297 over 31 days.
-  Delete after use.'
-description: One-off. Hardcoded number so it runs with empty args via MCP. Delete after use.
+summary: 'One-off: transcribe recording 2406983278051 (24-min call from
+  443-686-0297) via whisper-1. Delete after use.'
+description: One-off. whisper-1 handles the 24-min duration that
+  gpt-4o-transcribe rejected. Delete after use.
 lock: '!inline u/carter/tmp_lookup_4436860297.script.lock'
 has_on_behalf_of: false
 kind: script
