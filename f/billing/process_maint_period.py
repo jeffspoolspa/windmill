@@ -598,9 +598,34 @@ def main(period_ids: list = None,
         if not ids:
             return {"status": "noop", "error": "no ready periods matched"}
 
+        # live runs: seed the processing queue up front so the UI shows the
+        # whole batch (queued -> in flight -> resolved) from the first second
+        if not dry_run:
+            cur.execute(
+                """INSERT INTO billing_audit.maint_process_queue (period_id)
+                   SELECT unnest(%s::uuid[]) ON CONFLICT DO NOTHING""", (ids,))
+            conn.commit()
+
         access_token, realm_id = refresh_qbo_token()
-        results = [process_one(conn, cur, pid, access_token, realm_id, dry_run, force)
-                   for pid in ids]
+        results = []
+        for pid in ids:
+            if not dry_run:
+                cur.execute(
+                    """UPDATE billing_audit.maint_process_queue
+                       SET started_at = now() WHERE period_id = %s AND finished_at IS NULL""",
+                    (pid,))
+                conn.commit()
+            try:
+                results.append(process_one(conn, cur, pid, access_token, realm_id, dry_run, force))
+            finally:
+                if not dry_run:
+                    # a raise can leave an aborted txn; committed work is safe
+                    conn.rollback()
+                    cur.execute(
+                        """UPDATE billing_audit.maint_process_queue
+                           SET finished_at = now() WHERE period_id = %s AND finished_at IS NULL""",
+                        (pid,))
+                    conn.commit()
         by_status = {}
         for r in results:
             by_status[r["status"]] = by_status.get(r["status"], 0) + 1

@@ -7,9 +7,6 @@ description: "The maintenance charge engine: only
   before the charge; Intuit Request-Id dedupes on retry). Receipt email first,
   then the invoice copy. Non-autopay periods get the invoice email only."
 lock: '!inline f/billing/process_maint_period.script.lock'
-concurrency_key: qbo_writer
-concurrency_time_window_s: 5
-concurrent_limit: 1
 has_on_behalf_of: false
 kind: script
 schema:
