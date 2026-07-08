@@ -213,10 +213,13 @@ def charge_bank_account(bank_id, amount, request_id, invoice_num, customer_name,
 
 
 def record_qbo_payment(customer_id, invoice_id, amount, charge_result, invoice_num,
-                       month_label, access_token, realm_id):
-    """QBO Payment linked to the invoice, CCTransId = charge id (reconciliation).
-    PrivateNote mirrors the WO engine's receipt memo, with the month label
-    ('June Pool Maintenance') where the WO number goes."""
+                       month_label, access_token, realm_id, lines=None):
+    """QBO Payment linked to the invoice(s), CCTransId = charge id
+    (reconciliation). PrivateNote mirrors the WO engine's receipt memo, with
+    the month label ('June Pool Maintenance') where the WO number goes.
+    lines: optional [(qbo_invoice_id, amount), ...] — ONE payment applied
+    across a customer's invoices (multi-invoice month); defaults to the
+    single-invoice line."""
     charge_id = charge_result.get("charge_id", "")
     pmt_method_id = (QBO_PMT_METHOD_ACH if charge_result.get("payment_type") == "ach"
                      else QBO_PMT_METHOD_CC)
@@ -225,16 +228,19 @@ def record_qbo_payment(customer_id, invoice_id, amount, charge_result, invoice_n
             f"Auth: {charge_result.get('auth_code', '')} | "
             f"{charge_result.get('card_type', '')} x{charge_result.get('card_last4', '')} | "
             f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    if lines is None:
+        lines = [(invoice_id, amount)]
     resp = requests.post(
         f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/payment",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json",
                  "Content-Type": "application/json"},
         json={"CustomerRef": {"value": customer_id}, "TotalAmt": amount,
               "PaymentMethodRef": {"value": pmt_method_id},
-              "PaymentRefNum": invoice_num,
+              "PaymentRefNum": invoice_num[:21],
               "TxnDate": datetime.now().strftime("%Y-%m-%d"),
-              "Line": [{"Amount": amount,
-                        "LinkedTxn": [{"TxnId": invoice_id, "TxnType": "Invoice"}]}],
+              "Line": [{"Amount": ln_amount,
+                        "LinkedTxn": [{"TxnId": ln_invoice, "TxnType": "Invoice"}]}
+                       for ln_invoice, ln_amount in lines],
               "PrivateNote": note,
               "CreditCardPayment": {
                   "CreditChargeInfo": {"ProcessPayment": True, "Amount": amount},
@@ -288,17 +294,19 @@ def latest_attempt(cur, qbo_invoice_id):
 
 
 def create_attempt(conn, cur, invoice_number, qbo_invoice_id, channel, cpm_id,
-                   charge_amount, dry_run):
-    # channel column check allows email|ach|credit_card
+                   charge_amount, dry_run, status="pending"):
+    # channel column check allows email|ach|credit_card. status override is for
+    # grouped-charge SIBLING rows, written after the outcome is known (never
+    # 'pending' — their idempotency key is never used; the anchor row charges)
     db_channel = "credit_card" if channel == "card" else channel
     cur.execute(
         """INSERT INTO billing.processing_attempts
              (invoice_number, qbo_invoice_id, stage, status, idempotency_key,
               payment_method, charge_amount, dry_run, channel, customer_payment_method_id)
-           VALUES (%s, %s, 'maint', 'pending', %s, %s, %s, %s, %s, %s)
+           VALUES (%s, %s, 'maint', %s, %s, %s, %s, %s, %s, %s)
            RETURNING *""",
-        (invoice_number, qbo_invoice_id, str(uuid.uuid4()), db_channel, charge_amount,
-         dry_run, db_channel, cpm_id))
+        (invoice_number, qbo_invoice_id, status, str(uuid.uuid4()), db_channel,
+         charge_amount, dry_run, db_channel, cpm_id))
     conn.commit()
     return dict(cur.fetchone())
 
@@ -405,6 +413,13 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
     if prior and prior["status"] == "payment_orphan":
         return {"period": period_id, "customer": p["customer_name"], "status": "skipped",
                 "error": "payment_orphan — human recovery required"}
+    if prior and prior["status"] in ("pending", "charge_uncertain", "charge_succeeded") \
+            and _group_lines(prior):
+        # in-flight GROUP anchor: its charge_amount is the customer's combined
+        # total — single-path resume would misapply it to this one invoice
+        return {"period": period_id, "customer": p["customer_name"], "status": "skipped",
+                "error": "in-flight grouped charge anchored on this invoice — "
+                         "reprocess the customer's month as a batch"}
 
     if channel == "email":
         # non-autopay: invoice email only, no charge. NEVER resend an
@@ -575,6 +590,298 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
             "email_errors": emails["errors"] or None}
 
 
+def _group_lines(attempt):
+    """The group marker persisted on a grouped-charge anchor attempt:
+    [[qbo_invoice_id, amount], ...] or None for single-invoice attempts."""
+    raw = attempt.get("raw_result")
+    if not raw:
+        return None
+    try:
+        d = raw if isinstance(raw, dict) else json.loads(raw)
+        return d.get("group_lines")
+    except Exception:
+        return None
+
+
+def _load_group(cur, period_ids):
+    rows = []
+    for pid in period_ids:
+        cur.execute(LOAD_PERIOD, (pid,))
+        row = cur.fetchone()
+        rows.append((pid, dict(row) if row else None))
+    return rows
+
+
+def process_customer_group(conn, cur, period_ids, access_token, realm_id, dry_run, force):
+    """A customer's multi-invoice month: ONE charge for the summed balances and
+    ONE QBO Payment applied across all the invoices (receipt sent once), instead
+    of a separate card charge per invoice. Non-chargeable members (paid, gated,
+    email-only, or mid-flight from an earlier single run) fall through to
+    process_one unchanged. The WAL anchor is the lowest doc number; sibling
+    invoices get their attempt rows AFTER the outcome (status never 'pending',
+    their keys are never charged) so per-invoice reporting keeps working."""
+    results = []
+    group = []          # chargeable members for a FRESH combined charge
+    resume_prior = None  # an in-flight grouped-charge anchor to finish first
+    for pid, p in _load_group(cur, period_ids):
+        if not p:
+            results.append({"period": pid, "status": "error", "error": "period not found"})
+            continue
+        p["email"] = p.get("autopay_email") or p.get("customer_email")
+        ready = p["processing_status"] == "ready_to_process" or force
+        chargeable = (ready and p["locked_at"] is None and p["qbo_invoice_id"]
+                      and p["balance"] is not None and float(p["balance"]) > 0
+                      and p["autopay_id"] is not None)
+        if chargeable:
+            prior = latest_attempt(cur, p["qbo_invoice_id"])
+            if prior and prior["status"] in ("pending", "charge_uncertain",
+                                             "charge_succeeded", "payment_orphan"):
+                if prior["status"] != "payment_orphan" and _group_lines(prior):
+                    # interrupted grouped charge anchored here — resume it with
+                    # its STORED membership/amounts; never fold into a new charge
+                    resume_prior = (pid, p, prior)
+                    continue
+                # single-invoice mid-flight/orphan — the single-path resume owns it
+                chargeable = False
+        if chargeable:
+            group.append((pid, p))
+        else:
+            results.append(process_one(conn, cur, pid, access_token, realm_id, dry_run, force))
+
+    if resume_prior is not None:
+        pid_r, p_r, prior = resume_prior
+        stored = _group_lines(prior)
+        stored_ids = {inv for inv, _ in stored}
+        # members of the interrupted group re-enter the resume set; anything
+        # newly ready outside it is left for the NEXT run (no charge mixing)
+        resume_members = [(pid_r, p_r)] + [(pid, p) for pid, p in group
+                                           if p["qbo_invoice_id"] in stored_ids]
+        left_out = [(pid, p) for pid, p in group if p["qbo_invoice_id"] not in stored_ids]
+        results += [{"period": pid, "customer": p["customer_name"], "status": "skipped",
+                     "error": "deferred: interrupted grouped charge for this customer "
+                              "must finish first — re-run after it resolves"}
+                    for pid, p in left_out]
+        if dry_run:
+            return results + [{
+                "period": pid, "customer": p["customer_name"], "status": "dry_run",
+                "plan": f"RESUME interrupted combined charge "
+                        f"({prior['status']}, {float(prior['charge_amount']):.2f}) "
+                        f"anchored on invoice #{prior['invoice_number']}",
+            } for pid, p in resume_members]
+        return results + _run_group_charge(
+            conn, cur, resume_members, access_token, realm_id,
+            resume=prior)
+
+    if len(group) <= 1:
+        for pid, _ in group:
+            results.append(process_one(conn, cur, pid, access_token, realm_id, dry_run, force))
+        return results
+
+    # ── routing: one roster row serves the whole group ──
+    group.sort(key=lambda t: t[1]["doc_number"] or "")
+    a = group[0][1]
+    pm_ok = (a["cpm_id"] is not None and a["pm_active"]
+             and a["auto_disabled_at"] is None and a["deactivated_at"] is None)
+    switched_pm = False
+    if not pm_ok and a["dpm_id"] is not None:
+        a["cpm_id"], a["qbo_payment_method_id"] = a["dpm_id"], a["dpm_qbo_id"]
+        a["pm_type"], a["pm_brand"], a["pm_last4"] = (
+            a["dpm_type"], a["dpm_brand"], a["dpm_last4"])
+        pm_ok = switched_pm = True
+        if not dry_run:
+            cur.execute("SELECT public.maint_billing_autopay_set_pm(%s, %s)",
+                        (a["qbo_customer_id"], a["cpm_id"]))
+            conn.commit()
+    if not pm_ok:
+        # no live method: every invoice goes the email path individually
+        for pid, _ in group:
+            results.append(process_one(conn, cur, pid, access_token, realm_id, dry_run, force))
+        return results
+
+    if dry_run:
+        is_bank = (a["pm_type"] or "").lower() in ("ach", "bank_account") \
+            or "bank" in (a["pm_type"] or "").lower()
+        channel = "ach" if is_bank else "card"
+        total = round(sum(float(p["balance"]) for _, p in group), 2)
+        docs_label = ", ".join(p["doc_number"] or "?" for _, p in group)
+        return results + [{
+            "period": pid, "customer": p["customer_name"], "status": "dry_run",
+            "plan": f"COMBINED charge {channel} {(a['pm_brand'] or a['pm_type'] or '')} "
+                    f"····{a['pm_last4'] or '?'} {total:.2f} covering invoices "
+                    f"#{docs_label} (this invoice's share {float(p['balance']):.2f}), "
+                    f"one QBO payment applied to all"
+                    + (" [roster PM dead — would switch to QBO default]" if switched_pm else ""),
+        } for pid, p in group]
+
+    return results + _run_group_charge(conn, cur, group, access_token, realm_id,
+                                       switched_pm=switched_pm)
+
+
+def _run_group_charge(conn, cur, group, access_token, realm_id,
+                      resume=None, switched_pm=False):
+    """LIVE combined charge for one customer's group (>= 2 loaded members, or
+    a resume set). resume = the interrupted anchor attempt row to finish."""
+    anchor_pid, a = group[0]
+
+    if resume is not None:
+        attempt = resume
+        channel = "ach" if attempt["channel"] == "ach" else "card"
+        lines = [(inv, float(amt)) for inv, amt in _group_lines(attempt)]
+        total = round(float(attempt["charge_amount"]), 2)
+        docs = [attempt["invoice_number"] or "?"] + \
+               [p["doc_number"] or "?" for pid, p in group[1:]]
+    else:
+        is_bank = (a["pm_type"] or "").lower() in ("ach", "bank_account") \
+            or "bank" in (a["pm_type"] or "").lower()
+        channel = "ach" if is_bank else "card"
+        lines = [(p["qbo_invoice_id"], round(float(p["balance"]), 2)) for _, p in group]
+        total = round(sum(amt for _, amt in lines), 2)
+        docs = [p["doc_number"] or "?" for _, p in group]
+    docs_label = ", ".join(docs)
+    month_label = datetime.strptime(a["month_key"], "%Y-%m").strftime("%B")
+    results = []
+
+    # ── WAL anchor: one attempt row carries the real charge ──
+    if resume is None:
+        attempt = create_attempt(conn, cur, a["doc_number"], a["qbo_invoice_id"], channel,
+                                 a["cpm_id"], total, False)
+        update_attempt(conn, cur, attempt["id"],
+                       raw_result=_dumps({"group_invoices": docs, "group_lines": lines}))
+
+    if attempt["status"] in ("pending", "charge_uncertain"):
+        fn = charge_bank_account if channel == "ach" else charge_card
+        charge_result = fn(a["qbo_payment_method_id"], total, attempt["idempotency_key"],
+                           docs_label, a["customer_name"] or "", access_token)
+        cls = charge_result["classification"]
+    else:
+        # resume past a completed charge: money moved, finish the bookkeeping
+        charge_result = {"charge_id": attempt["charge_id"], "payment_type": channel,
+                         "amount": total, "card_type": None, "card_last4": "",
+                         "auth_code": "", "status": "CAPTURED"}
+        cls = "success"
+    if cls == "uncertain":
+        update_attempt(conn, cur, attempt["id"], status="charge_uncertain",
+                       error_message=charge_result.get("error"),
+                       raw_result=_dumps({"group_invoices": docs, "group_lines": lines,
+                                          "charge": charge_result}))
+        return results + [{"period": pid, "customer": p["customer_name"],
+                           "status": "charge_uncertain", "error": charge_result.get("error"),
+                           "group_total": total}
+                          for pid, p in group]
+
+    if cls == "declined":
+        update_attempt(conn, cur, attempt["id"], status="charge_declined",
+                       error_message=charge_result.get("error"),
+                       raw_result=_dumps({"group_invoices": docs, "group_lines": lines,
+                                          "charge": charge_result}))
+        cur.execute(
+            """UPDATE billing.autopay_customers
+               SET consecutive_declines = consecutive_declines + 1,
+                   payment_status = 'payment_issue', updated_at = now()
+               WHERE id = %s""", (a["autopay_id"],))
+        conn.commit()
+        # each invoice still goes out for pay-it-yourself; delivered = processed
+        for pid, p in group:
+            already_sent = p["email_status"] == "EmailSent"
+            emails = {"invoice": already_sent}
+            if not already_sent:
+                emails = send_receipt_then_invoice(None, p["qbo_invoice_id"], p["email"],
+                                                   access_token, realm_id)
+            if pid != anchor_pid:
+                sib = create_attempt(conn, cur, p["doc_number"], p["qbo_invoice_id"],
+                                     channel, a["cpm_id"], round(float(p["balance"]), 2),
+                                     False, status="charge_declined")
+                update_attempt(conn, cur, sib["id"],
+                               error_message=charge_result.get("error"),
+                               email_sent=emails["invoice"],
+                               raw_result=_dumps({"group_anchor": a["doc_number"]}))
+            elif emails["invoice"] and not already_sent:
+                update_attempt(conn, cur, attempt["id"], email_sent=True)
+            if emails["invoice"]:
+                cur.execute("UPDATE billing.invoices SET email_status='EmailSent' WHERE qbo_invoice_id=%s",
+                            (p["qbo_invoice_id"],))
+                cur.execute(
+                    """UPDATE billing_audit.task_billing_periods
+                       SET processing_status = 'processed',
+                           processed_at = coalesce(processed_at, now()),
+                           updated_at = now()
+                       WHERE id = %s""", (pid,))
+                conn.commit()
+            results.append({"period": pid, "customer": p["customer_name"],
+                            "status": "charge_declined", "error": charge_result.get("error"),
+                            "invoice_sent": emails["invoice"], "group_total": total})
+        return results
+
+    update_attempt(conn, cur, attempt["id"], status="charge_succeeded",
+                   charge_id=charge_result.get("charge_id"),
+                   raw_result=_dumps({"group_invoices": docs, "group_lines": lines,
+                                      "charge": charge_result}))
+
+    # ── ONE payment, N lines (resume-safe: never re-record) ──
+    if attempt.get("qbo_payment_id"):
+        rec = {"success": True, "qbo_payment_id": attempt["qbo_payment_id"]}
+    else:
+        rec = record_qbo_payment(a["qbo_customer_id"], a["qbo_invoice_id"], total,
+                                 charge_result, docs_label, month_label,
+                                 access_token, realm_id, lines=lines)
+    if not rec["success"]:
+        update_attempt(conn, cur, attempt["id"], status="payment_orphan",
+                       error_message=f"record_payment failed: {rec['error']}")
+        return results + [{"period": pid, "customer": p["customer_name"],
+                           "status": "payment_orphan", "error": rec["error"],
+                           "group_total": total}
+                          for pid, p in group]
+    update_attempt(conn, cur, attempt["id"], qbo_payment_id=rec["qbo_payment_id"])
+
+    # receipt ONCE (on the combined payment), then each unsent invoice copy
+    any_receipt = False
+    for i, (pid, p) in enumerate(group):
+        invoice_already_sent = p["email_status"] == "EmailSent"
+        emails = send_receipt_then_invoice(
+            rec["qbo_payment_id"] if i == 0 else None,
+            p["qbo_invoice_id"], p["email"], access_token, realm_id,
+            send_invoice=not invoice_already_sent)
+        if i == 0:
+            any_receipt = emails["receipt"]
+        delivered = emails["invoice"] or invoice_already_sent
+        share = round(float(p["balance"]), 2)
+        final = "succeeded" if delivered or any_receipt else "email_failed"
+        if pid == anchor_pid:
+            update_attempt(conn, cur, attempt["id"], status=final,
+                           email_sent=emails["invoice"])
+        else:
+            sib = create_attempt(conn, cur, p["doc_number"], p["qbo_invoice_id"],
+                                 channel, a["cpm_id"], share, False, status=final)
+            update_attempt(conn, cur, sib["id"],
+                           charge_id=charge_result.get("charge_id"),
+                           qbo_payment_id=rec["qbo_payment_id"],
+                           email_sent=emails["invoice"],
+                           raw_result=_dumps({"group_anchor": a["doc_number"]}))
+        cur.execute(
+            """UPDATE billing.invoices
+               SET balance = 0, email_status = CASE WHEN %s THEN 'EmailSent' ELSE email_status END
+               WHERE qbo_invoice_id = %s""",
+            (delivered, p["qbo_invoice_id"]))
+        conn.commit()
+        results.append({"period": pid, "customer": p["customer_name"], "status": final,
+                        "charged": share, "group_total": total,
+                        "charge_id": charge_result.get("charge_id"),
+                        "qbo_payment_id": rec["qbo_payment_id"],
+                        "receipt_sent": any_receipt if pid == anchor_pid else None,
+                        "invoice_sent": emails["invoice"] or ("already" if invoice_already_sent else False),
+                        "pm_switched_to_qbo_default": switched_pm or None})
+
+    cur.execute(
+        """UPDATE billing.autopay_customers
+           SET consecutive_declines = 0, payment_status = 'good', updated_at = now()
+           WHERE id = %s""", (a["autopay_id"],))
+    conn.commit()
+    cur.execute("SELECT billing_audit.project_maint_processing_status(%s, %s)",
+                (a["billing_month"], a["qbo_customer_id"]))
+    conn.commit()
+    return results
+
+
 def main(period_ids: list = None,
          qbo_customer_ids: list = None,
          billing_month: str = None,
@@ -607,24 +914,45 @@ def main(period_ids: list = None,
             conn.commit()
 
         access_token, realm_id = refresh_qbo_token()
-        results = []
+
+        # group the batch by customer: a multi-invoice customer gets ONE charge
+        # for the total and ONE QBO payment applied across their invoices
+        cur.execute(
+            """SELECT id, qbo_customer_id FROM billing_audit.task_billing_periods
+               WHERE id = ANY(%s)""", (ids,))
+        cust_by_period = {r["id"]: r["qbo_customer_id"] for r in cur.fetchall()}
+        buckets, order = {}, []
         for pid in ids:
+            key = cust_by_period.get(pid) or f"?{pid}"
+            if key not in buckets:
+                buckets[key] = []
+                order.append(key)
+            buckets[key].append(pid)
+
+        results = []
+        for key in order:
+            bucket = buckets[key]
             if not dry_run:
                 cur.execute(
                     """UPDATE billing_audit.maint_process_queue
-                       SET started_at = now() WHERE period_id = %s AND finished_at IS NULL""",
-                    (pid,))
+                       SET started_at = now() WHERE period_id = ANY(%s) AND finished_at IS NULL""",
+                    (bucket,))
                 conn.commit()
             try:
-                results.append(process_one(conn, cur, pid, access_token, realm_id, dry_run, force))
+                if len(bucket) == 1:
+                    results.append(process_one(conn, cur, bucket[0], access_token,
+                                               realm_id, dry_run, force))
+                else:
+                    results += process_customer_group(conn, cur, bucket, access_token,
+                                                      realm_id, dry_run, force)
             finally:
                 if not dry_run:
                     # a raise can leave an aborted txn; committed work is safe
                     conn.rollback()
                     cur.execute(
                         """UPDATE billing_audit.maint_process_queue
-                           SET finished_at = now() WHERE period_id = %s AND finished_at IS NULL""",
-                        (pid,))
+                           SET finished_at = now() WHERE period_id = ANY(%s) AND finished_at IS NULL""",
+                        (bucket,))
                     conn.commit()
         by_status = {}
         for r in results:
