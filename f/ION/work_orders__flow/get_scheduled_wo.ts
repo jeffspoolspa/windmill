@@ -6,12 +6,44 @@
 // f/ION/session_keepalive every 10min + the GitHub Actions minter on death)
 // instead of logging in itself. Only touches chromium (via getOrRefreshSession's
 // fallback) if that cache is somehow empty/stale -- normally this is pure HTTP.
+//
+// NOTE: deliberately does NOT import from /f/ION/_lib/session directly --
+// importing both session_cache and session in the same file corrupts
+// Windmill's relative-import bundler (substring collision on "session").
+// Cookie-header building is inlined below instead.
 
 import { parse } from "node-html-parser";
 import { mkdir } from "fs/promises";
 import * as wmill from "windmill-client";
 import { getOrRefreshSession } from "/f/ION/_lib/session_cache";
-import { ionFetchText, type IonResource } from "/f/ION/_lib/session";
+
+type IonResource = { username: string; password: string; loginUrl: string };
+
+interface IonCookie { name: string; value: string; domain: string; path: string }
+interface IonSession { cookies: IonCookie[]; cfClientId?: string; ionOrigin: string }
+
+function cookieHeader(session: IonSession): string {
+  const host = new URL(session.ionOrigin).hostname;
+  return session.cookies
+    .filter((c) => { const d = c.domain.replace(/^\./, ''); return host === d || host.endsWith('.' + d); })
+    .map((c) => `${c.name}=${c.value}`)
+    .join('; ');
+}
+
+async function sessionFetchText(session: IonSession, url: string): Promise<string> {
+  const res = await fetch(url, {
+    headers: {
+      Cookie: cookieHeader(session),
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      Accept: 'text/html, */*',
+    },
+  });
+  if (!res.ok) {
+    const preview = (await res.text()).slice(0, 300);
+    throw new Error(`fetch ${url} -> HTTP ${res.status}: ${preview}`);
+  }
+  return res.text();
+}
 
 function toIsoDate(dateStr: string): string {
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
@@ -38,7 +70,7 @@ export async function main(
     password: await wmill.getVariable("f/ION/PASSWORD"),
   };
 
-  const session = await getOrRefreshSession(ion);
+  const session = (await getOrRefreshSession(ion)) as unknown as IonSession;
   console.log(`  session ionOrigin: ${session.ionOrigin}`);
   console.log(`  _cf_clientid: ${session.cfClientId || 'NONE'}`);
 
@@ -69,7 +101,7 @@ export async function main(
   const pickerUrl = `${session.ionOrigin}/reports/woReports.cfm?${pickerParams.toString()}`;
   console.log(`  picker URL: ${pickerUrl.substring(0, 120)}...`);
 
-  const pickerBody = await ionFetchText(session, pickerUrl);
+  const pickerBody = await sessionFetchText(session, pickerUrl);
 
   const pickerRoot = parse(pickerBody);
   const allLinks = pickerRoot.querySelectorAll('a');
@@ -95,7 +127,7 @@ export async function main(
   console.log(`  full report URL: ${reportDataUrl.substring(0, 140)}...`);
 
   console.log('\nSTEP 2: FETCH REPORT DATA');
-  const reportBody = await ionFetchText(session, reportDataUrl);
+  const reportBody = await sessionFetchText(session, reportDataUrl);
   console.log(`  body length: ${reportBody.length}`);
 
   await Bun.write('./shared/raw_report.html', reportBody);
