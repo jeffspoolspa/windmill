@@ -919,7 +919,7 @@ def main(period_ids: list = None,
         # for the total and ONE QBO payment applied across their invoices
         cur.execute(
             """SELECT id, qbo_customer_id FROM billing_audit.task_billing_periods
-               WHERE id = ANY(%s)""", (ids,))
+               WHERE id = ANY(%s::uuid[])""", (ids,))
         cust_by_period = {r["id"]: r["qbo_customer_id"] for r in cur.fetchall()}
         buckets, order = {}, []
         for pid in ids:
@@ -935,7 +935,7 @@ def main(period_ids: list = None,
             if not dry_run:
                 cur.execute(
                     """UPDATE billing_audit.maint_process_queue
-                       SET started_at = now() WHERE period_id = ANY(%s) AND finished_at IS NULL""",
+                       SET started_at = now() WHERE period_id = ANY(%s::uuid[]) AND finished_at IS NULL""",
                     (bucket,))
                 conn.commit()
             try:
@@ -951,7 +951,7 @@ def main(period_ids: list = None,
                     conn.rollback()
                     cur.execute(
                         """UPDATE billing_audit.maint_process_queue
-                           SET finished_at = now() WHERE period_id = ANY(%s) AND finished_at IS NULL""",
+                           SET finished_at = now() WHERE period_id = ANY(%s::uuid[]) AND finished_at IS NULL""",
                         (bucket,))
                     conn.commit()
         by_status = {}
