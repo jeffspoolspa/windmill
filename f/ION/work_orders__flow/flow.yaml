@@ -8,12 +8,6 @@ value:
         type: rawscript
         content: '!inline get_scheduled_wo.ts'
         input_transforms:
-          ion:
-            type: static
-            value:
-              loginUrl: $var:f/ION/LOGIN_URL
-              password: $var:f/ION/PASSWORD
-              username: $var:f/ION/USERNAME
           start_date:
             type: javascript
             expr: "flow_input.start_date || new Date(Date.now() - (flow_input.lookback_days
@@ -31,9 +25,6 @@ value:
         tag: chromium
       continue_on_error: false
       retry:
-        constant:
-          attempts: 0
-          seconds: 0
         exponential:
           attempts: 3
           multiplier: 1
@@ -56,20 +47,5 @@ value:
         tag: chromium
   same_worker: true
 has_on_behalf_of: false
-schema:
-  $schema: https://json-schema.org/draft/2020-12/schema
-  type: object
-  order:
-    - start_date
-    - lookback_days
-  properties:
-    lookback_days:
-      type: integer
-      description: How many days back to pull (default 180).
-      default: 180
-    start_date:
-      type: string
-      description: 'YYYY-MM-DD override for ION ScheduleStart. Default: lookback_days back.'
-      default: null
-  required: []
+schema: null
 tag: chromium
