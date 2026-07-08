@@ -1,8 +1,0 @@
-summary: 'One-off: (443) 686-0297 calls Jun 1-7 + whisper-1 transcripts. Delete
-  after use.'
-description: One-off. Jun 1-7 window for the number, whisper-1 transcription.
-  Delete after use.
-lock: '!inline u/carter/tmp_lookup_4436860297_jun.script.lock'
-has_on_behalf_of: false
-kind: script
-schema: null
