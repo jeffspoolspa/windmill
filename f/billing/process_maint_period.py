@@ -212,6 +212,25 @@ def charge_bank_account(bank_id, amount, request_id, invoice_num, customer_name,
     return {**base, "error": extract_charge_error(resp, body)}
 
 
+def get_qbo_invoice_details(invoice_id, realm_id, access_token):
+    """Fresh leader read of ONE invoice — the money path decides on this, not
+    the cache. Returns {balance, email_status} or None on any failure (caller
+    MUST halt on None; never fall back to the cache for a charge decision)."""
+    try:
+        resp = requests.get(
+            f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/invoice/{invoice_id}?minorversion=65",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            timeout=30)
+        if not resp.ok:
+            return None
+        inv = resp.json().get("Invoice", {})
+        if "Balance" not in inv:
+            return None
+        return {"balance": float(inv["Balance"]), "email_status": inv.get("EmailStatus")}
+    except Exception:
+        return None
+
+
 def record_qbo_payment(customer_id, invoice_id, amount, charge_result, invoice_num,
                        month_label, access_token, realm_id, lines=None):
     """QBO Payment linked to the invoice(s), CCTransId = charge id
@@ -474,6 +493,28 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
                            else f"receipt then invoice to {p['email']}")
                         + (" [roster PM dead — would switch to QBO default]" if switched_pm else "")}
 
+    # FRESH-READ GUARD (money path): a first charge decides on QBO's CURRENT
+    # balance, never the cache — a customer who paid in the QBO portal inside
+    # the sync window would otherwise be double-charged. A resume (prior
+    # uncertain/succeeded) is exempt: its money is already in flight and the
+    # balance may read 0 *because of that very charge*.
+    resuming = bool(prior and prior["status"] in ("charge_uncertain", "charge_succeeded"))
+    if not resuming:
+        fresh = get_qbo_invoice_details(p["qbo_invoice_id"], realm_id, access_token)
+        if fresh is None:
+            # a failed leader read HALTS — never fall back to the cache to charge
+            return {"period": period_id, "customer": p["customer_name"],
+                    "status": "read_failed",
+                    "error": "fresh QBO invoice read failed — charge held (no stale-cache fallback)"}
+        if fresh["balance"] <= 0:
+            cur.execute("UPDATE billing.invoices SET balance=%s WHERE qbo_invoice_id=%s",
+                        (fresh["balance"], p["qbo_invoice_id"]))
+            conn.commit()
+            return {"period": period_id, "customer": p["customer_name"],
+                    "status": "already_paid",
+                    "error": "invoice balance <= 0 at fresh read (paid upstream)"}
+        balance = fresh["balance"]  # charge QBO's truth, not the cached amount
+
     if prior and prior["status"] == "charge_uncertain":
         attempt = prior  # REUSE the persisted idempotency key — Intuit dedupes
     elif prior and prior["status"] == "charge_succeeded":
@@ -571,11 +612,23 @@ def process_one(conn, cur, period_id, access_token, realm_id, dry_run, force):
         """UPDATE billing.autopay_customers
            SET consecutive_declines = 0, payment_status = 'good', updated_at = now()
            WHERE id = %s""", (p["autopay_id"],))
-    cur.execute(
-        """UPDATE billing.invoices
-           SET balance = 0, email_status = CASE WHEN %s THEN 'EmailSent' ELSE email_status END
-           WHERE qbo_invoice_id = %s""",
-        (invoice_delivered, p["qbo_invoice_id"]))
+    # VERIFIED ECHO: write the balance QBO actually reports, not a blind 0.
+    # If the read-back fails, DON'T fabricate balance=0 (that would fire the
+    # auto-promote trigger on unconfirmed data) — reflect only the email we
+    # know we sent; the reconciler/next sync converges the balance.
+    post = get_qbo_invoice_details(p["qbo_invoice_id"], realm_id, access_token)
+    if post is not None:
+        cur.execute(
+            """UPDATE billing.invoices
+               SET balance = %s, email_status = CASE WHEN %s THEN 'EmailSent' ELSE email_status END
+               WHERE qbo_invoice_id = %s""",
+            (post["balance"], invoice_delivered, p["qbo_invoice_id"]))
+    else:
+        cur.execute(
+            """UPDATE billing.invoices
+               SET email_status = CASE WHEN %s THEN 'EmailSent' ELSE email_status END
+               WHERE qbo_invoice_id = %s""",
+            (invoice_delivered, p["qbo_invoice_id"]))
     conn.commit()
     cur.execute("SELECT billing_audit.project_maint_processing_status(%s, %s)",
                 (p["billing_month"], p["qbo_customer_id"]))
@@ -734,6 +787,24 @@ def _run_group_charge(conn, cur, group, access_token, realm_id,
         is_bank = (a["pm_type"] or "").lower() in ("ach", "bank_account") \
             or "bank" in (a["pm_type"] or "").lower()
         channel = "ach" if is_bank else "card"
+        # FRESH-READ GUARD (group money path): re-read every member. Any read
+        # failure halts the WHOLE group. Any member already paid upstream
+        # collapses to the per-invoice path — process_one re-guards each and we
+        # never re-anchor a combined charge onto a now-paid invoice.
+        fresh_bal = {}
+        for pid, p in group:
+            f = get_qbo_invoice_details(p["qbo_invoice_id"], realm_id, access_token)
+            if f is None:
+                return [{"period": pid2, "customer": p2["customer_name"],
+                         "status": "read_failed",
+                         "error": "fresh QBO read failed for a group member — whole group held"}
+                        for pid2, p2 in group]
+            fresh_bal[pid] = f["balance"]
+        if any(b <= 0 for b in fresh_bal.values()):
+            return [process_one(conn, cur, pid, access_token, realm_id, False, False)
+                    for pid, _ in group]
+        for pid, p in group:
+            p["balance"] = fresh_bal[pid]  # charge QBO's truth, not the cache
         lines = [(p["qbo_invoice_id"], round(float(p["balance"]), 2)) for _, p in group]
         total = round(sum(amt for _, amt in lines), 2)
         docs = [p["doc_number"] or "?" for _, p in group]
@@ -857,11 +928,21 @@ def _run_group_charge(conn, cur, group, access_token, realm_id,
                            qbo_payment_id=rec["qbo_payment_id"],
                            email_sent=emails["invoice"],
                            raw_result=_dumps({"group_anchor": a["doc_number"]}))
-        cur.execute(
-            """UPDATE billing.invoices
-               SET balance = 0, email_status = CASE WHEN %s THEN 'EmailSent' ELSE email_status END
-               WHERE qbo_invoice_id = %s""",
-            (delivered, p["qbo_invoice_id"]))
+        # VERIFIED ECHO: store the balance QBO reports; on read-back failure
+        # reflect only the email (don't fabricate balance=0 → auto-promote).
+        post = get_qbo_invoice_details(p["qbo_invoice_id"], realm_id, access_token)
+        if post is not None:
+            cur.execute(
+                """UPDATE billing.invoices
+                   SET balance = %s, email_status = CASE WHEN %s THEN 'EmailSent' ELSE email_status END
+                   WHERE qbo_invoice_id = %s""",
+                (post["balance"], delivered, p["qbo_invoice_id"]))
+        else:
+            cur.execute(
+                """UPDATE billing.invoices
+                   SET email_status = CASE WHEN %s THEN 'EmailSent' ELSE email_status END
+                   WHERE qbo_invoice_id = %s""",
+                (delivered, p["qbo_invoice_id"]))
         conn.commit()
         results.append({"period": pid, "customer": p["customer_name"], "status": final,
                         "charged": share, "group_total": total,
