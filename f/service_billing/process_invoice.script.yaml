@@ -1,6 +1,6 @@
 summary: Service-billing charge/send engine (ADR 009 event handler over f/billing/_lib)
-description: 'Refactored onto shared _lib: charge_and_record service + qbo/wal
-  primitives; engine keeps route/pre-flight/credit/delivery policy'
+description: 'Tightened: cache echo via _lib/cache, redundant orphan gate
+  removed, halt boilerplate collapsed'
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

@@ -1,0 +1,6 @@
+summary: Verified-echo cache writes on billing.invoices (ADR 009 §C)
+description: echo_invoice/echo_balance/mark_emailed — one write per proven fact
+lock: '!inline f/billing/_lib/cache.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
