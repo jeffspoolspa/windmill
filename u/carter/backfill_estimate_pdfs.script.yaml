@@ -1,8 +1,0 @@
-summary: Backfill missing estimate PDFs from est_emails HTML body
-description: One-shot backfill script. Finds all estimates with no PDF URL but
-  with HTML source in est_emails, generates the PDF, uploads to storage, and
-  updates both tables. Safe to re-run — skips WOs that already have a PDF URL.
-lock: '!inline u/carter/backfill_estimate_pdfs.script.lock'
-has_on_behalf_of: false
-kind: script
-schema: null

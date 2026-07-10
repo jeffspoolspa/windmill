@@ -1,6 +1,0 @@
-summary: tmp_lookup_9122426059
-description: 'One-off: deep lookup for (912) 242-6059 over 90 days'
-lock: '!inline u/carter/tmp_lookup_9122426059.script.lock'
-has_on_behalf_of: false
-kind: script
-schema: null

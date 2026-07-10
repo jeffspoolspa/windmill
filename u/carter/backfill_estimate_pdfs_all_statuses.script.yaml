@@ -1,7 +1,0 @@
-summary: 'One-off: backfill PDFs ignoring status filter'
-description: One-off backfill that bypasses the status='active' filter to
-  recover PDFs for converted/declined/expired estimates that were victims of the
-  April 16 RLS regression. Safe to delete after running.
-lock: '!inline u/carter/backfill_estimate_pdfs_all_statuses.script.lock'
-kind: script
-schema: null
