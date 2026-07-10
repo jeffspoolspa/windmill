@@ -5,6 +5,7 @@ locks:
   f/billing_audit/compute_chemical_estimates: 60c854d8abfdebaa6263e2d5370b35bb7d9d3d4180d3671eb7b784908333a91f
   f/billing_audit/load_month: da2460b38f633c93b6327a0e41e2fad0baca7d9b2e3084087d8074fcc1101c5b
   f/billing_audit/reconcile_billing_periods: e8814720d5822f6636c94cbc9bb56e986213df2da482aa220b1fccda6ec4ca1d
+  f/billing/_lib/db: c83a0cbc7b4dbbb41ba7e96f7d2d95fd5a41404538e0b908daf0471d5271e1ca
   f/billing/_lib/qbo: b3cbfd519fbd6de08c5b60e28470211c541620880574a7293b284cafc0af3d5b
   f/billing/analyze_maint_bill: fb51e58e33a3967befb735c83b6d06e5dff6a812137679780ca7cb42c4cda7a8
   f/billing/apply_maint_adjustments: 7620f5ac086f8bb8b0a686c8f9223cbead724c19a1e5ab65813c8fd458d9935d

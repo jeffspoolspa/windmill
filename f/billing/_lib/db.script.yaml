@@ -1,0 +1,6 @@
+summary: Shared Supabase connection helper (ADR 009 tier-1)
+description: 'ADR 009 tier-1: single get_db_conn, replaces 24 copies'
+lock: '!inline f/billing/_lib/db.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
