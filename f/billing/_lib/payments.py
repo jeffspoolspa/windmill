@@ -370,7 +370,11 @@ def _selfcheck():
     def fake_fresh(inv, realm, at):
         calls.append(f"fresh:{inv}"); return state["fresh"].get(inv)
     def fake_charge(pmid, amount, key, num, name, at):
-        calls.append(f"charge:{amount}:{key}"); return state["charge"]
+        calls.append(f"charge:{amount}:{key}")
+        r = dict(state["charge"])
+        if r.get("classification") == "success":
+            r["amount"] = amount  # Intuit echoes the charged amount
+        return r
     def fake_record(cust, amount, cr, ref, memo, at, rid, lines):
         calls.append(f"record:{amount}:{len(lines)}"); return state["record"]
     def fake_receipt(pid, email, at, rid):
