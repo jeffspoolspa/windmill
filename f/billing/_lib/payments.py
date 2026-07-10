@@ -51,10 +51,11 @@ from f.billing._lib.wal import (
 UNCERTAIN_REUSE_WINDOW_H = 24
 
 
-def _stored_group_lines(attempt):
+def stored_group_lines(attempt):
     """[[qbo_invoice_id, amount], ...] persisted on a multi-line anchor
     attempt, or None. Stored at create time so an interrupted charge resumes
-    with its ORIGINAL membership/amounts — never a re-mixed set."""
+    with its ORIGINAL membership/amounts — never a re-mixed set. Public:
+    engines use it to detect an in-flight group anchor in pre-flight."""
     import json
     raw = attempt.get("raw_result")
     if not raw:
@@ -78,7 +79,8 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
       channel            'ach' | 'card' | 'credit_card'
       customer_id        QBO customer id
       customer_name      for the charge description
-      invoice_number     doc-number label (charge description + WAL row)
+      invoice_number     doc-number label (WAL row + charge description)
+      charge_label       optional charge-description override (group docs list)
       wo_number          WAL column (service-billing rows; else None)
       payment_method     legacy WAL text column override (else channel)
       payment_ref        QBO PaymentRefNum
@@ -139,7 +141,7 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
     # ── amount: fresh leader read, or the persisted in-flight facts ──
     if resumed:
         amount = round(float(reuse["charge_amount"] or 0), 2)
-        lines = ([(inv, float(amt)) for inv, amt in _stored_group_lines(reuse) or []]
+        lines = ([(inv, float(amt)) for inv, amt in stored_group_lines(reuse) or []]
                  or [(anchor, amount)])
         balances = None
     else:
@@ -179,9 +181,11 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
     # ── charge (skipped when resuming past a completed charge) ──
     if attempt["status"] in ("pending", "charge_uncertain"):
         fn = charge_bank_account if channel == "ach" else charge_card
+        # charge_label lets a group charge describe all its docs while the WAL
+        # anchor keeps its single invoice_number
         cr = fn(intent["payment_method_id"], amount, attempt["idempotency_key"],
-                intent.get("invoice_number") or "", intent.get("customer_name") or "",
-                access_token)
+                intent.get("charge_label") or intent.get("invoice_number") or "",
+                intent.get("customer_name") or "", access_token)
         cls = cr["classification"]
         if cls == "uncertain":
             update_attempt(conn, attempt["id"], status="charge_uncertain",

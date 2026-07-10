@@ -1,6 +1,5 @@
 summary: Shared payment service charge_and_record (ADR 009 §B)
-description: 'idempotent charge core: WAL + fresh-read + charge + payment +
-  best-effort receipt; segment-blind'
+description: + public stored_group_lines, charge_label intent field
 lock: '!inline f/billing/_lib/payments.script.lock'
 has_on_behalf_of: false
 kind: script
