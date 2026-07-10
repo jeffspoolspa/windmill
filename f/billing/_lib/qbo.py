@@ -1,5 +1,6 @@
 # requirements:
 # requests
+# wmill
 
 """
 f/billing/_lib/qbo — shared QuickBooks Online / Intuit Payments primitives.
@@ -14,23 +15,85 @@ self-check.
 
 Import as:  from f.billing._lib.qbo import charge_card, get_qbo_invoice_details, ...
 
-Scope of THIS module (per ADR 009 sequencing, charge-first): the charge /
-fresh-read / payment / send primitives. refresh_qbo_token (35 call sites) is
-its own later pass and is NOT here yet.
+Scope: auth (refresh_qbo_token — THE single implementation; the 35 engine
+copies retire onto this one caller batch at a time), generic GET/POST, the
+charge / fresh-read / payment / send primitives, and two thin compositions
+(send_invoice_email, bump_invoice_due_date_to_today) that are QBO-generic and
+carry no billing policy.
 
-Every function is ONE external call (or pure). No WAL / state-machine /
-idempotency-sequencing logic — that stays in the engines.
+Every function is ONE external call (or pure), except the marked compositions.
+No WAL / state-machine / idempotency-sequencing logic — that lives in
+f/billing/_lib/payments (the service) and the engines.
 """
 
 import json
+import time
 import requests
-from datetime import datetime
+import wmill
+from datetime import datetime, date
+
+QBO_RESOURCE = "u/carter/quickbooks_api"
 
 QBO_PMT_METHOD_CC = "21"
 QBO_PMT_METHOD_ACH = "20"
 
 _PAYMENTS_BASE = "https://api.intuit.com/quickbooks/v4/payments"
 _QBO_BASE = "https://quickbooks.api.intuit.com/v3/company"
+
+
+# ── auth (the ONE token refresh — the rotating refresh_token burns if two
+#    copies race; see quickbooks-windmill skill) ─────────────────────────────
+
+def refresh_qbo_token():
+    resource = wmill.get_resource(QBO_RESOURCE)
+    resp = requests.post(
+        "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+        headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+        data={"grant_type": "refresh_token", "refresh_token": resource["refresh_token"]},
+        auth=(resource["client_id"], resource["client_secret"]), timeout=30,
+    )
+    if not resp.ok:
+        raise Exception(f"QBO token refresh failed: {resp.status_code} - {resp.text}")
+    tokens = resp.json()
+    resource["refresh_token"] = tokens["refresh_token"]
+    wmill.set_resource(QBO_RESOURCE, resource)
+    return tokens["access_token"], resource["realm_id"]
+
+
+# ── generic HTTP verbs (one call each) ──────────────────────────────────────
+
+def qbo_get(path, access_token, realm_id, params=None):
+    return requests.get(
+        f"{_QBO_BASE}/{realm_id}/{path}",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        params=params, timeout=30,
+    )
+
+
+def qbo_post(path, access_token, realm_id, body):
+    return requests.post(
+        f"{_QBO_BASE}/{realm_id}/{path}",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json",
+                 "Content-Type": "application/json"},
+        json=body, timeout=30,
+    )
+
+
+def fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id):
+    """Full invoice read: (Invoice dict, None) or (None, error). Use
+    get_qbo_invoice_details when only balance/email_status matter."""
+    resp = qbo_get(f"invoice/{qbo_invoice_id}", access_token, realm_id)
+    if not resp.ok:
+        return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    return resp.json().get("Invoice"), None
+
+
+def fetch_qbo_customer_email(customer_id, access_token, realm_id):
+    resp = qbo_get(f"customer/{customer_id}", access_token, realm_id)
+    if not resp.ok:
+        return None
+    customer = resp.json().get("Customer", {})
+    return (customer.get("PrimaryEmailAddr") or {}).get("Address")
 
 
 # ── pure helpers (no I/O — safe to unit-check) ──────────────────────────────
@@ -167,41 +230,71 @@ def get_qbo_invoice_details(invoice_id, realm_id, access_token):
 
 # ── payment (one QBO Payment create; supports multi-invoice lines) ──────────
 
-def record_qbo_payment(customer_id, invoice_id, amount, charge_result, invoice_num,
-                       month_label, access_token, realm_id, lines=None):
-    """QBO Payment linked to the invoice(s), CCTransId = charge id. lines:
-    optional [(qbo_invoice_id, amount), ...] — ONE payment applied across a
-    customer's invoices; defaults to the single-invoice line."""
-    charge_id = charge_result.get("charge_id", "")
-    pmt_method_id = (QBO_PMT_METHOD_ACH if charge_result.get("payment_type") == "ach"
-                     else QBO_PMT_METHOD_CC)
-    note = (f"{month_label} Pool Maintenance | Inv# {invoice_num} | "
-            f"Charge ID: {charge_id} | "
+def build_payment_note(memo_prefix, charge_result):
+    """PrivateNote for a recorded payment: caller's policy prefix (e.g.
+    'Auto-charge | WO# 123 | Inv# 456' or 'June Pool Maintenance | Inv# 456')
+    + the charge facts. Pure — the prefix is DATA; this module never knows
+    what kind of invoice was charged."""
+    return (f"{memo_prefix} | "
+            f"Charge ID: {charge_result.get('charge_id', '')} | "
             f"Auth: {charge_result.get('auth_code', '')} | "
             f"{charge_result.get('card_type', '')} x{charge_result.get('card_last4', '')} | "
             f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    if lines is None:
-        lines = [(invoice_id, amount)]
+
+
+def record_qbo_payment(customer_id, amount, charge_result, payment_ref, memo_prefix,
+                       access_token, realm_id, lines):
+    """QBO Payment linked to the invoice(s), CCTransId = charge id.
+    lines: [(qbo_invoice_id, amount), ...] — ONE payment applied across
+    invoices (single-invoice callers pass one line). payment_ref / memo_prefix
+    are caller policy (WO number vs month label) passed as data.
+    Returns {success, payment_id} or {success: False, error, ...}."""
+    charge_id = charge_result.get("charge_id", "")
+    pmt_method_id = (QBO_PMT_METHOD_ACH if charge_result.get("payment_type") == "ach"
+                     else QBO_PMT_METHOD_CC)
     resp = requests.post(
         f"{_QBO_BASE}/{realm_id}/payment",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json",
                  "Content-Type": "application/json"},
         json={"CustomerRef": {"value": customer_id}, "TotalAmt": amount,
               "PaymentMethodRef": {"value": pmt_method_id},
-              "PaymentRefNum": invoice_num[:21],
+              "PaymentRefNum": (payment_ref or "")[:21],
               "TxnDate": datetime.now().strftime("%Y-%m-%d"),
               "Line": [{"Amount": ln_amount,
                         "LinkedTxn": [{"TxnId": ln_invoice, "TxnType": "Invoice"}]}
                        for ln_invoice, ln_amount in lines],
-              "PrivateNote": note,
+              "PrivateNote": build_payment_note(memo_prefix, charge_result),
               "CreditCardPayment": {
                   "CreditChargeInfo": {"ProcessPayment": True, "Amount": amount},
                   "CreditChargeResponse": {"Status": "Completed", "CCTransId": charge_id}},
               "TxnSource": "IntuitPayment"},
         timeout=60)
     if not resp.ok:
-        return {"success": False, "error": resp.text[:400]}
-    return {"success": True, "qbo_payment_id": resp.json().get("Payment", {}).get("Id")}
+        # QBO's Fault envelope differs from Intuit Payments'. Try it first,
+        # then fall back to the generic extractor. (Hardening from the WO
+        # engine's copy — now everyone gets it.)
+        body = None
+        try:
+            body = resp.json()
+        except Exception:
+            pass
+        err_msg = None
+        if body:
+            fault = (body.get("Fault") or {}).get("Error") or []
+            if fault:
+                f = fault[0] if isinstance(fault[0], dict) else {}
+                parts = [f.get("Message"), f.get("Detail"),
+                         f"code={f.get('code')}" if f.get("code") else None]
+                err_msg = " | ".join(p for p in parts if p)
+        if not err_msg:
+            err_msg = extract_charge_error(resp, body)
+        return {"success": False, "error": err_msg,
+                "status_code": resp.status_code,
+                "raw_response": body or resp.text[:500]}
+    payment = resp.json().get("Payment", {})
+    return {"success": True, "payment_id": payment.get("Id"),
+            "payment_ref": payment.get("PaymentRefNum"),
+            "total_amt": payment.get("TotalAmt")}
 
 
 # ── send primitives — ONE call each (ADR 009 split) ─────────────────────────
@@ -251,6 +344,79 @@ def send_receipt_then_invoice(payment_id, invoice_id, email, access_token, realm
     return out
 
 
+# ── QBO-generic compositions (2-3 calls; no billing policy, no domain noun) ─
+
+def send_invoice_email(invoice_id, customer_id, access_token, realm_id):
+    """POST /invoice/{id}/send to the customer's QBO primary email. Skips if
+    EmailStatus is already EmailSent — exactly one customer-facing email per
+    invoice, ever; something else having sent it makes this a no-op."""
+    inv_resp = qbo_get(f"invoice/{invoice_id}", access_token, realm_id)
+    if inv_resp.ok:
+        inv = inv_resp.json().get("Invoice", {})
+        if inv.get("EmailStatus") == "EmailSent":
+            return {"success": True, "skipped": True, "reason": "Already sent"}
+
+    email = fetch_qbo_customer_email(customer_id, access_token, realm_id)
+    send_url = f"invoice/{invoice_id}/send"
+    if email:
+        send_url += f"?sendTo={email}"
+
+    resp = requests.post(
+        f"{_QBO_BASE}/{realm_id}/{send_url}",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json",
+                 "Content-Type": "application/octet-stream"},
+        timeout=30,
+    )
+    if not resp.ok:
+        return {"success": False, "error": resp.text[:300], "email_attempted": email}
+    return {"success": True, "sent_to": email}
+
+
+def send_payment_receipt(payment_id, customer_id, access_token, realm_id):
+    """Receipt to the customer's QBO primary email (fetches it first).
+    send_receipt is the address-in-hand primitive underneath."""
+    email = fetch_qbo_customer_email(customer_id, access_token, realm_id)
+    if not email:
+        return {"success": False, "error": "No customer email found"}
+    r = send_receipt(payment_id, email, access_token, realm_id)
+    if not r["ok"]:
+        return {"success": False, "error": r["error"], "email_attempted": email}
+    return {"success": True, "sent_to": email}
+
+
+def bump_invoice_due_date_to_today(invoice_id, access_token, realm_id, max_retries=2):
+    """Sparse-PATCH the invoice's DueDate to today so a long-parked invoice
+    doesn't arrive showing OVERDUE in the QBO portal. No-ops when DueDate is
+    already today/future. Retries stale SyncToken."""
+    today_iso = date.today().isoformat()
+    last_err = None
+    for attempt in range(max_retries + 1):
+        inv_resp = qbo_get(f"invoice/{invoice_id}", access_token, realm_id)
+        if not inv_resp.ok:
+            if attempt < max_retries:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            return {"success": False, "error": f"fetch failed: {inv_resp.status_code}"}
+        inv = inv_resp.json().get("Invoice")
+        if not inv:
+            return {"success": False, "error": "QBO returned no Invoice"}
+        current = inv.get("DueDate")
+        if current and current >= today_iso:
+            return {"success": True, "skipped": True, "current_due_date": current}
+        resp = qbo_post("invoice", access_token, realm_id,
+                        {"Id": inv["Id"], "SyncToken": inv["SyncToken"],
+                         "sparse": True, "DueDate": today_iso})
+        if resp.ok:
+            return {"success": True, "old_due_date": current, "new_due_date": today_iso}
+        text = resp.text[:400]
+        last_err = f"HTTP {resp.status_code}: {text}"
+        if "Stale Object" in text and attempt < max_retries:
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        break
+    return {"success": False, "error": last_err}
+
+
 # ── self-check: pure logic, NO network (run this to verify the extraction) ──
 
 def _selfcheck():
@@ -282,6 +448,12 @@ def _selfcheck():
            R(402, False, {"errors": [{"message": "card expired", "code": "PMT-4000"}]})))
     ok("error handles html",
        "HTML" in extract_charge_error(R(502, False, None, "<html>bad gateway</html>")))
+    note = build_payment_note("June Pool Maintenance | Inv# 456",
+                              {"charge_id": "ch1", "auth_code": "A1",
+                               "card_type": "Visa", "card_last4": "4242"})
+    ok("payment note carries prefix + charge facts",
+       note.startswith("June Pool Maintenance | Inv# 456 | Charge ID: ch1")
+       and "Visa x4242" in note)
 
     failed = [n for n, p in checks if not p]
     return {"passed": len(checks) - len(failed), "total": len(checks), "failed": failed}

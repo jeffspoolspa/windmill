@@ -1,0 +1,6 @@
+summary: Shared WAL over billing.processing_attempts (ADR 009)
+description: create/update/latest attempt + webhook expectation; stage as data
+lock: '!inline f/billing/_lib/wal.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null

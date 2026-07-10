@@ -1,7 +1,6 @@
-summary: Shared QBO/Intuit primitives (ADR 009) — charge/read/payment/send, one
-  call each
-description: Extracted verbatim from the engines; send_receipt/send_invoice
-  split; no-network self-check in main().
+summary: Shared QBO/Intuit primitives (ADR 009)
+description: auth + generic get/post + charge/read/payment/send primitives;
+  memo-as-data record_qbo_payment
 lock: '!inline f/billing/_lib/qbo.script.lock'
 has_on_behalf_of: false
 kind: script
