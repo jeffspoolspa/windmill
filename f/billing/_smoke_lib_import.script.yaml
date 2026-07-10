@@ -1,6 +1,0 @@
-summary: 'throwaway: prove _lib import resolves'
-description: delete after pilot
-lock: '!inline f/billing/_smoke_lib_import.script.lock'
-has_on_behalf_of: false
-kind: script
-schema: null
