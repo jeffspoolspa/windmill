@@ -1,5 +1,5 @@
-summary: + apply_credits service (selectors as data)
-description: + apply_credits service (selectors as data)
+summary: Shared payment service (ADR 009 §B) + apply_credits selectors
+description: charge_and_record + resolve_payment_method + apply_credits (selection as data)
 lock: '!inline f/billing/_lib/payments.script.lock'
 has_on_behalf_of: false
 kind: script

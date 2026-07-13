@@ -38,7 +38,7 @@ import psycopg2.extras
 
 from f.billing._lib.qbo import (
     charge_card, charge_bank_account, get_qbo_invoice_details,
-    record_qbo_payment, send_receipt,
+    record_qbo_payment, send_receipt, apply_credit,
 )
 from f.billing._lib.wal import (
     latest_attempt, create_attempt, update_attempt,
@@ -325,25 +325,78 @@ def _pm_row_to_result(row, picked_reason):
     return {**base, "bank_name": row.get("card_brand") or "Bank"}
 
 
-def load_applicable_credits(conn, qbo_customer_id):
-    """Pre-charge safety net: unapplied credits that COULD cover this charge.
-    Excludes maintenance-scoped credits (memo ~* 'maint') and stale ones
-    (>6 months). What to DO about them (halt / apply / override) is engine
-    policy — this is just the read."""
+def load_applicable_credits(conn, qbo_customer_id, memo_match=None,
+                            memo_exclude="maint", ref_match=None,
+                            max_age_months=6):
+    """Unapplied credits selected by DATA, not domain knowledge: the caller
+    says what it's looking for (memo_match='maint' for maintenance,
+    ref_match=<wo_number> for a work order) or what to skip
+    (memo_exclude='maint', the service-billing default). What to DO about
+    them (halt / apply / override) is engine policy — this is just the read."""
     if not qbo_customer_id:
         return []
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("""
+    sql = """
         SELECT qbo_payment_id, type, unapplied_amt, total_amt, txn_date, ref_num, memo
         FROM billing.customer_payments
         WHERE qbo_customer_id = %s
           AND unapplied_amt > 0
-          AND (memo IS NULL OR memo !~* 'maint')
-          AND (txn_date IS NULL OR txn_date >= (now() - interval '6 months')::date)
-        ORDER BY txn_date DESC NULLS LAST
-    """, (qbo_customer_id,))
+          AND (txn_date IS NULL OR txn_date >= (now() - (%s || ' months')::interval)::date)
+    """
+    params = [qbo_customer_id, str(max_age_months)]
+    if memo_match:
+        sql += " AND memo ~* %s"
+        params.append(memo_match)
+    if memo_exclude:
+        sql += " AND (memo IS NULL OR memo !~* %s)"
+        params.append(memo_exclude)
+    if ref_match:
+        sql += " AND ref_num = %s"
+        params.append(ref_match)
+    sql += " ORDER BY txn_date DESC NULLS LAST"
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(sql, params)
     rows = [dict(r) for r in cur.fetchall()]; cur.close()
     return rows
+
+
+def apply_credits(conn, customer_id, invoice_id, access_token, realm_id,
+                  memo_match=None, memo_exclude=None, ref_match=None,
+                  dry_run=False):
+    """Apply the selected credits to ONE invoice, newest first, each capped
+    at the invoice's remaining fresh balance. Fresh-reads the balance before
+    starting (read failure applies nothing) and stops at zero. Returns
+    {applied: [...], remaining_balance, errors: [...]}. Selection rides in as
+    data — the service never knows what kind of credit it is applying."""
+    out = {"applied": [], "remaining_balance": None, "errors": []}
+    credits = load_applicable_credits(conn, customer_id, memo_match=memo_match,
+                                      memo_exclude=memo_exclude, ref_match=ref_match)
+    if not credits:
+        return out
+    fresh = get_qbo_invoice_details(invoice_id, realm_id, access_token)
+    if fresh is None:
+        out["errors"].append("fresh invoice read failed — no credits applied")
+        return out
+    remaining = fresh["balance"]
+    out["remaining_balance"] = remaining
+    for c in credits:
+        if remaining <= 0:
+            break
+        amount = round(min(float(c["unapplied_amt"]), remaining), 2)
+        entry = {"qbo_payment_id": c["qbo_payment_id"], "type": c["type"],
+                 "amount": amount, "dry_run": dry_run}
+        if dry_run:
+            out["applied"].append(entry)
+            remaining = round(remaining - amount, 2)
+            continue
+        r = apply_credit(c["qbo_payment_id"], c["type"], invoice_id,
+                         {"value": customer_id}, amount, access_token, realm_id)
+        if r["success"]:
+            out["applied"].append(entry)
+            remaining = round(remaining - amount, 2)
+        else:
+            out["errors"].append(f"{c['qbo_payment_id']}: {r['error']}")
+    out["remaining_balance"] = remaining
+    return out
 
 
 # ── self-check: fakes swapped into this module's namespace, NO network/DB ───
@@ -353,7 +406,8 @@ def _selfcheck():
     real = {k: g[k] for k in ("latest_attempt", "create_attempt", "update_attempt",
                               "insert_webhook_expectation", "get_qbo_invoice_details",
                               "charge_card", "charge_bank_account",
-                              "record_qbo_payment", "send_receipt")}
+                              "record_qbo_payment", "send_receipt", "apply_credit",
+                              "load_applicable_credits")}
     checks, calls = [], []
     def ok(name, cond):
         checks.append((name, bool(cond)))
