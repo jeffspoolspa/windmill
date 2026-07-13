@@ -481,6 +481,27 @@ def _selfcheck():
         ok("group: one charge for the summed fresh balances, one 2-line payment",
            r["status"] == "succeeded" and r["amount"] == 25.5
            and "charge:25.5:KEY-1" in calls and "record:25.5:2" in calls)
+
+        # 11. apply_credits: caps at the fresh balance, stops at zero,
+        #     selection rides in as data
+        applied = []
+        g["load_applicable_credits"] = lambda conn, cust, **sel: (
+            calls.append(f"credits:{sel.get('ref_match')}"),
+            [{"qbo_payment_id": "C1", "type": "payment", "unapplied_amt": 30.0},
+             {"qbo_payment_id": "C2", "type": "credit_memo", "unapplied_amt": 30.0}])[1]
+        g["apply_credit"] = lambda cid, ctype, inv, cref, amt, at, rid: (
+            applied.append((cid, amt)), {"success": True})[1]
+        state["fresh"] = {"I1": {"balance": 40.0, "email_status": None}}
+        r = apply_credits(None, "C9", "I1", "at", "rid", ref_match="WO42")
+        ok("apply_credits caps at balance and stops at zero",
+           applied == [("C1", 30.0), ("C2", 10.0)]
+           and r["remaining_balance"] == 0 and "credits:WO42" in calls)
+
+        # 12. apply_credits halts on a failed fresh read
+        state["fresh"] = {"I1": None}
+        r = apply_credits(None, "C9", "I1", "at", "rid")
+        ok("apply_credits refuses on read failure",
+           r["applied"] == [] and r["errors"])
     finally:
         g.update(real)
 

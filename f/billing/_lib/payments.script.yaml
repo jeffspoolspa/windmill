@@ -1,5 +1,5 @@
-summary: Shared payment service charge_and_record (ADR 009 §B)
-description: + public stored_group_lines, charge_label intent field
+summary: + apply_credits service (selectors as data)
+description: + apply_credits service (selectors as data)
 lock: '!inline f/billing/_lib/payments.script.lock'
 has_on_behalf_of: false
 kind: script

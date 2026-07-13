@@ -5,7 +5,9 @@
 
 # f/service_billing/process_invoice — the service-billing event handler.
 #
-# Charges cards / sends invoices for billing_status='ready_to_process'.
+# Charges cards / sends invoices for invoices whose DERIVED status is
+# ready_to_process (billing.v_invoice_status — the engine records state;
+# the view computes status: processed = paid AND sent, sent+open = open_ar).
 # Every external verb imports from f/billing/_lib; the idempotent charge core
 # (WAL + fresh-read + charge + QBO Payment + receipt) is charge_and_record.
 # This file keeps only THIS workflow's policy: route, pre-flight gates,
@@ -51,20 +53,17 @@ def _exec(conn, sql, params):
 
 
 def load_invoice(conn, qbo_invoice_id):
-    return _row(conn, "SELECT * FROM billing.invoices WHERE qbo_invoice_id = %s",
-                (qbo_invoice_id,))
+    # derived_status comes from billing.v_invoice_status — the ONE home for
+    # the status rules (processed = paid AND sent; sent+open = open_ar).
+    return _row(conn, """SELECT i.*, s.derived_status
+                         FROM billing.invoices i
+                         JOIN billing.v_invoice_status s USING (qbo_invoice_id)
+                         WHERE i.qbo_invoice_id = %s""", (qbo_invoice_id,))
 
 
 def load_linked_wo(conn, qbo_invoice_id):
     return _row(conn, "SELECT * FROM public.work_orders WHERE qbo_invoice_id = %s LIMIT 1",
                 (qbo_invoice_id,))
-
-
-def mark_invoice_processed(conn, qbo_invoice_id):
-    # Stamped status — Phase 3 derives this from the attempt log instead.
-    _exec(conn, """UPDATE billing.invoices
-                   SET billing_status = 'processed', processed_at = now()
-                   WHERE qbo_invoice_id = %s""", (qbo_invoice_id,))
 
 
 def mark_invoice_needs_review(conn, qbo_invoice_id, reason):
@@ -157,9 +156,9 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
         mark_invoice_needs_review(conn, qbo_invoice_id, err[:200])
         return _result(qbo_invoice_id, "error", attempt_id=str(attempt["id"]), error=err)
 
-    if invoice.get("billing_status") != "ready_to_process" and not (force or recover_orphan):
+    if invoice.get("derived_status") != "ready_to_process" and not (force or recover_orphan):
         return _result(qbo_invoice_id, "skipped",
-                       reason=f"billing_status='{invoice.get('billing_status')}' "
+                       reason=f"status='{invoice.get('derived_status')}' "
                               f"(need ready_to_process or force=True)")
 
     # PRE-FLIGHT: prior-attempt policy gates. (payment_orphan needs no gate
@@ -181,7 +180,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
             echo_invoice(conn, qbo_invoice_id, qbo_inv_chk)
             chk_balance = float(qbo_inv_chk.get("Balance", 0) or 0)
             if chk_balance == 0:
-                mark_invoice_processed(conn, qbo_invoice_id)
                 return _result(qbo_invoice_id, "already_succeeded", attempt_id=str(prior["id"]))
             if not force:
                 return _result(qbo_invoice_id, "already_succeeded", attempt_id=str(prior["id"]),
@@ -221,7 +219,6 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
     qbo_balance = float(qbo_inv.get("Balance", 0) or 0)
     qbo_email_sent = qbo_inv.get("EmailStatus") == "EmailSent"
     if qbo_balance == 0 and qbo_email_sent:
-        mark_invoice_processed(conn, qbo_invoice_id)
         return _result(qbo_invoice_id, "already_paid_and_sent")
 
     # DRY-RUN: sandbox plan on its OWN dry_run=true row — never touches live WAL.
@@ -304,7 +301,6 @@ def _send_only(conn, prior, invoice, wo_number, channel, balance, note,
                        attempt_id=str(attempt["id"]), error=email.get("error"))
     update_attempt(conn, attempt["id"], status="succeeded",
                    email_sent=email["success"], raw_result=payload)
-    mark_invoice_processed(conn, qbo_invoice_id)
     return _result(qbo_invoice_id, "succeeded", attempt_id=str(attempt["id"]), note=note)
 
 
@@ -381,7 +377,6 @@ def _process_charge_path(conn, prior, invoice, wo_number, route, balance, halt,
     inv_email = deliver(conn, qbo_invoice_id, customer_id, access_token, realm_id)
     update_attempt(conn, r["attempt_id"], email_sent=r["receipt_sent"])
     _refresh_cache_fresh(conn, qbo_invoice_id, access_token, realm_id)
-    mark_invoice_processed(conn, qbo_invoice_id)
     return _result(qbo_invoice_id, "succeeded",
                    attempt_id=r["attempt_id"], charge_id=r["charge_id"],
                    qbo_payment_id=r["payment_id"], receipt_sent=r["receipt_sent"],
@@ -430,7 +425,6 @@ def _recover_orphan(conn, prior, invoice, wo_number, access_token, realm_id):
     update_attempt(conn, prior["id"], status="succeeded", email_sent=receipt["success"],
                    raw_result=_dumps({"orphan_recovery": True, "payment": pay,
                                       "receipt": receipt, "invoice_email": inv_email}))
-    mark_invoice_processed(conn, qbo_invoice_id)
     return _result(qbo_invoice_id, "succeeded",
                    attempt_id=str(prior["id"]), charge_id=charge_id,
                    qbo_payment_id=pay["payment_id"], recovered_from="payment_orphan",
@@ -463,7 +457,6 @@ def _process_email_only(conn, prior, invoice, wo_number, customer_id,
                            raw_result=_dumps({"email": email, "attempts": i + 1}))
             if not email.get("skipped"):
                 insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
-            mark_invoice_processed(conn, qbo_invoice_id)
             _refresh_cache_fresh(conn, qbo_invoice_id, access_token, realm_id)
             return _result(qbo_invoice_id, "succeeded", attempt_id=str(attempt["id"]),
                            sent_to=email.get("sent_to"), skipped=email.get("skipped", False))
@@ -512,9 +505,11 @@ def main(qbo_invoice_id: str = None,
             targets = list(qbo_invoice_ids)
         else:
             cur = conn.cursor()
-            cur.execute("SELECT qbo_invoice_id FROM billing.invoices "
-                        "WHERE billing_status = 'ready_to_process' "
-                        "ORDER BY txn_date DESC NULLS LAST"
+            cur.execute("SELECT i.qbo_invoice_id "
+                        "FROM billing.v_invoice_status s "
+                        "JOIN billing.invoices i USING (qbo_invoice_id) "
+                        "WHERE s.derived_status = 'ready_to_process' "
+                        "ORDER BY i.txn_date DESC NULLS LAST"
                         + (f" LIMIT {int(limit)}" if limit else ""))
             targets = [r[0] for r in cur.fetchall()]
             cur.close()

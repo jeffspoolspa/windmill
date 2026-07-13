@@ -1,6 +1,5 @@
-summary: Shared QBO/Intuit primitives (ADR 009)
-description: auth + generic get/post + charge/read/payment/send primitives;
-  memo-as-data record_qbo_payment
+summary: + update_invoice_sparse, cached fetch_qbo_classes, apply_credit
+description: + update_invoice_sparse, cached fetch_qbo_classes, apply_credit
 lock: '!inline f/billing/_lib/qbo.script.lock'
 has_on_behalf_of: false
 kind: script
