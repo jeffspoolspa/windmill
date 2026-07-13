@@ -384,6 +384,84 @@ def send_payment_receipt(payment_id, customer_id, access_token, realm_id):
     return {"success": True, "sent_to": email}
 
 
+def update_invoice_sparse(qbo_invoice_id, updates, access_token, realm_id, max_retries=2):
+    """Sparse-PATCH an invoice with SyncToken CAS: fetch fresh, send the
+    cached token, retry on Stale Object (someone else won the race). updates
+    is the dict of QBO fields to set — pure data, no policy here."""
+    last_err = None
+    for attempt in range(max_retries + 1):
+        inv, _err = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
+        if not inv:
+            if attempt < max_retries:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            return {"success": False, "error": f"fetch failed after {attempt + 1} attempts"}
+        resp = qbo_post("invoice", access_token, realm_id,
+                        {"Id": inv["Id"], "SyncToken": inv["SyncToken"],
+                         "sparse": True, **updates})
+        if resp.ok:
+            return {"success": True, "invoice": resp.json().get("Invoice")}
+        text = resp.text[:400]
+        last_err = f"HTTP {resp.status_code}: {text}"
+        if "Stale Object" in text and attempt < max_retries:
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        break
+    return {"success": False, "error": last_err}
+
+
+_CLASS_CACHE = {}
+
+
+def fetch_qbo_classes(access_token, realm_id):
+    """The Class catalog (name-lower -> id), for translating a derived class
+    name into the ClassRef id a PATCH wants. Cached per process — the catalog
+    ~never changes, and a 500-invoice drain should read it once, not 500x.
+    Failures are not cached."""
+    if realm_id in _CLASS_CACHE:
+        return _CLASS_CACHE[realm_id]
+    resp = qbo_get("query", access_token, realm_id,
+                   params={"query": "SELECT * FROM Class WHERE Active = true MAXRESULTS 1000"})
+    if not resp.ok:
+        return {}
+    classes = resp.json().get("QueryResponse", {}).get("Class", [])
+    result = {c["Name"].lower(): c["Id"] for c in classes}
+    _CLASS_CACHE[realm_id] = result
+    return result
+
+
+def apply_credit(credit_id, credit_type, invoice_id, customer_ref, amount,
+                 access_token, realm_id):
+    """Apply ONE existing credit to ONE invoice. credit_type 'credit_memo'
+    links via a zero-total Payment; anything else appends an invoice line to
+    the unapplied Payment (fetch + sparse update — marked composition)."""
+    try:
+        if credit_type == "credit_memo":
+            cm_id = credit_id.replace("CM-", "") if credit_id.startswith("CM-") else credit_id
+            resp = qbo_post("payment", access_token, realm_id, {
+                "CustomerRef": customer_ref, "TotalAmt": 0,
+                "Line": [{"Amount": amount,
+                          "LinkedTxn": [{"TxnId": cm_id, "TxnType": "CreditMemo"},
+                                        {"TxnId": invoice_id, "TxnType": "Invoice"}]}],
+            })
+            return {"success": True} if resp.ok else {
+                "success": False, "error": f"CM apply: {resp.text[:200]}"}
+        pmt_resp = qbo_get(f"payment/{credit_id}", access_token, realm_id)
+        if not pmt_resp.ok:
+            return {"success": False, "error": f"fetch payment: {pmt_resp.status_code}"}
+        payment = pmt_resp.json().get("Payment", {})
+        payment.setdefault("Line", []).append({
+            "Amount": amount,
+            "LinkedTxn": [{"TxnId": invoice_id, "TxnType": "Invoice"}],
+        })
+        payment["sparse"] = True
+        resp = qbo_post("payment", access_token, realm_id, payment)
+        return {"success": True} if resp.ok else {
+            "success": False, "error": f"payment apply: {resp.text[:200]}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)[:200]}
+
+
 def bump_invoice_due_date_to_today(invoice_id, access_token, realm_id, max_retries=2):
     """Sparse-PATCH the invoice's DueDate to today so a long-parked invoice
     doesn't arrive showing OVERDUE in the QBO portal. No-ops when DueDate is

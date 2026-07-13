@@ -1,5 +1,5 @@
-summary: + update_invoice_sparse, cached fetch_qbo_classes, apply_credit
-description: + update_invoice_sparse, cached fetch_qbo_classes, apply_credit
+summary: Shared billing lib (ADR 009)
+description: + update_invoice_sparse / fetch_qbo_classes / apply_credit(s) selectors
 lock: '!inline f/billing/_lib/qbo.script.lock'
 has_on_behalf_of: false
 kind: script

@@ -1,5 +1,5 @@
-summary: Shared payment service (ADR 009 §B) + apply_credits selectors
-description: charge_and_record + resolve_payment_method + apply_credits (selection as data)
+summary: Shared billing lib (ADR 009)
+description: + update_invoice_sparse / fetch_qbo_classes / apply_credit(s) selectors
 lock: '!inline f/billing/_lib/payments.script.lock'
 has_on_behalf_of: false
 kind: script
