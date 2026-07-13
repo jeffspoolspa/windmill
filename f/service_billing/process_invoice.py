@@ -223,11 +223,12 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
 
     # DRY-RUN: sandbox plan on its OWN dry_run=true row — never touches live WAL.
     if dry_run:
+        target = invoice.get("target_payment_method_id")
         attempt = create_attempt(conn, qbo_invoice_id, STAGE, invoice.get("doc_number"),
-                                 route, qbo_balance, True, wo_number=wo_number,
+                                 route if target else "email", qbo_balance, True,
+                                 wo_number=wo_number,
                                  payment_method=invoice.get("payment_method"),
-                                 cpm_id=(str(invoice["target_payment_method_id"])
-                                         if invoice.get("target_payment_method_id") else None))
+                                 cpm_id=str(target) if target else None)
         plan = _build_dry_run_plan(conn, invoice, route, qbo_balance, qbo_email_sent,
                                    customer_id, attempt)
         update_attempt(conn, attempt["id"], status="succeeded", raw_result=_dumps(plan))
@@ -310,7 +311,7 @@ def _process_charge_path(conn, prior, invoice, wo_number, route, balance, halt,
     customer_id = invoice.get("qbo_customer_id")
 
     if balance == 0:  # covered by credits in pre_process — no charge needed
-        return _send_only(conn, prior, invoice, wo_number, route, 0,
+        return _send_only(conn, prior, invoice, wo_number, "email", 0,
                           "balance was zero — sent invoice only", access_token, realm_id)
 
     # Credit re-check: credits that landed since pre_process halt the charge.
@@ -325,7 +326,7 @@ def _process_charge_path(conn, prior, invoice, wo_number, route, balance, halt,
     if credits:
         total_unapplied = sum(float(c.get("unapplied_amt") or 0) for c in credits)
         reason = f"credits_available ({len(credits)} credit(s), ${total_unapplied:.2f} unapplied)"
-        attempt = _halt_attempt(conn, prior, invoice, wo_number, route, balance,
+        attempt = _halt_attempt(conn, prior, invoice, wo_number, "email", balance,
                                 reason, extra={"credits_found": credits})
         return halt("credits_available", reason, attempt, error=reason,
                     credits_found=len(credits), total_unapplied=total_unapplied)
@@ -337,7 +338,7 @@ def _process_charge_path(conn, prior, invoice, wo_number, route, balance, halt,
                                 preferred_type=invoice.get("preferred_payment_type"),
                                 cpm_id=str(target) if target else None)
     if not pm.get("has_method"):
-        attempt = _halt_attempt(conn, prior, invoice, wo_number, route, balance,
+        attempt = _halt_attempt(conn, prior, invoice, wo_number, "email", balance,
                                 pm.get("error", "no payment method"), extra=pm)
         return halt("no_payment_method",
                     f"no_payment_method ({pm.get('error', 'no PM on file')[:120]})",
@@ -352,7 +353,7 @@ def _process_charge_path(conn, prior, invoice, wo_number, route, balance, halt,
     if r["status"] == "read_failed":
         return _result(qbo_invoice_id, "error", error=f"qbo_fetch_failed: {r['error']}")
     if r["status"] == "already_paid":  # paid between our read and the service's
-        out = _send_only(conn, prior, invoice, wo_number, route, 0,
+        out = _send_only(conn, prior, invoice, wo_number, "email", 0,
                          "balance reached 0 before the charge fired (paid upstream)",
                          access_token, realm_id)
         _refresh_cache_fresh(conn, qbo_invoice_id, access_token, realm_id)

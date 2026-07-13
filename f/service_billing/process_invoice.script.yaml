@@ -1,5 +1,8 @@
-summary: Charge handler+worker (qbo_writer restored — money writes single-file)
-description: Charge handler+worker (qbo_writer restored — money writes single-file)
+summary: Service-billing charge handler + queue worker (ADR 009 sentence over
+  f/billing/_lib)
+description: 'fix: non-charge attempt rows (zero-balance sends, halts, dry-runs
+  without target PM) are channel=email — fn_validate_attempt_channel requires a
+  cpm for card/ach rows'
 lock: '!inline f/service_billing/process_invoice.script.lock'
 concurrency_key: qbo_writer
 concurrency_time_window_s: 5
