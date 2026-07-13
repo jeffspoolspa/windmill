@@ -360,16 +360,24 @@ def load_applicable_credits(conn, qbo_customer_id, memo_match=None,
 
 
 def apply_credits(conn, customer_id, invoice_id, access_token, realm_id,
-                  memo_match=None, memo_exclude=None, ref_match=None,
-                  dry_run=False):
-    """Apply the selected credits to ONE invoice, newest first, each capped
-    at the invoice's remaining fresh balance. Fresh-reads the balance before
-    starting (read failure applies nothing) and stops at zero. Returns
-    {applied: [...], remaining_balance, errors: [...]}. Selection rides in as
-    data — the service never knows what kind of credit it is applying."""
-    out = {"applied": [], "remaining_balance": None, "errors": []}
-    credits = load_applicable_credits(conn, customer_id, memo_match=memo_match,
-                                      memo_exclude=memo_exclude, ref_match=ref_match)
+                  credits=None, memo_match=None, memo_exclude=None,
+                  ref_match=None, applied_via="auto_match", dry_run=False):
+    """Apply credits to ONE invoice, each capped at the invoice's remaining
+    fresh balance. Fresh-reads the balance before starting (read failure
+    applies nothing) and stops at zero.
+
+    Selection is DATA either way: pass `credits` (rows the caller's own
+    policy pre-picked, e.g. a WO matcher) or selector args for
+    load_applicable_credits. After each successful apply the service echoes
+    OUR bookkeeping: decrement customer_payments.unapplied_amt (fires the
+    credits_ok recompute trigger) + upsert billing.payment_invoice_links.
+
+    Returns {applied: [...], failed: [...], remaining_balance, errors: [...]}.
+    """
+    out = {"applied": [], "failed": [], "remaining_balance": None, "errors": []}
+    if credits is None:
+        credits = load_applicable_credits(conn, customer_id, memo_match=memo_match,
+                                          memo_exclude=memo_exclude, ref_match=ref_match)
     if not credits:
         return out
     fresh = get_qbo_invoice_details(invoice_id, realm_id, access_token)
@@ -382,6 +390,8 @@ def apply_credits(conn, customer_id, invoice_id, access_token, realm_id,
         if remaining <= 0:
             break
         amount = round(min(float(c["unapplied_amt"]), remaining), 2)
+        if amount <= 0:
+            continue
         entry = {"qbo_payment_id": c["qbo_payment_id"], "type": c["type"],
                  "amount": amount, "dry_run": dry_run}
         if dry_run:
@@ -390,11 +400,25 @@ def apply_credits(conn, customer_id, invoice_id, access_token, realm_id,
             continue
         r = apply_credit(c["qbo_payment_id"], c["type"], invoice_id,
                          {"value": customer_id}, amount, access_token, realm_id)
-        if r["success"]:
-            out["applied"].append(entry)
-            remaining = round(remaining - amount, 2)
-        else:
+        if not r["success"]:
+            out["failed"].append({**entry, "error": r["error"]})
             out["errors"].append(f"{c['qbo_payment_id']}: {r['error']}")
+            continue
+        # verified echo of OUR apply: cache + link ledger
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE billing.customer_payments SET unapplied_amt = GREATEST(unapplied_amt - %s, 0) "
+            "WHERE qbo_payment_id = %s", (amount, c["qbo_payment_id"]))
+        cur.execute(
+            """INSERT INTO billing.payment_invoice_links
+                 (payment_id, invoice_id, amount, applied_via)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (payment_id, invoice_id) DO UPDATE SET
+                 amount = billing.payment_invoice_links.amount + EXCLUDED.amount""",
+            (c["qbo_payment_id"], invoice_id, amount, applied_via))
+        conn.commit(); cur.close()
+        out["applied"].append(entry)
+        remaining = round(remaining - amount, 2)
     out["remaining_balance"] = remaining
     return out
 
@@ -537,8 +561,14 @@ def _selfcheck():
            and "charge:25.5:KEY-1" in calls and "record:25.5:2" in calls)
 
         # 11. apply_credits: caps at the fresh balance, stops at zero,
-        #     selection rides in as data
-        applied = []
+        #     selection rides in as data, successful applies are echoed
+        class _C:
+            def __init__(self): self.sql = []
+            def cursor(self, **kw): return self
+            def execute(self, q, p=None): self.sql.append(" ".join(q.split()))
+            def commit(self): pass
+            def close(self): pass
+        applied, fconn = [], _C()
         g["load_applicable_credits"] = lambda conn, cust, **sel: (
             calls.append(f"credits:{sel.get('ref_match')}"),
             [{"qbo_payment_id": "C1", "type": "payment", "unapplied_amt": 30.0},
@@ -546,14 +576,20 @@ def _selfcheck():
         g["apply_credit"] = lambda cid, ctype, inv, cref, amt, at, rid: (
             applied.append((cid, amt)), {"success": True})[1]
         state["fresh"] = {"I1": {"balance": 40.0, "email_status": None}}
-        r = apply_credits(None, "C9", "I1", "at", "rid", ref_match="WO42")
+        r = apply_credits(fconn, "C9", "I1", "at", "rid", ref_match="WO42")
         ok("apply_credits caps at balance and stops at zero",
            applied == [("C1", 30.0), ("C2", 10.0)]
            and r["remaining_balance"] == 0 and "credits:WO42" in calls)
+        ok("apply_credits echoes unapplied_amt + link ledger per success",
+           sum("customer_payments SET unapplied_amt" in q for q in fconn.sql) == 2
+           and sum("payment_invoice_links" in q for q in fconn.sql) == 2)
 
-        # 12. apply_credits halts on a failed fresh read
+        # 12. apply_credits halts on a failed fresh read; caller-picked
+        #     credits list bypasses the selector load
         state["fresh"] = {"I1": None}
-        r = apply_credits(None, "C9", "I1", "at", "rid")
+        r = apply_credits(_C(), "C9", "I1", "at", "rid",
+                          credits=[{"qbo_payment_id": "C1", "type": "payment",
+                                    "unapplied_amt": 5.0}])
         ok("apply_credits refuses on read failure",
            r["applied"] == [] and r["errors"])
     finally:

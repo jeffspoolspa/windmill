@@ -1,5 +1,7 @@
-summary: Align QBO TxnDate to wo.completed in the enrichment PATCH
-description: ''
+summary: 'Enrichment event handler over f/billing/_lib (ADR 009): 928 -> 642
+  lines, policy only'
+description: 'Enrichment event handler over f/billing/_lib (ADR 009): 928 -> 642
+  lines, policy only'
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

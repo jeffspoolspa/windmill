@@ -1,5 +1,7 @@
-summary: Shared billing lib (ADR 009)
-description: + update_invoice_sparse / fetch_qbo_classes / apply_credit(s) selectors
+summary: 'apply_credits: caller-picked credits + verified echoes (unapplied +
+  link ledger)'
+description: 'apply_credits: caller-picked credits + verified echoes (unapplied
+  + link ledger)'
 lock: '!inline f/billing/_lib/payments.script.lock'
 has_on_behalf_of: false
 kind: script
