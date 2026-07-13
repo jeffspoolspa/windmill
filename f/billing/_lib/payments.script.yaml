@@ -1,7 +1,5 @@
-summary: 'apply_credits: caller-picked credits + verified echoes (unapplied +
-  link ledger)'
-description: 'apply_credits: caller-picked credits + verified echoes (unapplied
-  + link ledger)'
+summary: + billing.charges reflection (Intuit's fact) + attempt lines column
+description: + billing.charges reflection (Intuit's fact) + attempt lines column
 lock: '!inline f/billing/_lib/payments.script.lock'
 has_on_behalf_of: false
 kind: script

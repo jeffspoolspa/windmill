@@ -67,6 +67,36 @@ def stored_group_lines(attempt):
         return None
 
 
+def _upsert_charge(conn, cr):
+    """Reflect Intuit's charge event into billing.charges (keyed by INTUIT's
+    charge_id — the leader's identity, never ours). Written for success AND
+    declines (Intuit ids declines too); reconcile_payments also converges this
+    reflection as it discovers state. Best-effort: a reflection failure never
+    fails the money path. Returns the charge_id (or None)."""
+    raw = cr.get("raw_response") or {}
+    charge_id = cr.get("charge_id") or raw.get("id")
+    if not charge_id:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO billing.charges
+              (charge_id, payment_type, status, amount, auth_code, card_type, card_last4, raw)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            ON CONFLICT (charge_id) DO UPDATE SET
+              status = EXCLUDED.status, raw = EXCLUDED.raw, updated_at = now()
+        """, (charge_id, cr.get("payment_type"),
+              cr.get("status") or raw.get("status"),
+              cr.get("amount") or raw.get("amount"),
+              cr.get("auth_code") or raw.get("authCode"),
+              cr.get("card_type") or (raw.get("card") or {}).get("cardType"),
+              cr.get("card_last4"), dumps(raw)))
+        conn.commit(); cur.close()
+    except Exception as e:
+        print(f"  (charge reflection warning: {e})")
+    return charge_id
+
+
 def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
     """The payment port. intent (all policy passed as data):
 
@@ -170,9 +200,11 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
             conn, anchor, stage, intent.get("invoice_number"), channel, amount,
             False, cpm_id=intent.get("cpm_id"), wo_number=intent.get("wo_number"),
             payment_method=intent.get("payment_method"))
-        if len(lines) > 1:
-            update_attempt(conn, attempt["id"],
-                           raw_result=dumps({"group_lines": lines}))
+        # lines = the attempt's domain-blind membership (one entry or five —
+        # same shape); group_lines in raw_result doubles it for resume compat
+        update_attempt(conn, attempt["id"], lines=dumps(lines),
+                       **({"raw_result": dumps({"group_lines": lines})}
+                          if len(lines) > 1 else {}))
 
     def _raw(extra):
         base = {"group_lines": lines} if len(lines) > 1 else {}
@@ -187,16 +219,20 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
                 intent.get("charge_label") or intent.get("invoice_number") or "",
                 intent.get("customer_name") or "", access_token)
         cls = cr["classification"]
+        reflected_id = _upsert_charge(conn, cr)  # Intuit's fact, reflected
         if cls == "uncertain":
             update_attempt(conn, attempt["id"], status="charge_uncertain",
-                           error_message=cr.get("error"),
+                           error_message=cr.get("error"), charge_id=reflected_id,
                            charge_result=dumps(cr), raw_result=_raw({"charge": cr}))
             return res("uncertain", amount=amount, balances=balances,
                        attempt_id=str(attempt["id"]), error=cr.get("error"),
                        resumed=resumed)
         if cls == "declined":
+            # stamping the declined charge's id makes the engines' same-PM
+            # decline gate work as documented (real declines carry an id;
+            # pre-charge halts never do)
             update_attempt(conn, attempt["id"], status="charge_declined",
-                           error_message=cr.get("error"),
+                           error_message=cr.get("error"), charge_id=reflected_id,
                            charge_result=dumps(cr), raw_result=_raw({"charge": cr}))
             return res("declined", amount=amount, balances=balances,
                        attempt_id=str(attempt["id"]), error=cr.get("error"),
@@ -492,14 +528,19 @@ def _selfcheck():
            r["status"] == "would_charge" and r["amount"] == 42.5
            and "create" not in calls and not state["updates"])
 
-        # 4. declined: WAL charge_declined, no payment, no receipt
+        # 4. declined: WAL charge_declined + the declined charge's Intuit id
+        #    stamped (makes the same-PM decline gate honest); no downstream
         calls.clear(); state["updates"].clear()
-        state["charge"] = {"classification": "declined", "error": "card expired"}
+        state["charge"] = {"classification": "declined", "error": "card expired",
+                           "raw_response": {"id": "chD", "status": "DECLINED"}}
         r = charge_and_record(None, dict(base_intent), "at", "rid")
-        ok("declined -> WAL + no downstream calls",
+        ok("declined -> WAL + charge id + no downstream calls",
            r["status"] == "declined" and r["error"] == "card expired"
            and state["updates"][-1]["status"] == "charge_declined"
+           and state["updates"][-1].get("charge_id") == "chD"
            and not any(c.startswith(("record", "receipt")) for c in calls))
+        ok("fresh attempt gets its lines stamped",
+           any("lines" in u for u in state["updates"]))
 
         # 5. success end-to-end: fresh amount charged w/ persisted key,
         #    payment recorded, expectation inserted, receipt sent, WAL succeeded

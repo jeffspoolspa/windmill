@@ -1,166 +1,138 @@
-# f/service_billing/dispatch_pre_processing
+# f/service_billing/dispatch_pre_processing — the pre-process queue worker.
 #
-# Outbox-pattern worker that replaces the unreliable pg_net trigger as the
-# primary mechanism for getting newly-linked invoices through pre_process.
+# WORKFLOW_EXECUTION applied to service-billing enrichment: the WO-link
+# trigger (trg_enqueue_service_preprocess) writes billing.service_preprocess_
+# queue + wakes this worker; the 60s schedule is the heartbeat + self-heal
+# (pg_net is at-most-once — the outbox lesson: ~6% of direct fires dropped
+# under burst and invoices stuck invisibly).
 #
-# Why this exists:
-#   The original design fired pre_process_invoice via pg_net.http_post from
-#   a row trigger on work_orders. That's at-most-once delivery — pg_net's
-#   queue can drop requests under burst load (observed: ~3 of 50 requests
-#   dropped during a bulk QBO sync, leaving 8 service-billing invoices
-#   stuck at billing_status='awaiting_pre_processing' with no UI visibility).
+# Claim one row at a time (SKIP LOCKED, priority order, 3-attempt
+# dead-letter), check ELIGIBILITY AT CLAIM TIME (billable WO, not skipped,
+# still awaiting, subtotal_ok — enqueue is dumb, the worker decides), then
+# run the enrichment sentence IN-PROCESS (one DB connection + ONE token
+# refresh per drain, not per invoice — the old per-invoice main() calls
+# rotated the QBO refresh token once per unit).
 #
-# What this does:
-#   Every 60s, query for invoices that:
-#     - have billing_status='awaiting_pre_processing'
-#     - have a billable, non-skipped linked work order
-#     - have never been pre-processed (pre_processed_at IS NULL)
-#     - have been sitting that way for >= 2 minutes (gives pg_net's happy
-#       path a chance before we duplicate the work)
-#   For each, call f.service_billing.pre_process_invoice.main() in-process.
-#   Pre-process is idempotent — re-running on a row that's already been
-#   processed would just re-stamp it with the same enrichment.
-#
-# Why in-process import vs Windmill API call:
-#   Each pre_process run takes ~5-10s. Calling via wmill.run_script_by_path
-#   adds ~200ms dispatch overhead per call AND respects pre_process_invoice's
-#   own concurrent_limit (would queue 2-at-a-time). For drain workloads
-#   this batters latency. In-process call goes straight through; the worker
-#   is the SOLE concurrent caller (concurrent_limit=1 on this script) so
-#   total parallelism is preserved.
-#
-# Bounds per tick:
-#   LIMIT 25 invoices per run. Anything more than that means a major
-#   incident — the next tick will pick up the rest.
+# Concurrency: concurrent_limit 1 (sole caller of the enrichment handler;
+# per-call QBO volume is governed by the shared rate bucket).
 
 import time
 
-import psycopg2
 import psycopg2.extras
 import wmill
 
-import f.service_billing.pre_process_invoice as pre_process_invoice
+from f.billing._lib.db import get_db_conn
+from f.billing._lib.qbo import set_rate_limiter, refresh_qbo_token
+import f.service_billing.pre_process_invoice as pre_process
 
-SUPABASE_RESOURCE = "u/carter/supabase"
-PER_TICK_LIMIT = 25
-STUCK_GRACE_MINUTES = 2  # let pg_net try first; we're the backstop
+PER_RUN_LIMIT = 50
+GRACE_MINUTES = 2  # let the wake path win before self-heal re-enqueues
+
+CLAIM = """
+UPDATE billing.service_preprocess_queue
+SET started_at = now(), attempts = attempts + 1
+WHERE id = (SELECT id FROM billing.service_preprocess_queue
+            WHERE finished_at IS NULL AND attempts < 3
+            ORDER BY priority, received_at
+            FOR UPDATE SKIP LOCKED LIMIT 1)
+RETURNING id, qbo_invoice_id
+"""
+
+# Lost-trigger backstop: any eligible invoice with no live queue row gets one.
+SELF_HEAL = """
+INSERT INTO billing.service_preprocess_queue (qbo_invoice_id)
+SELECT i.qbo_invoice_id
+FROM billing.invoices i
+JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
+WHERE i.billing_status = 'awaiting_pre_processing'
+  AND w.billable = true AND w.skipped_at IS NULL
+  AND i.pre_processed_at IS NULL
+  AND i.subtotal_ok IS TRUE
+  AND i.fetched_at < now() - make_interval(mins => %s)
+ON CONFLICT (qbo_invoice_id) WHERE finished_at IS NULL DO NOTHING
+"""
+
+# Claim-time truth: is this unit still worth enriching?
+ELIGIBLE = """
+SELECT (i.billing_status = 'awaiting_pre_processing'
+        AND w.billable IS TRUE AND w.skipped_at IS NULL
+        AND i.pre_processed_at IS NULL
+        AND i.subtotal_ok IS TRUE) AS ok
+FROM billing.invoices i
+LEFT JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
+WHERE i.qbo_invoice_id = %s
+"""
 
 
-def get_db_conn():
-    sb = wmill.get_resource(SUPABASE_RESOURCE)
-    return psycopg2.connect(
-        host=sb["host"], port=sb.get("port", 6543),
-        dbname=sb.get("dbname", "postgres"), user=sb["user"],
-        password=sb["password"], sslmode=sb.get("sslmode", "require"),
-    )
-
-
-def find_stuck_invoices(conn, limit: int = PER_TICK_LIMIT):
-    """Stuck = awaiting_pre_processing AND linked-to-billable-WO AND never
-    pre-processed AND subtotal_ok=true AND sitting >= grace window.
-
-    The WO-link filter is essential — without it we'd also try to pre-process
-    maintenance autopay invoices (separate pipeline, no WO).
-
-    The subtotal_ok=TRUE gate is the single source of truth for "data is
-    self-consistent enough to attempt enrichment." When subtotal_ok is FALSE
-    or NULL, the projection trigger has already routed the invoice to
-    needs_review (subtotal_mismatch reason). Dispatching pre_process on
-    those would just waste a Claude call on data we know is wrong.
-    """
+def _row(conn, sql, params):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(
-        """
-        SELECT i.qbo_invoice_id,
-               i.doc_number,
-               i.customer_name,
-               i.fetched_at,
-               extract(epoch from (now() - i.fetched_at))::int AS age_seconds,
-               w.wo_number
-          FROM billing.invoices i
-          JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
-         WHERE i.billing_status = 'awaiting_pre_processing'
-           AND w.billable = true
-           AND w.skipped_at IS NULL
-           AND i.pre_processed_at IS NULL
-           AND i.subtotal_ok IS TRUE
-           AND i.fetched_at < now() - make_interval(mins => %s)
-         ORDER BY i.fetched_at ASC
-         LIMIT %s
-        """,
-        (STUCK_GRACE_MINUTES, limit),
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    cur.close()
-    return rows
+    cur.execute(sql, params)
+    row = cur.fetchone(); cur.close()
+    return dict(row) if row else None
+
+
+def _exec(conn, sql, params):
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    conn.commit(); cur.close()
 
 
 def main():
-    """Run the dispatch sweep. Schedule: every 60 seconds.
-
-    Returns a summary dict with how many stuck invoices we found and the
-    per-invoice outcome (success / needs_review / error). The Windmill UI
-    surfaces these results so cron history is auditable.
-    """
+    """Self-heal, then drain the pre-process queue until empty (or the
+    per-run cap). Idle runs make no QBO calls (no token rotation)."""
     started = time.time()
     conn = get_db_conn()
-
+    set_rate_limiter(conn)  # ADR 008 §4: every QBO call claims
     try:
-        stuck = find_stuck_invoices(conn)
+        _exec(conn, SELF_HEAL, (GRACE_MINUTES,))
+
+        stats, results, creds = {}, [], None
+        for _ in range(PER_RUN_LIMIT):
+            unit = _row(conn, CLAIM, ())
+            conn.commit()
+            if not unit:
+                break  # queue empty
+            qid = unit["qbo_invoice_id"]
+
+            elig = _row(conn, ELIGIBLE, (qid,))
+            if not elig or not elig["ok"]:
+                # moot at claim time (gate flipped it, WO unlinked, already
+                # enriched) — finish clean; self-heal re-enqueues if it ever
+                # becomes eligible again
+                _exec(conn, "UPDATE billing.service_preprocess_queue "
+                            "SET finished_at = now(), error = NULL WHERE id = %s",
+                      (unit["id"],))
+                stats["moot"] = stats.get("moot", 0) + 1
+                continue
+
+            if creds is None:  # first real unit: ONE refresh per drain
+                at, rid = refresh_qbo_token()
+                api_key = wmill.get_variable(pre_process.OPENAI_KEY_VAR)
+                creds = (at, rid, api_key)
+
+            try:
+                res = pre_process.process_one(conn, qid, *creds, force=False)
+                _exec(conn, "UPDATE billing.service_preprocess_queue "
+                            "SET finished_at = now(), error = NULL WHERE id = %s",
+                      (unit["id"],))
+            except Exception as e:
+                conn.rollback()
+                res = {"status": "error", "qbo_invoice_id": qid,
+                       "error": f"{type(e).__name__}: {str(e)[:200]}"}
+                # stays open: re-claims until attempts >= 3, then dead-letters
+                _exec(conn, "UPDATE billing.service_preprocess_queue "
+                            "SET started_at = NULL, error = %s WHERE id = %s",
+                      (res["error"], unit["id"]))
+
+            status = res.get("status", "error")
+            stats[status] = stats.get(status, 0) + 1
+            if len(results) < 20:
+                results.append({"qbo_invoice_id": qid, "outcome": status,
+                                "reason": res.get("needs_review_reason")
+                                          or res.get("reason") or res.get("error")})
+            print(f"  {qid} -> {status}")
+
+        return {"status": "ok", "drained": sum(stats.values()), "stats": stats,
+                "results": results, "elapsed_s": round(time.time() - started, 1)}
     finally:
         conn.close()
-
-    if not stuck:
-        return {
-            "status": "ok",
-            "stuck_found": 0,
-            "elapsed_s": round(time.time() - started, 1),
-            "note": "nothing to dispatch",
-        }
-
-    print(f"=== dispatch_pre_processing: {len(stuck)} stuck invoice(s) ===")
-
-    results = []
-    stats = {
-        "ready_to_process": 0,
-        "needs_review": 0,
-        "error": 0,
-        "skipped": 0,
-        "success": 0,        # bulk-all returns this
-    }
-
-    for entry in stuck:
-        qid = entry["qbo_invoice_id"]
-        wo  = entry["wo_number"]
-        age = entry["age_seconds"]
-        try:
-            res = pre_process_invoice.main(qbo_invoice_id=qid, force=False)
-        except Exception as e:
-            res = {"status": "error", "qbo_invoice_id": qid,
-                   "error": f"{type(e).__name__}: {str(e)[:200]}"}
-
-        status = res.get("status", "error")
-        stats[status] = stats.get(status, 0) + 1
-        results.append({
-            "qbo_invoice_id":      qid,
-            "doc_number":          entry["doc_number"],
-            "customer_name":       entry["customer_name"],
-            "wo_number":           wo,
-            "age_seconds":         age,
-            "outcome":             status,
-            "needs_review_reason": res.get("needs_review_reason")
-                                   or res.get("reason")
-                                   or res.get("error"),
-        })
-        print(f"  {qid}  WO {wo}  age={age}s  -> {status}")
-
-    elapsed = time.time() - started
-    print(f"=== done in {elapsed:.1f}s: {stats} ===")
-
-    return {
-        "status":      "ok",
-        "stuck_found": len(stuck),
-        "elapsed_s":   round(elapsed, 1),
-        "stats":       stats,
-        "results":     results,
-    }
