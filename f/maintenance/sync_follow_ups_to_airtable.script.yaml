@@ -3,8 +3,8 @@ description: Single writer for maintenance.follow_ups sync columns. Drains rows
   with airtable_record_id IS NULL into the Airtable Maintenance Follow up table
   (signed storage URLs for media; typecast on selects), echoes the record id
   back, then reads Status back for open rows (Done -> closed). Woken by the
-  follow_ups_wake_sync pg_net trigger; the 15-minute heartbeat schedule is the
-  delivery guarantee.
+  follow_ups_wake_sync pg_net trigger; the 15-minute pg_cron heartbeat
+  (follow-ups-airtable-heartbeat) is the delivery guarantee.
 lock: '!inline f/maintenance/sync_follow_ups_to_airtable.script.lock'
 concurrency_key: airtable_api
 concurrency_time_window_s: 5

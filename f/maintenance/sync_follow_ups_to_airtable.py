@@ -10,7 +10,8 @@
 # Triggered by:
 #   - pg_net: AFTER INSERT trigger follow_ups_wake_sync on maintenance.follow_ups
 #     (latency only — pg_net is at-most-once)
-#   - schedule: every 15 min heartbeat (the delivery guarantee)
+#   - pg_cron: job 'follow-ups-airtable-heartbeat' every 15 min via pg_net
+#     (the delivery guarantee; also drives the Status read-back)
 #
 # Tables touched:
 #   maintenance.follow_ups   [r/w]   drain rows with airtable_record_id IS NULL,
