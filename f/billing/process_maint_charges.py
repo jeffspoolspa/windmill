@@ -17,8 +17,10 @@
 #                     receipt; WAL + idempotent resume live in the service)
 # It stamps no status: processed / needs_review derive via the projection.
 #
-# Money movement stays human-kicked: no schedule; the UI's Process button
-# (or a manual run) starts a drain. Killing it mid-run loses nothing.
+# Self-draining (2026-07-13): authorization happens BEFORE enqueue — a queue
+# row means safe to process. trg_wake_maint_charge kicks this worker on every
+# insert; a 15-min heartbeat is the at-most-once backstop. Killing it mid-run
+# loses nothing.
 #
 # Concurrency key: qbo_writer (limit 1) — the write serializer.
 
