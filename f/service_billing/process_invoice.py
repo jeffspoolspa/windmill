@@ -19,7 +19,7 @@ import psycopg2.extras
 
 from f.billing._lib.db import get_db_conn
 from f.billing._lib.qbo import (
-    refresh_qbo_token, fetch_qbo_invoice, fetch_qbo_customer_email,
+    set_rate_limiter, refresh_qbo_token, fetch_qbo_invoice, fetch_qbo_customer_email,
     send_invoice_email, send_payment_receipt, bump_invoice_due_date_to_today,
     record_qbo_payment,
 )
@@ -472,7 +472,58 @@ def _process_email_only(conn, prior, invoice, wo_number, customer_id,
                    attempt_id=str(attempt["id"]), error=last_err)
 
 
-# ── main: the event ──────────────────────────────────────────────────────────
+# ── main: the event + the queue worker ───────────────────────────────────────
+# Live batch runs go THROUGH billing.service_charge_queue (WORKFLOW_EXECUTION):
+# enqueue the units (coalesced; interactive clicks at priority 1, backfill
+# floods behind them), then drain until empty. Dry runs plan directly; force /
+# recover_orphan runs stay direct (they must never apply force to unrelated
+# queued units). trg_enqueue_service_charge also feeds the queue as invoices
+# turn ready — a drain picks those up too.
+
+CLAIM = """
+UPDATE billing.service_charge_queue
+SET started_at = now(), attempts = attempts + 1
+WHERE id = (SELECT id FROM billing.service_charge_queue
+            WHERE finished_at IS NULL AND attempts < 3
+            ORDER BY priority, received_at
+            FOR UPDATE SKIP LOCKED LIMIT 1)
+RETURNING id, qbo_invoice_id
+"""
+
+
+def _drain(conn, access_token, realm_id, sleep_ms, max_units=1000):
+    stats, sample, drained = {}, [], 0
+    while drained < max_units:
+        row = _row(conn, CLAIM, ())
+        conn.commit()
+        if not row:
+            break  # queue empty
+        drained += 1
+        qid = row["qbo_invoice_id"]
+        try:
+            res = process_one(conn, qid, access_token, realm_id)
+            _exec(conn, "UPDATE billing.service_charge_queue "
+                        "SET finished_at = now(), error = NULL WHERE id = %s", (row["id"],))
+        except Exception as e:
+            conn.rollback()
+            res = _result(qid, "error", error=str(e)[:300])
+            # stays open: re-claims until attempts >= 3, then dead-letters
+            _exec(conn, "UPDATE billing.service_charge_queue "
+                        "SET started_at = NULL, error = %s WHERE id = %s",
+                  (str(e)[:300], row["id"]))
+        status = res.get("status", "error")
+        stats[status] = stats.get(status, 0) + 1
+        if len(sample) < 20:
+            sample.append(res)
+        print(f"  [{drained}] {qid} -> {status}"
+              + (f"  ({res.get('reason') or res.get('error') or ''})"
+                 if status != 'succeeded' else ''))
+        if sleep_ms:
+            time.sleep(sleep_ms / 1000.0)
+    print(f"=== drained {drained}: {stats} ===")
+    return {"status": "success", "drained": drained, "stats": stats,
+            "sample": sample, "dry_run": False}
+
 
 def main(qbo_invoice_id: str = None,
          qbo_invoice_ids: list = None,
@@ -480,27 +531,49 @@ def main(qbo_invoice_id: str = None,
          recover_orphan: bool = False,
          force: bool = False,
          bulk_all: bool = False,
+         drain: bool = False,
          limit: int = None,
          sleep_ms: int = 800):
     """
-    Modes: single (qbo_invoice_id) | list (qbo_invoice_ids, the Process
-    Selected button) | bulk_all (everything in ready_to_process).
-    dry_run: plan only, no external calls. recover_orphan: retry
-    record_payment for a prior payment_orphan. force: bypass the
-    ready_to_process guard (e.g. retry declines / charge open balance).
+    Modes: single (qbo_invoice_id, direct) | list (qbo_invoice_ids: live =
+    enqueue at priority 1 + drain; dry = plan directly) | bulk_all (live =
+    enqueue everything derived-ready + drain; dry = plan) | drain=True
+    (just drain whatever is queued — backfill kicks).
+    force / recover_orphan are direct-only recovery paths.
     """
-    if not qbo_invoice_id and not qbo_invoice_ids and not bulk_all:
-        return {"status": "error", "error": "pass qbo_invoice_id, qbo_invoice_ids=[...], or bulk_all=True"}
+    if not qbo_invoice_id and not qbo_invoice_ids and not bulk_all and not drain:
+        return {"status": "error",
+                "error": "pass qbo_invoice_id, qbo_invoice_ids=[...], bulk_all=True, or drain=True"}
 
     print(f"=== process_invoice (dry_run={dry_run}, recover_orphan={recover_orphan}, "
-          f"force={force}, bulk_all={bulk_all}) ===")
+          f"force={force}, bulk_all={bulk_all}, drain={drain}) ===")
     conn = get_db_conn()
+    set_rate_limiter(conn)  # ADR 008 §4: every QBO call claims
     try:
         access_token, realm_id = refresh_qbo_token()
         if qbo_invoice_id and not qbo_invoice_ids:
             return process_one(conn, qbo_invoice_id, access_token, realm_id,
                                dry_run=dry_run, recover_orphan=recover_orphan, force=force)
 
+        # LIVE batch (no force): through the queue.
+        if not dry_run and not force:
+            if qbo_invoice_ids:
+                _exec(conn, """INSERT INTO billing.service_charge_queue
+                                 (qbo_invoice_id, priority)
+                               SELECT unnest(%s::text[]), 1
+                               ON CONFLICT (qbo_invoice_id)
+                                 WHERE finished_at IS NULL DO NOTHING""",
+                      (list(dict.fromkeys(qbo_invoice_ids)),))
+            elif bulk_all:
+                _exec(conn, """INSERT INTO billing.service_charge_queue (qbo_invoice_id)
+                               SELECT s.qbo_invoice_id FROM billing.v_invoice_status s
+                               WHERE s.derived_status = 'ready_to_process'
+                               ON CONFLICT (qbo_invoice_id)
+                                 WHERE finished_at IS NULL DO NOTHING""", ())
+            return _drain(conn, access_token, realm_id, sleep_ms,
+                          max_units=int(limit) if limit else 1000)
+
+        # DRY RUN (plan directly) or FORCE (explicit human recovery, direct).
         if qbo_invoice_ids:
             targets = list(qbo_invoice_ids)
         else:

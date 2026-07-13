@@ -31,7 +31,7 @@ import wmill
 
 from f.billing._lib.db import get_db_conn
 from f.billing._lib.qbo import (
-    refresh_qbo_token, fetch_qbo_invoice, fetch_qbo_classes,
+    set_rate_limiter, refresh_qbo_token, fetch_qbo_invoice, fetch_qbo_classes,
     update_invoice_sparse,
 )
 from f.billing._lib.payments import load_applicable_credits, apply_credits
@@ -602,6 +602,7 @@ def main(qbo_invoice_id: str = None, force: bool = False,
 
     print(f"=== pre_process_invoice (bulk={bulk_all}, limit={limit}, force={force}, sleep={sleep_ms}ms, model={MODEL}) ===")
     conn = get_db_conn()
+    set_rate_limiter(conn)  # ADR 008 §4: every QBO call claims
     try:
         access_token, realm_id = refresh_qbo_token()
         api_key = wmill.get_variable(OPENAI_KEY_VAR)

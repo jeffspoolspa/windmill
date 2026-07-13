@@ -1,5 +1,5 @@
-summary: 'Derive-dont-stamp: gates on v_invoice_status, mark_invoice_processed deleted'
-description: 'Derive-dont-stamp: gates on v_invoice_status, mark_invoice_processed deleted'
+summary: + service_charge_queue drain mode; live batches enqueue+drain; bucket armed
+description: + service_charge_queue drain mode; live batches enqueue+drain; bucket armed
 lock: '!inline f/service_billing/process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

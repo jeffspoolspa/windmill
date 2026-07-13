@@ -1,5 +1,5 @@
-summary: Shared billing lib (ADR 009)
-description: + update_invoice_sparse / fetch_qbo_classes / apply_credit(s) selectors
+summary: '+ ADR 008 §4 token bucket: set_rate_limiter + per-call claims'
+description: '+ ADR 008 §4 token bucket: set_rate_limiter + per-call claims'
 lock: '!inline f/billing/_lib/qbo.script.lock'
 has_on_behalf_of: false
 kind: script

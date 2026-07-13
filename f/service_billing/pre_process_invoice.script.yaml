@@ -1,7 +1,5 @@
-summary: 'Enrichment event handler over f/billing/_lib (ADR 009): 928 -> 642
-  lines, policy only'
-description: 'Enrichment event handler over f/billing/_lib (ADR 009): 928 -> 642
-  lines, policy only'
+summary: bucket armed (set_rate_limiter)
+description: bucket armed (set_rate_limiter)
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
 has_on_behalf_of: false
 kind: script

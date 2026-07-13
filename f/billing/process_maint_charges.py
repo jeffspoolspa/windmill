@@ -26,7 +26,7 @@ import psycopg2.extras
 from datetime import datetime
 
 from f.billing._lib.db import get_db_conn
-from f.billing._lib.qbo import refresh_qbo_token, send_invoice
+from f.billing._lib.qbo import set_rate_limiter, refresh_qbo_token, send_invoice
 from f.billing._lib.payments import charge_and_record
 from f.billing._lib.cache import mark_emailed
 
@@ -230,6 +230,7 @@ def main(billing_month: str = None,
       service's persisted idempotency keys make re-running any unit safe.
     """
     conn = get_db_conn()
+    set_rate_limiter(conn)  # ADR 008 §4: every QBO call claims
     try:
         month = f"{billing_month}-01" if billing_month and len(billing_month) == 7 \
             else billing_month

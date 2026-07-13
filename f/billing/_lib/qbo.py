@@ -41,6 +41,37 @@ _PAYMENTS_BASE = "https://api.intuit.com/quickbooks/v4/payments"
 _QBO_BASE = "https://quickbooks.api.intuit.com/v3/company"
 
 
+# ── rate bucket (ADR 008 §4: the READ governor; qbo_writer stays the write
+#    serializer). Engines arm it once per job; every call here then claims
+#    from billing.rate_buckets. Unarmed = no-op; errors fail OPEN — the
+#    bucket governs volume, never availability. ──────────────────────────────
+
+_RATE = {"conn": None, "system": "qbo"}
+
+
+def set_rate_limiter(conn):
+    """Arm the per-system token bucket with this job's DB connection."""
+    _RATE["conn"] = conn
+
+
+def _claim(cost=1.0):
+    conn = _RATE["conn"]
+    if conn is None:
+        return
+    try:
+        for _ in range(60):  # worst ~2 min of waiting, then fail open
+            cur = conn.cursor()
+            cur.execute("SELECT billing.claim_rate_token(%s, %s)",
+                        (_RATE["system"], cost))
+            wait = float(cur.fetchone()[0])
+            conn.commit(); cur.close()
+            if wait <= 0:
+                return
+            time.sleep(min(wait, 2.0))
+    except Exception as e:
+        print(f"  (rate-bucket claim warning, failing open: {e})")
+
+
 # ── auth (the ONE token refresh — the rotating refresh_token burns if two
 #    copies race; see quickbooks-windmill skill) ─────────────────────────────
 
@@ -63,6 +94,7 @@ def refresh_qbo_token():
 # ── generic HTTP verbs (one call each) ──────────────────────────────────────
 
 def qbo_get(path, access_token, realm_id, params=None):
+    _claim()
     return requests.get(
         f"{_QBO_BASE}/{realm_id}/{path}",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
@@ -71,6 +103,7 @@ def qbo_get(path, access_token, realm_id, params=None):
 
 
 def qbo_post(path, access_token, realm_id, body):
+    _claim()
     return requests.post(
         f"{_QBO_BASE}/{realm_id}/{path}",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json",
@@ -146,6 +179,7 @@ def extract_charge_error(resp, body=None):
 # ── charge primitives (one Intuit call each) ────────────────────────────────
 
 def charge_card(card_id, amount, request_id, invoice_num, customer_name, access_token):
+    _claim()
     payload = {"amount": f"{amount:.2f}", "currency": "USD", "capture": True,
                "cardOnFile": card_id, "context": {"mobile": False, "isEcommerce": True},
                "description": f"Invoice {invoice_num} - {customer_name}"}
@@ -176,6 +210,7 @@ def charge_card(card_id, amount, request_id, invoice_num, customer_name, access_
 
 
 def charge_bank_account(bank_id, amount, request_id, invoice_num, customer_name, access_token):
+    _claim()
     payload = {"amount": f"{amount:.2f}", "bankAccountOnFile": bank_id,
                "description": f"Invoice {invoice_num} - {customer_name}",
                "paymentMode": "WEB",
@@ -213,6 +248,7 @@ def get_qbo_invoice_details(invoice_id, realm_id, access_token):
     """Fresh leader read of ONE invoice — money paths decide on this, not the
     cache. Returns {balance, email_status} or None on ANY failure (caller MUST
     halt on None; never fall back to the cache for a charge decision)."""
+    _claim()
     try:
         resp = requests.get(
             f"{_QBO_BASE}/{realm_id}/invoice/{invoice_id}?minorversion=65",
@@ -249,6 +285,7 @@ def record_qbo_payment(customer_id, amount, charge_result, payment_ref, memo_pre
     invoices (single-invoice callers pass one line). payment_ref / memo_prefix
     are caller policy (WO number vs month label) passed as data.
     Returns {success, payment_id} or {success: False, error, ...}."""
+    _claim()
     charge_id = charge_result.get("charge_id", "")
     pmt_method_id = (QBO_PMT_METHOD_ACH if charge_result.get("payment_type") == "ach"
                      else QBO_PMT_METHOD_CC)
@@ -303,6 +340,7 @@ def send_receipt(payment_id, email, access_token, realm_id):
     """Email a QBO Payment receipt (one call). {ok, error}."""
     if not email:
         return {"ok": False, "error": "no email on file"}
+    _claim()
     r = requests.post(
         f"{_QBO_BASE}/{realm_id}/payment/{payment_id}/send?sendTo={email}",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json",
@@ -314,6 +352,7 @@ def send_invoice(invoice_id, email, access_token, realm_id):
     """Email a QBO invoice copy (one call). {ok, error}."""
     if not email:
         return {"ok": False, "error": "no email on file"}
+    _claim()
     r = requests.post(
         f"{_QBO_BASE}/{realm_id}/invoice/{invoice_id}/send?sendTo={email}",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json",
@@ -361,6 +400,7 @@ def send_invoice_email(invoice_id, customer_id, access_token, realm_id):
     if email:
         send_url += f"?sendTo={email}"
 
+    _claim()
     resp = requests.post(
         f"{_QBO_BASE}/{realm_id}/{send_url}",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json",
@@ -526,6 +566,27 @@ def _selfcheck():
            R(402, False, {"errors": [{"message": "card expired", "code": "PMT-4000"}]})))
     ok("error handles html",
        "HTML" in extract_charge_error(R(502, False, None, "<html>bad gateway</html>")))
+    # rate bucket: unarmed = no-op; armed waits then proceeds
+    seq = {"vals": [1.5, 0.0], "claims": 0, "slept": []}
+    class _RC:
+        def cursor(self): return self
+        def execute(self, q, params): seq["claims"] += 1
+        def fetchone(self): return [seq["vals"].pop(0)]
+        def commit(self): pass
+        def close(self): pass
+    _claim()
+    ok("unarmed bucket is a no-op", seq["claims"] == 0)
+    real_sleep = time.sleep
+    time.sleep = lambda s: seq["slept"].append(s)
+    try:
+        set_rate_limiter(_RC())
+        _claim()
+    finally:
+        time.sleep = real_sleep
+        set_rate_limiter(None)
+    ok("armed bucket waits then proceeds",
+       seq["claims"] == 2 and seq["slept"] == [1.5])
+
     note = build_payment_note("June Pool Maintenance | Inv# 456",
                               {"charge_id": "ch1", "auth_code": "A1",
                                "card_type": "Visa", "card_last4": "4242"})
