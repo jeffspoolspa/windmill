@@ -3,7 +3,12 @@
 # requests
 # wmill
 
-# f/qbo/drain_qbo_inbox — the QBO sync drainer (ADR 008 §1/§3 built).
+# f/service_billing/drain_qbo_inbox — the QBO sync drainer (ADR 008 §1/§3).
+#
+# Lives HERE (not f/qbo) deliberately: Windmill's bundler hands scripts in
+# the f/qbo folder an EMPTY module for f.billing._lib.qbo (folder-name /
+# module-segment collision, proven by probe 2026-07-14) — and the four
+# per-entity handlers are f/service_billing scripts anyway.
 #
 # ONE inbox per system, entity_type as a column: this single worker drains
 # billing.qbo_inbox and dispatches each unit to the per-entity refresh
@@ -25,10 +30,7 @@
 import psycopg2.extras
 
 from f.billing._lib.db import get_db_conn
-# qualified import: from-importing this symbol resolves as a module under
-# Windmill's bundler when the caller lives in f/qbo (name overlap with the
-# folder); the module-qualified call is bundler-proof
-import f.billing._lib.qbo as qbo_lib
+from f.billing._lib.qbo import set_rate_limiter
 
 import f.service_billing.refresh_invoice as refresh_invoice
 import f.service_billing.refresh_payment as refresh_payment
@@ -84,7 +86,7 @@ def reflect(unit):
 def main(max_units: int = PER_RUN_LIMIT):
     """Drain the QBO inbox until empty (or the per-run cap)."""
     conn = get_db_conn()
-    qbo_lib.set_rate_limiter(conn)  # ADR 008 §4: every QBO call claims
+    set_rate_limiter(conn)  # ADR 008 §4: every QBO call claims
     try:
         stats, results = {}, []
         for _ in range(max_units):

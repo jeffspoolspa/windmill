@@ -1,9 +1,0 @@
-summary: QBO inbox drainer (ADR 008 stream loop)
-description: 'fix: module-qualified rate-limiter import (bundler quirk in f/qbo)'
-lock: '!inline f/qbo/drain_qbo_inbox.script.lock'
-concurrency_key: qbo_api
-concurrency_time_window_s: 10
-concurrent_limit: 1
-has_on_behalf_of: false
-kind: script
-schema: null

@@ -1,6 +1,0 @@
-summary: tmp import probe
-description: tmp
-lock: '!inline f/qbo/_tmp_import_probe.script.lock'
-has_on_behalf_of: false
-kind: script
-schema: null
