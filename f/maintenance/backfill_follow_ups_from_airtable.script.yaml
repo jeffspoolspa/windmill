@@ -2,6 +2,8 @@ summary: Backfill historical Airtable follow-ups into maintenance.follow_ups
 description: 'One-shot batch import w/ customer+tech matching and media
   re-hosting. modes: dry_run|import_rows|rehost_media.'
 lock: '!inline f/maintenance/backfill_follow_ups_from_airtable.script.lock'
+concurrency_time_window_s: 0
+concurrent_limit: 1
 has_on_behalf_of: false
 kind: script
 schema: null

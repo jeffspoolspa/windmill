@@ -363,10 +363,84 @@ def _airtable_fields(sb, r, M):
     return fields
 
 
+def _push_pending_app_rows(sb, headers):
+    # Real-time push of new app submissions to Airtable. Fired per-insert by the
+    # (guarded) wake trigger and as a daily backstop. concurrent_limit=1 on this
+    # script serializes pushes so two quick submissions can't double-create.
+    fu = sb.schema("maintenance").table("follow_ups")
+    rows = (fu.select("*").eq("source", "app").is_("airtable_record_id", "null")
+            .lt("sync_attempts", 5).order("created_at").limit(200).execute().data)
+    if not rows:
+        return {"mode": "push", "pushed": 0}
+    cust_ids = list({r["customer_id"] for r in rows if r.get("customer_id")})
+    emp_ids = list({r["tech_employee_id"] for r in rows if r.get("tech_employee_id")})
+    disp = {c["id"]: c.get("display_name") for c in
+            (sb.table("Customers").select("id,display_name").in_("id", cust_ids).execute().data if cust_ids else [])}
+    enm = {}
+    for e in (sb.table("employees").select("id,first_name,last_name").in_("id", emp_ids).execute().data if emp_ids else []):
+        enm[e["id"]] = " ".join(w.title() for w in (e.get("first_name") or "", e.get("last_name") or "") if w)
+    M = {"disp": disp, "emp_name": enm}
+    pushed = 0
+    for r in rows:
+        att = (r.get("sync_attempts") or 0) + 1
+        try:
+            resp = requests.post(AIRTABLE_URL, headers=headers,
+                                 json={"records": [{"fields": _airtable_fields(sb, r, M)}], "typecast": True},
+                                 timeout=30)
+            if resp.ok:
+                fu.update({"airtable_record_id": resp.json()["records"][0]["id"], "airtable_synced_at": "now()",
+                           "sync_error": None, "sync_attempts": att}).eq("id", r["id"]).execute()
+                pushed += 1
+            else:
+                fu.update({"sync_error": resp.text[:500], "sync_attempts": att}).eq("id", r["id"]).execute()
+        except Exception as e:
+            fu.update({"sync_error": str(e)[:500], "sync_attempts": att}).eq("id", r["id"]).execute()
+    return {"mode": "push", "pushed": pushed}
+
+
+def _rehost_media(sb, batch, after_id):
+    q = (sb.schema("maintenance").table("follow_ups")
+         .select("id,media").in_("source", ["airtable_backfill", "airtable_ingest"]))
+    if after_id:
+        q = q.gt("id", after_id)
+    rows = q.order("id").limit(batch).execute().data
+    if not rows:
+        return {"mode": "rehost_media", "done": True, "rehosted": 0}
+    done = 0
+    for row in rows:
+        media = row.get("media") or []
+        if not any("source_url" in m for m in media):
+            continue
+        newm = []
+        for i, m in enumerate(media):
+            if "path" in m or not m.get("source_url"):
+                newm.append(m)
+                continue
+            resp = requests.get(m["source_url"], timeout=120)
+            if not resp.ok:
+                newm.append(m)
+                continue
+            ext = "mp4" if m["type"] == "video" else "jpg"
+            path = f"backfill/{row['id']}/{i}.{ext}"
+            sb.storage.from_("follow-ups").upload(path, resp.content,
+                {"content-type": resp.headers.get("Content-Type", "application/octet-stream"), "upsert": "true"})
+            newm.append({"type": m["type"], "path": path})
+        sb.schema("maintenance").table("follow_ups").update({"media": newm}).eq("id", row["id"]).execute()
+        done += 1
+    return {"mode": "rehost_media", "rehosted": done, "last_id": rows[-1]["id"], "done": len(rows) < batch}
+
+
 def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300,
          after_id: str = "", apply: bool = True):
     sb = _sb()
     headers = {"Authorization": f"Bearer {_at_key()}", "Content-Type": "application/json"}
+
+    # Lightweight modes skip the full Airtable load + matcher build.
+    if mode == "push":
+        return _push_pending_app_rows(sb, headers)
+    if mode == "rehost_media":
+        return _rehost_media(sb, batch, after_id)
+
     recs = load_airtable(headers)
     recs = [r for r in recs if _created(r)[:10] >= since]
     M = build_maps(sb)
@@ -408,43 +482,6 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300,
                 chunk, on_conflict="airtable_record_id").execute()
             n += len(chunk)
         return {"mode": "import_rows", "imported": n}
-
-    if mode == "rehost_media":
-        # Forward cursor over backfilled rows so re-runs make progress. Caller
-        # loops passing after_id=last_id until done=True.
-        q = (sb.schema("maintenance").table("follow_ups")
-             .select("id,media").eq("source", "airtable_backfill"))
-        if after_id:
-            q = q.gt("id", after_id)
-        rows = q.order("id").limit(batch).execute().data
-        if not rows:
-            return {"mode": "rehost_media", "done": True, "rehosted": 0}
-        done = 0
-        for row in rows:
-            media = row.get("media") or []
-            if not any("source_url" in m for m in media):
-                continue
-            newm = []
-            for i, m in enumerate(media):
-                if "path" in m or not m.get("source_url"):
-                    newm.append(m)
-                    continue
-                resp = requests.get(m["source_url"], timeout=120)
-                if not resp.ok:
-                    newm.append(m)  # leave for retry
-                    continue
-                ext = "mp4" if m["type"] == "video" else "jpg"
-                path = f"backfill/{row['id']}/{i}.{ext}"
-                sb.storage.from_("follow-ups").upload(
-                    path, resp.content,
-                    {"content-type": resp.headers.get("Content-Type", "application/octet-stream"),
-                     "upsert": "true"})
-                newm.append({"type": m["type"], "path": path})
-            sb.schema("maintenance").table("follow_ups").update(
-                {"media": newm}).eq("id", row["id"]).execute()
-            done += 1
-        return {"mode": "rehost_media", "rehosted": done,
-                "last_id": rows[-1]["id"], "done": len(rows) < batch}
 
     if mode == "daily_sync":
         # One daily reconcile: push pending app rows -> Airtable, ingest Airtable
