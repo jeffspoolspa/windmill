@@ -91,11 +91,15 @@ def norm(s):
     return " ".join(sorted(re.findall(r"[a-z0-9]+", _strip_notes(s).lower())))
 
 def surname(s):
+    # Household match keys off the family surname. Residential "LAST, FIRST"
+    # uses the part before the comma; a bare single-word name uses that word.
+    # Multi-word commercial names (esp. with a "- BWK/CAM" branch suffix) return
+    # "" so they can't false-match on a branch code or a stray token.
     s = _strip_notes(s).strip()
     if "," in s:
         return re.sub(r"[^a-z]", "", s.split(",")[0].lower())
-    toks = re.findall(r"[a-z]+", s.lower())
-    return toks[-1] if toks else ""
+    toks = [t for t in re.findall(r"[a-z]+", s.lower()) if t.upper() not in BRANCH_CODE]
+    return toks[0] if len(toks) == 1 else ""
 
 def _paginate(sb, table, select, schema=None):
     out, start = [], 0
