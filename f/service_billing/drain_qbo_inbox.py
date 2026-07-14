@@ -83,8 +83,9 @@ def reflect(unit):
     return {"status": "skipped", "reason": f"no handler for entity_type {et}"}
 
 
-def main(max_units: int = PER_RUN_LIMIT):
+def main(max_units: int = 100):
     """Drain the QBO inbox until empty (or the per-run cap)."""
+    max_units = max_units or PER_RUN_LIMIT  # Windmill passes null for unset args
     conn = get_db_conn()
     set_rate_limiter(conn)  # ADR 008 §4: every QBO call claims
     try:

@@ -1,9 +1,5 @@
-summary: 'QBO inbox drainer (ADR 008 stream loop): one inbox per system, entity
-  dispatch inside'
-description: 'claims billing.qbo_inbox (priority order, dead-letter, Invoice
-  supersession) and reflects entities via the per-entity refresh handlers
-  in-process. Lives in f/service_billing: the f/qbo folder gets an empty module
-  for f.billing._lib.qbo (bundler collision, probed 2026-07-14).'
+summary: QBO inbox drainer (ADR 008 stream loop)
+description: 'fix: literal max_units default (Windmill passes null for constant defaults)'
 lock: '!inline f/service_billing/drain_qbo_inbox.script.lock'
 concurrency_key: qbo_api
 concurrency_time_window_s: 10
