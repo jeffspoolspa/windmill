@@ -1,3 +1,4 @@
+# workspace-dependencies-mode: manual
 # py: 3.12
 anyio==4.14.2
 certifi==2026.6.17

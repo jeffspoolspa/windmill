@@ -1,5 +1,6 @@
-summary: Drop manual recheck loop (Phase 2B)
-description: fn_set_credits_ok_from_payment trigger handles fan-out automatically.
+summary: Payment cache handler
+description: 'fix: deleted-in-QBO payments DELETE the mirror row (was: stamp
+  sync_error, leaving unapplied_amt offerable + Lines double-counting)'
 lock: '!inline f/service_billing/refresh_payment.script.lock'
 has_on_behalf_of: false
 kind: script

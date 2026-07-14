@@ -244,22 +244,26 @@ def main(qbo_payment_id: str, qbo_body: dict | None = None):
         resp = qbo_get(f"payment/{qbo_payment_id}", access_token, realm_id)
 
         if resp.status_code == 404:
+            # Deleted in QBO -> the mirror row goes too. The old behavior
+            # (stamp sync_error, keep the row) left the dead payment's
+            # unapplied_amt offerable as a credit and its application Lines
+            # counting in balance derivations — the double-count class the
+            # integrity probe surfaced 2026-07-14. The deletion event
+            # survives in webhook_log/drift_log; our own ledgers are
+            # processing_attempts / payment_invoice_links, not the cache.
             conn = get_db_conn()
             try:
                 cur = conn.cursor()
-                cur.execute("""
-                    UPDATE billing.customer_payments
-                    SET sync_state = 'synced',
-                        sync_state_changed_at = now(),
-                        sync_error = 'deleted in QBO',
-                        fetched_at = now()
-                    WHERE qbo_payment_id = %s
-                """, (qbo_payment_id,))
+                cur.execute(
+                    "DELETE FROM billing.customer_payments WHERE qbo_payment_id = %s",
+                    (qbo_payment_id,))
+                deleted = cur.rowcount
                 conn.commit()
                 cur.close()
             finally:
                 conn.close()
-            return {"status": "deleted", "qbo_payment_id": qbo_payment_id}
+            return {"status": "deleted", "qbo_payment_id": qbo_payment_id,
+                    "cache_row_removed": bool(deleted)}
 
         if not resp.ok:
             return {"status": "error",
