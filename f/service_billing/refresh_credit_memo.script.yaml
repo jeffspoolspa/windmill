@@ -1,12 +1,5 @@
-summary: Single-CreditMemo QBO -> Supabase refresh; targeted recheck of linked invoices
-description: Webhook-driven refresh script for the CreditMemo entity. Mirrors
-  refresh_payment but fetches a CreditMemo from QBO. Stores in
-  billing.customer_payments with type='credit_memo' and qbo_payment_id='CM-{Id}'
-  (matches pull_qbo_credits' shape). Updates billing.payment_invoice_links from
-  LinkedTxn entries and recalls billing.recheck_invoice_status for linked
-  invoices. Pairs with the new trg_recheck_credits_on_payment_change trigger
-  which fans out to the customer's full open-invoice set on any unapplied_amt
-  change.
+summary: CreditMemo cache handler
+description: accepts qbo_body kwarg for dispatcher parity (CDC/inbox); refetches regardless
 lock: '!inline f/service_billing/refresh_credit_memo.script.lock'
 concurrency_time_window_s: 0
 concurrent_limit: 5

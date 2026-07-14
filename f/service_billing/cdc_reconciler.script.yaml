@@ -1,14 +1,8 @@
-summary: Survive dropped pooler connections (reconnect + retry once)
-description: Db wrapper reconnects on OperationalError/InterfaceError and
-  retries the failed operation once; save_cursor, the drift-error logger, and
-  end-of-run sweeps use the live connection. Fixes the 2026-06-12 cascade
-  failure (job 019ebd19-2f41-1ceb-b17f-9bc44fcf1c67). Header retrofitted to
-  SCRIPT_HEADER convention.
+summary: CDC probe (QBO drift backstop) + CreditMemo entity
+description: 'CreditMemo joins the CDC entity list (probe-gap fix 2026-07-14):
+  no drift-compare (CM- key prefix), every surfaced CM re-refreshes via
+  refresh_credit_memo'
 lock: '!inline f/service_billing/cdc_reconciler.script.lock'
 has_on_behalf_of: false
 kind: script
-schema:
-  $schema: https://json-schema.org/draft/2020-12/schema
-  type: object
-  properties: {}
-  required: []
+schema: null

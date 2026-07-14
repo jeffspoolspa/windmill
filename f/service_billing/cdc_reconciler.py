@@ -98,11 +98,12 @@ import wmill
 import f.service_billing.refresh_invoice as refresh_invoice
 import f.service_billing.refresh_payment as refresh_payment
 import f.service_billing.refresh_customer as refresh_customer
+import f.service_billing.refresh_credit_memo as refresh_credit_memo
 
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
 
-ENTITIES_TO_RECONCILE = ["Invoice", "Payment", "Customer"]
+ENTITIES_TO_RECONCILE = ["Invoice", "Payment", "Customer", "CreditMemo"]
 DRIFT_LOG_RETENTION_DAYS = 30
 
 # (schema, table, id_col). Table names are CASE-SENSITIVE — Customers in
@@ -116,9 +117,10 @@ ENTITY_TO_TABLE = {
 # Maps entity_type → (refresh_module, id_kwarg_name). Each refresh module
 # exposes a main() that accepts the id and an optional qbo_body=.
 INLINE_REFRESH_BY_ENTITY = {
-    "Invoice":  (refresh_invoice,  "qbo_invoice_id"),
-    "Payment":  (refresh_payment,  "qbo_payment_id"),
-    "Customer": (refresh_customer, "qbo_customer_id"),
+    "Invoice":    (refresh_invoice,     "qbo_invoice_id"),
+    "Payment":    (refresh_payment,     "qbo_payment_id"),
+    "Customer":   (refresh_customer,    "qbo_customer_id"),
+    "CreditMemo": (refresh_credit_memo, "qbo_credit_memo_id"),
 }
 
 
@@ -649,13 +651,29 @@ def main():
         progress_cursor = cursor
 
         for qbo_updated, entity_type, qbo_entity in flat:
+            entity_id = qbo_entity.get("Id", "<unknown>")
+
+            # CreditMemo: probe-gap fix 2026-07-14. No drift-compare (cache
+            # rows are keyed 'CM-{id}' in customer_payments) — every
+            # CDC-surfaced CM re-refreshes; idempotent, single-digit monthly
+            # volume, and CMs feed the pre-charge credits gate.
+            if entity_type == "CreditMemo":
+                rr = trigger_inline_refresh("CreditMemo", entity_id, qbo_entity)
+                entities_processed += 1
+                if rr and rr.get("error"):
+                    refresh_failures.append({
+                        "entity_type": "CreditMemo", "entity_id": entity_id,
+                        "error": rr["error"],
+                    })
+                if qbo_updated and qbo_updated > progress_cursor:
+                    progress_cursor = qbo_updated
+                continue
+
             schema, table, id_col = ENTITY_TO_TABLE.get(
                 entity_type, (None, None, None),
             )
             if not schema:
                 continue
-
-            entity_id = qbo_entity.get("Id", "<unknown>")
             try:
                 ts, drift_kind, refresh_result = db.run(
                     process_entity, entity_type, qbo_entity, schema, table, id_col,

@@ -80,7 +80,9 @@ def parse_qbo_timestamp(ts):
         return None
 
 
-def main(qbo_credit_memo_id: str, operation: str = ""):
+def main(qbo_credit_memo_id: str, operation: str = "", qbo_body: dict | None = None):
+    # qbo_body accepted for dispatcher parity (CDC/inbox); this handler
+    # refetches regardless — CM applications ripple beyond the body.
     """
     Args:
       qbo_credit_memo_id: Required. QBO Id of the CreditMemo (raw, no CM- prefix).
