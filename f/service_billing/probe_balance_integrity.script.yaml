@@ -1,7 +1,6 @@
-summary: 'Ledger-healing probe: discover + enqueue missing balance inputs'
-description: walks mismatched invoices LinkedTxn, enqueues missing
-  Payments/CreditMemos (source=probe), logs unmodeled txn types to drift_log as
-  the entity-class evidence
+summary: Ledger-healing probe (+ reverse diff for stale applications)
+description: missing inputs enqueued AND cache-side applications the leader no
+  longer lists (dead payments 404 -> mirror delete)
 lock: '!inline f/service_billing/probe_balance_integrity.script.lock'
 concurrency_key: qbo_api
 concurrency_time_window_s: 10

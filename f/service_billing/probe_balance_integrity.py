@@ -95,21 +95,35 @@ def main(limit: int = 25):
                 continue
 
             known = {r["qbo_payment_id"] for r in _rows(conn, KNOWN_APPLICATIONS, (inv_id,))}
+            leader_links = set()
             missing, unmodeled = [], []
             for lt in inv.get("LinkedTxn") or []:
-                t, tid = lt.get("TxnType"), lt.get("TxnId")
-                if not t or not tid:
+                ttype, tid = lt.get("TxnType"), lt.get("TxnId")
+                if not ttype or not tid:
                     continue
-                if t in MODELED_TYPES:
-                    cache_key = f"CM-{tid}" if t == "CreditMemo" else tid
+                if ttype in MODELED_TYPES:
+                    cache_key = f"CM-{tid}" if ttype == "CreditMemo" else tid
+                    leader_links.add(cache_key)
                     if cache_key not in known:
-                        _enqueue(conn, t, tid)
-                        missing.append(f"{t}:{tid}")
+                        _enqueue(conn, ttype, tid)
+                        missing.append(f"{ttype}:{tid}")
                         stats["enqueued"] += 1
                 else:
-                    _log_unmodeled(conn, inv_id, t, tid)
-                    unmodeled.append(f"{t}:{tid}")
+                    _log_unmodeled(conn, inv_id, ttype, tid)
+                    unmodeled.append(f"{ttype}:{tid}")
                     stats["unmodeled"] += 1
+
+            # REVERSE diff: applications WE hold that the leader no longer
+            # lists = stale/dead payments (deleted-and-reentered class).
+            # Their refresh 404s -> the mirror row deletes -> the double
+            # count drops out of the derivation.
+            stale = []
+            for cache_key in known - leader_links:
+                etype = "CreditMemo" if cache_key.startswith("CM-") else "Payment"
+                eid = cache_key[3:] if cache_key.startswith("CM-") else cache_key
+                _enqueue(conn, etype, eid)
+                stale.append(f"{etype}:{eid}")
+                stats["stale_enqueued"] = stats.get("stale_enqueued", 0) + 1
 
             # refresh the invoice snapshot too (cheap, coalesced) so
             # leader_balance/raw are current for the next integrity read
@@ -118,10 +132,12 @@ def main(limit: int = 25):
             results.append({"invoice": inv_id, "doc": m["doc_number"],
                             "diff": float(m["diff"]),
                             "missing_enqueued": missing or None,
+                            "stale_enqueued": stale or None,
                             "unmodeled_types": unmodeled or None,
                             "linked_txn_count": len(inv.get("LinkedTxn") or [])})
             print(f"  {inv_id} (#{m['doc_number']}, diff {m['diff']}): "
-                  f"+{len(missing)} enqueued, {len(unmodeled)} unmodeled")
+                  f"+{len(missing)} missing, +{len(stale)} stale, "
+                  f"{len(unmodeled)} unmodeled")
 
         return {"status": "ok", "mismatches": len(mismatches), "stats": stats,
                 "results": results}
