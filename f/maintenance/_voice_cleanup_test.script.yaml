@@ -1,0 +1,6 @@
+summary: 'temp: voice cleanup demo'
+description: temp
+lock: '!inline f/maintenance/_voice_cleanup_test.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
