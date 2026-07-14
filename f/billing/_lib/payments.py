@@ -44,6 +44,7 @@ from f.billing._lib.wal import (
     latest_attempt, create_attempt, update_attempt,
     insert_webhook_expectation, dumps,
 )
+from f.billing._lib.cache import echo_payment
 
 # Intuit's Request-Id idempotency cache window. Past it, an uncertain
 # attempt's key would be treated as a NEW charge — so we expire the attempt
@@ -261,6 +262,10 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
                    attempt_id=str(attempt["id"]), charge_id=cr.get("charge_id"),
                    error=rec.get("error"), resumed=resumed)
     update_attempt(conn, attempt["id"], qbo_payment_id=rec["payment_id"])
+    if rec.get("payment"):
+        # write-time verified echo: the cache shows this payment at commit
+        # time, and the payment's own webhook moot-finishes via supersession
+        echo_payment(conn, rec["payment"])
     insert_webhook_expectation(conn, "Payment", rec["payment_id"])
 
     # ── receipt: best-effort, after the money is durable, switched by DATA ──
@@ -440,11 +445,20 @@ def apply_credits(conn, customer_id, invoice_id, access_token, realm_id,
             out["failed"].append({**entry, "error": r["error"]})
             out["errors"].append(f"{c['qbo_payment_id']}: {r['error']}")
             continue
-        # verified echo of OUR apply: cache + link ledger
         cur = conn.cursor()
-        cur.execute(
-            "UPDATE billing.customer_payments SET unapplied_amt = GREATEST(unapplied_amt - %s, 0) "
-            "WHERE qbo_payment_id = %s", (amount, c["qbo_payment_id"]))
+        if r.get("payment") and not r.get("is_cm_link"):
+            # WRITE-TIME VERIFIED ECHO: the response carries the payment's
+            # TRUE UnappliedAmt — write what QBO said, not what we computed
+            echo_payment(conn, r["payment"])
+        else:
+            if r.get("payment"):
+                echo_payment(conn, r["payment"])  # the new zero-total link payment
+            # the CREDIT MEMO's remaining balance is a cross-entity RIPPLE
+            # (the response describes the link payment, not the CM) — this
+            # decrement is COMPUTED, converged by pull_qbo_credits/CDC
+            cur.execute(
+                "UPDATE billing.customer_payments SET unapplied_amt = GREATEST(unapplied_amt - %s, 0) "
+                "WHERE qbo_payment_id = %s", (amount, c["qbo_payment_id"]))
         cur.execute(
             """INSERT INTO billing.payment_invoice_links
                  (payment_id, invoice_id, amount, applied_via)
@@ -467,7 +481,7 @@ def _selfcheck():
                               "insert_webhook_expectation", "get_qbo_invoice_details",
                               "charge_card", "charge_bank_account",
                               "record_qbo_payment", "send_receipt", "apply_credit",
-                              "load_applicable_credits")}
+                              "load_applicable_credits", "echo_payment")}
     checks, calls = [], []
     def ok(name, cond):
         checks.append((name, bool(cond)))
@@ -494,7 +508,14 @@ def _selfcheck():
             r["amount"] = amount  # Intuit echoes the charged amount
         return r
     def fake_record(cust, amount, cr, ref, memo, at, rid, lines):
-        calls.append(f"record:{amount}:{len(lines)}"); return state["record"]
+        calls.append(f"record:{amount}:{len(lines)}")
+        r = dict(state["record"])
+        if r.get("success"):
+            r.setdefault("payment", {"Id": r.get("payment_id"),
+                                     "UnappliedAmt": 0, "TotalAmt": amount})
+        return r
+    def fake_echo_payment(conn, body):
+        calls.append(f"echo_payment:{body.get('Id')}")
     def fake_receipt(pid, email, at, rid):
         calls.append(f"receipt:{email}"); return state["receipt"]
 
@@ -502,7 +523,7 @@ def _selfcheck():
              update_attempt=fake_update, insert_webhook_expectation=fake_expect,
              get_qbo_invoice_details=fake_fresh, charge_card=fake_charge,
              charge_bank_account=fake_charge, record_qbo_payment=fake_record,
-             send_receipt=fake_receipt)
+             send_receipt=fake_receipt, echo_payment=fake_echo_payment)
     try:
         base_intent = {"stage": "maint", "qbo_invoice_id": "I1", "channel": "card",
                        "payment_method_id": "pm1", "customer_id": "C1",
@@ -556,6 +577,8 @@ def _selfcheck():
            r["status"] == "succeeded" and r["payment_id"] == "P77"
            and r["receipt_sent"] is True and "expect:Payment" in calls
            and any(u.get("status") == "succeeded" for u in state["updates"]))
+        ok("recorded payment is echoed from the write RESPONSE",
+           "echo_payment:P77" in calls)
 
         # 6. receipt_email=None -> no receipt call (data switch, not a flag)
         calls.clear()
@@ -615,14 +638,17 @@ def _selfcheck():
             [{"qbo_payment_id": "C1", "type": "payment", "unapplied_amt": 30.0},
              {"qbo_payment_id": "C2", "type": "credit_memo", "unapplied_amt": 30.0}])[1]
         g["apply_credit"] = lambda cid, ctype, inv, cref, amt, at, rid: (
-            applied.append((cid, amt)), {"success": True})[1]
+            applied.append((cid, amt)),
+            {"success": True, "payment": {"Id": cid, "UnappliedAmt": 30.0 - amt},
+             **({"is_cm_link": True} if ctype == "credit_memo" else {})})[1]
         state["fresh"] = {"I1": {"balance": 40.0, "email_status": None}}
         r = apply_credits(fconn, "C9", "I1", "at", "rid", ref_match="WO42")
         ok("apply_credits caps at balance and stops at zero",
            applied == [("C1", 30.0), ("C2", 10.0)]
            and r["remaining_balance"] == 0 and "credits:WO42" in calls)
-        ok("apply_credits echoes unapplied_amt + link ledger per success",
-           sum("customer_payments SET unapplied_amt" in q for q in fconn.sql) == 2
+        ok("payment credits echo the RESPONSE; only the CM ripple is computed",
+           "echo_payment:C1" in calls and "echo_payment:C2" in calls
+           and sum("customer_payments SET unapplied_amt" in q for q in fconn.sql) == 1
            and sum("payment_invoice_links" in q for q in fconn.sql) == 2)
 
         # 12. apply_credits halts on a failed fresh read; caller-picked

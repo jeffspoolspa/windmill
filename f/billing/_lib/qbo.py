@@ -331,7 +331,8 @@ def record_qbo_payment(customer_id, amount, charge_result, payment_ref, memo_pre
     payment = resp.json().get("Payment", {})
     return {"success": True, "payment_id": payment.get("Id"),
             "payment_ref": payment.get("PaymentRefNum"),
-            "total_amt": payment.get("TotalAmt")}
+            "total_amt": payment.get("TotalAmt"),
+            "payment": payment}  # the write RESPONSE = a free verified echo
 
 
 # ── send primitives — ONE call each (ADR 009 split) ─────────────────────────
@@ -484,8 +485,13 @@ def apply_credit(credit_id, credit_type, invoice_id, customer_ref, amount,
                           "LinkedTxn": [{"TxnId": cm_id, "TxnType": "CreditMemo"},
                                         {"TxnId": invoice_id, "TxnType": "Invoice"}]}],
             })
-            return {"success": True} if resp.ok else {
-                "success": False, "error": f"CM apply: {resp.text[:200]}"}
+            if not resp.ok:
+                return {"success": False, "error": f"CM apply: {resp.text[:200]}"}
+            # response = the zero-total linking Payment we just created; the
+            # credit memo's own remaining balance is a RIPPLE (not in this
+            # body) — caller converges it
+            return {"success": True,
+                    "payment": resp.json().get("Payment", {}), "is_cm_link": True}
         pmt_resp = qbo_get(f"payment/{credit_id}", access_token, realm_id)
         if not pmt_resp.ok:
             return {"success": False, "error": f"fetch payment: {pmt_resp.status_code}"}
@@ -496,8 +502,10 @@ def apply_credit(credit_id, credit_type, invoice_id, customer_ref, amount,
         })
         payment["sparse"] = True
         resp = qbo_post("payment", access_token, realm_id, payment)
-        return {"success": True} if resp.ok else {
-            "success": False, "error": f"payment apply: {resp.text[:200]}"}
+        if not resp.ok:
+            return {"success": False, "error": f"payment apply: {resp.text[:200]}"}
+        # response = the updated Payment incl. its TRUE UnappliedAmt
+        return {"success": True, "payment": resp.json().get("Payment", {})}
     except Exception as e:
         return {"success": False, "error": str(e)[:200]}
 

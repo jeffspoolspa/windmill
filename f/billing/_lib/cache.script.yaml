@@ -1,5 +1,5 @@
-summary: Verified-echo cache writes on billing.invoices (ADR 009 §C)
-description: echo_invoice/echo_balance/mark_emailed — one write per proven fact
+summary: '+ echo_payment: OCC-guarded write-time echo from the write response'
+description: '+ echo_payment: OCC-guarded write-time echo from the write response'
 lock: '!inline f/billing/_lib/cache.script.lock'
 has_on_behalf_of: false
 kind: script

@@ -1,5 +1,5 @@
-summary: '+ ADR 008 §4 token bucket: set_rate_limiter + per-call claims'
-description: '+ ADR 008 §4 token bucket: set_rate_limiter + per-call claims'
+summary: write primitives return their response bodies (free verified echoes)
+description: write primitives return their response bodies (free verified echoes)
 lock: '!inline f/billing/_lib/qbo.script.lock'
 has_on_behalf_of: false
 kind: script

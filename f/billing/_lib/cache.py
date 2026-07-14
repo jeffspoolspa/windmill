@@ -78,6 +78,45 @@ def mark_emailed(conn, qbo_invoice_id):
     conn.commit(); cur.close()
 
 
+def echo_payment(conn, payment_body):
+    """Write-time echo of a QBO Payment WE just wrote (create or apply) —
+    the write RESPONSE carries the full post-write body, so this is a
+    verified echo at zero extra API cost. OCC-guarded on the leader's
+    LastUpdatedTime (ADR 008 §5): a delayed echo can never clobber a newer
+    webhook/CDC-driven write. The body must come from QBO's response —
+    never synthesized."""
+    meta = payment_body.get("MetaData") or {}
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO billing.customer_payments
+          (qbo_payment_id, qbo_customer_id, type, unapplied_amt, total_amt,
+           txn_date, ref_num, memo, raw, fetched_at, qbo_last_updated_time)
+        VALUES (%s, %s, 'payment', %s, %s, %s, %s, %s, %s::jsonb, now(), %s)
+        ON CONFLICT (qbo_payment_id) DO UPDATE SET
+          qbo_customer_id       = EXCLUDED.qbo_customer_id,
+          unapplied_amt         = EXCLUDED.unapplied_amt,
+          total_amt             = EXCLUDED.total_amt,
+          txn_date              = EXCLUDED.txn_date,
+          ref_num               = EXCLUDED.ref_num,
+          memo                  = EXCLUDED.memo,
+          raw                   = EXCLUDED.raw,
+          fetched_at            = now(),
+          qbo_last_updated_time = EXCLUDED.qbo_last_updated_time
+        WHERE billing.customer_payments.qbo_last_updated_time IS NULL
+           OR billing.customer_payments.qbo_last_updated_time
+              <= EXCLUDED.qbo_last_updated_time
+    """, (payment_body.get("Id"),
+          (payment_body.get("CustomerRef") or {}).get("value"),
+          float(payment_body.get("UnappliedAmt", 0) or 0),
+          float(payment_body.get("TotalAmt", 0) or 0),
+          payment_body.get("TxnDate"),
+          payment_body.get("PaymentRefNum"),
+          payment_body.get("PrivateNote"),
+          _dumps(payment_body),
+          meta.get("LastUpdatedTime")))
+    conn.commit(); cur.close()
+
+
 def _selfcheck():
     checks = []
     def ok(name, cond):
@@ -104,6 +143,15 @@ def _selfcheck():
         "UPDATE billing.invoices SET balance = %s WHERE"))
     mark_emailed(c, "I1")
     ok("mark_emailed is one column", "email_status = 'EmailSent'" in c.executed[2][0])
+    echo_payment(c, {"Id": "P1", "CustomerRef": {"value": "C1"}, "TotalAmt": "50",
+                     "UnappliedAmt": "12.5", "TxnDate": "2026-07-14",
+                     "MetaData": {"LastUpdatedTime": "2026-07-14T12:00:00-07:00"}})
+    sql4, params4 = c.executed[3]
+    ok("echo_payment upserts the response body OCC-guarded",
+       "ON CONFLICT (qbo_payment_id)" in sql4
+       and "qbo_last_updated_time IS NULL" in sql4
+       and params4[0] == "P1" and params4[2] == 12.5
+       and params4[-1] == "2026-07-14T12:00:00-07:00")
 
     failed = [n for n, p in checks if not p]
     return {"passed": len(checks) - len(failed), "total": len(checks), "failed": failed}

@@ -1,5 +1,7 @@
-summary: + billing.charges reflection (Intuit's fact) + attempt lines column
-description: + billing.charges reflection (Intuit's fact) + attempt lines column
+summary: 'write-time echoes: recorded payments + credit applies echo the
+  RESPONSE; only the CM ripple stays computed'
+description: 'write-time echoes: recorded payments + credit applies echo the
+  RESPONSE; only the CM ripple stays computed'
 lock: '!inline f/billing/_lib/payments.script.lock'
 has_on_behalf_of: false
 kind: script
