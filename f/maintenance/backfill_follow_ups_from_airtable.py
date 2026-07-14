@@ -173,8 +173,10 @@ def build_maps(sb):
     pool = {}
     disp = {}
     phone_idx = {}
+    cust_phone = {}
     for c in custs:
         disp[c["id"]] = c.get("display_name")
+        cust_phone[c["id"]] = c.get("phone")
         for v in (c.get("display_name"),
                   f"{c.get('first_name') or ''} {c.get('last_name') or ''}",
                   c.get("company"), c.get("account_name")):
@@ -214,7 +216,8 @@ def build_maps(sb):
     emp_name = {e["id"]: " ".join(w.title() for w in (e["first"], e["last"]) if w) for e in E}
 
     return {"pool": pool, "pool_keys": pool_keys, "surn": surn, "phone_idx": phone_idx,
-            "byfirst": byfirst, "find_emp": find_emp, "disp": disp, "emp_name": emp_name}
+            "byfirst": byfirst, "find_emp": find_emp, "disp": disp, "emp_name": emp_name,
+            "cust_phone": cust_phone}
 
 
 def match_customer(name, phone, M):
@@ -352,6 +355,9 @@ def _airtable_fields(sb, r, M):
         "Issue": r.get("issue"),
         "Description of Issue": r.get("description") or "",
     }
+    phone = M.get("cust_phone", {}).get(r.get("customer_id"))
+    if phone:
+        fields["Phone Number"] = phone
     if r.get("equipment_off") is not None:
         fields["Equipment Off?"] = "TRUE" if r["equipment_off"] else "FALSE"
     if r.get("next_steps"):
@@ -374,12 +380,14 @@ def _push_pending_app_rows(sb, headers):
         return {"mode": "push", "pushed": 0}
     cust_ids = list({r["customer_id"] for r in rows if r.get("customer_id")})
     emp_ids = list({r["tech_employee_id"] for r in rows if r.get("tech_employee_id")})
-    disp = {c["id"]: c.get("display_name") for c in
-            (sb.table("Customers").select("id,display_name").in_("id", cust_ids).execute().data if cust_ids else [])}
+    custs = (sb.table("Customers").select("id,display_name,phone").in_("id", cust_ids).execute().data
+             if cust_ids else [])
+    disp = {c["id"]: c.get("display_name") for c in custs}
+    cust_phone = {c["id"]: c.get("phone") for c in custs}
     enm = {}
     for e in (sb.table("employees").select("id,first_name,last_name").in_("id", emp_ids).execute().data if emp_ids else []):
         enm[e["id"]] = " ".join(w.title() for w in (e.get("first_name") or "", e.get("last_name") or "") if w)
-    M = {"disp": disp, "emp_name": enm}
+    M = {"disp": disp, "emp_name": enm, "cust_phone": cust_phone}
     pushed = 0
     for r in rows:
         att = (r.get("sync_attempts") or 0) + 1
