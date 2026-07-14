@@ -230,10 +230,25 @@ def match_customer(name, phone, M):
         ids = M["phone_idx"].get(p)
         if ids and len(ids) == 1:
             return next(iter(ids)), "phone"
-    cands = M["surn"].get(surname(name), [])
-    if len(cands) == 1:
-        return cands[0], "household"
-    return None, ("household_ambig" if len(cands) > 1 else "none")
+    # Household: residential ticket named after a family member whose account is
+    # under another member. Comma form -> the surname; a bare "First Last" tries
+    # both tokens; match only if exactly one task-linked household results.
+    hs = _strip_notes(name).strip()
+    htoks = re.findall(r"[a-z]+", hs.lower())
+    if "," in hs:
+        hkeys = [re.sub(r"[^a-z]", "", hs.split(",")[0].lower())]
+    elif len(htoks) == 1:
+        hkeys = htoks
+    elif len(htoks) == 2 and not any(t.upper() in BRANCH_CODE for t in htoks):
+        hkeys = htoks
+    else:
+        hkeys = []
+    hh = set()
+    for hk in hkeys:
+        hh.update(M["surn"].get(hk, []))
+    if len(hh) == 1:
+        return next(iter(hh)), "household"
+    return None, ("household_ambig" if len(hh) > 1 else "none")
 
 
 def match_tech(name, tdate, M):
