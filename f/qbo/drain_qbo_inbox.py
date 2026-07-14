@@ -25,7 +25,10 @@
 import psycopg2.extras
 
 from f.billing._lib.db import get_db_conn
-from f.billing._lib.qbo import set_rate_limiter
+# qualified import: from-importing this symbol resolves as a module under
+# Windmill's bundler when the caller lives in f/qbo (name overlap with the
+# folder); the module-qualified call is bundler-proof
+import f.billing._lib.qbo as qbo_lib
 
 import f.service_billing.refresh_invoice as refresh_invoice
 import f.service_billing.refresh_payment as refresh_payment
@@ -81,7 +84,7 @@ def reflect(unit):
 def main(max_units: int = PER_RUN_LIMIT):
     """Drain the QBO inbox until empty (or the per-run cap)."""
     conn = get_db_conn()
-    set_rate_limiter(conn)  # ADR 008 §4: every QBO call claims
+    qbo_lib.set_rate_limiter(conn)  # ADR 008 §4: every QBO call claims
     try:
         stats, results = {}, []
         for _ in range(max_units):

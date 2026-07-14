@@ -1,8 +1,5 @@
-summary: 'QBO inbox drainer (ADR 008 stream loop): one inbox per system, entity
-  dispatch inside'
-description: claims billing.qbo_inbox (priority order, 3-attempt dead-letter,
-  Invoice supersession) and reflects each entity via the per-entity refresh
-  handlers in-process
+summary: QBO inbox drainer (ADR 008 stream loop)
+description: 'fix: module-qualified rate-limiter import (bundler quirk in f/qbo)'
 lock: '!inline f/qbo/drain_qbo_inbox.script.lock'
 concurrency_key: qbo_api
 concurrency_time_window_s: 10
