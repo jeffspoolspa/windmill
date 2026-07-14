@@ -70,6 +70,37 @@ DEFAULT_TECH = {"joshua": ("joshua", "francis")}  # bare 'joshua' -> Francis (Ca
 
 ISSUE_MAP = {}  # historical issues stored as-is (CHECK dropped); no remap needed
 
+# Commercial accounts typed many ways in Airtable -> our Customers.id, matched
+# by required tokens (order-independent) on the normalized name. Confirmed by
+# DB lookup (company/account_name + task counts).
+COMMERCIAL = [
+    (frozenset({"carriage", "gate"}), 1199),
+    (frozenset({"island", "retreat"}), 3777),
+    (frozenset({"sugarmill"}), 7590),
+    (frozenset({"frederica", "golf"}), 2609),
+    (frozenset({"fredrica", "golf"}), 2609),
+    (frozenset({"azalea"}), 335),
+    (frozenset({"azela"}), 335),
+    (frozenset({"broadfield"}), 860),
+    (frozenset({"queens", "court"}), 6289),
+    (frozenset({"queen", "court"}), 6289),
+    (frozenset({"howard", "coffin"}), 3612),
+    (frozenset({"seafarer"}), 6968),
+    (frozenset({"grants", "ferry"}), 2943),
+]
+
+def _commercial(toks):
+    for req, cid in COMMERCIAL:
+        if req <= toks:
+            return cid
+    if {"best", "western"} <= toks:
+        if "main" in toks or "ssi" in toks or "simons" in toks:
+            return 578
+        if "kingsland" in toks or "plus" in toks:
+            return 579
+        return 580  # Brunswick / Venture Drive (the account with tasks)
+    return None
+
 
 # ---------- helpers ----------
 def _sb():
@@ -187,6 +218,9 @@ def match_customer(name, phone, M):
         return CUST_OVERRIDE[k], "override"
     if k in M["pool"]:
         return M["pool"][k], "exact"
+    comm = _commercial(set(k.split()))
+    if comm:
+        return comm, "commercial"
     cm = difflib.get_close_matches(k, M["pool_keys"], n=1, cutoff=0.88)
     if cm:
         return M["pool"][cm[0]], "fuzzy"
@@ -294,12 +328,12 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300):
                     skips.append(r["fields"].get("Customer Name"))
                 continue
             tech_t[ew] = tech_t.get(ew, 0) + 1
-            if cw in ("fuzzy", "household", "override", "phone") or ew == "assumed_maint":
+            if cw in ("fuzzy", "household", "override", "phone", "commercial") or ew == "assumed_maint":
                 flagged.append({"cust": row["source_customer_name"], "cust_via": cw,
                                 "tech": row["source_tech_name"], "tech_via": ew,
                                 "customer_id": row["customer_id"]})
         matched = sum(v for k, v in cust_t.items()
-                      if k in ("exact", "override", "fuzzy", "household", "phone"))
+                      if k in ("exact", "override", "fuzzy", "household", "phone", "commercial"))
         return {
             "mode": "dry_run", "since": since, "total": len(recs),
             "customer_matched": matched, "customer_by_tier": cust_t,
