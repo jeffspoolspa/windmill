@@ -87,7 +87,12 @@ COMMERCIAL = [
     (frozenset({"howard", "coffin"}), 3612),
     (frozenset({"seafarer"}), 6968),
     (frozenset({"grants", "ferry"}), 2943),
+    (frozenset({"coastal", "rv"}), 1424),
+    (frozenset({"costal", "rv"}), 1424),  # "Costal" misspelling
 ]
+
+# Airtable statuses that mean the follow-up is complete (Carter).
+DONE_STATUSES = {"Done", "Scheduled"}
 
 def _commercial(toks):
     for req, cid in COMMERCIAL:
@@ -300,7 +305,7 @@ def resolve(rec, M):
     if not cid:
         return None, cw, None
     eid, ew = match_tech(fld.get("Tech Name"), created[:10], M)
-    status = "closed" if "Done" in (fld.get("Status") or []) else "open"
+    status = "closed" if (DONE_STATUSES & set(fld.get("Status") or [])) else "open"
     media = []
     for f in ((fld.get("Images") or []) + (fld.get("video") or [])):
         t = "video" if str(f.get("type", "")).startswith("video") else "image"
@@ -333,7 +338,7 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300):
     M = build_maps(sb)
 
     if mode == "dry_run":
-        cust_t, tech_t = {}, {}
+        cust_t, tech_t, status_t = {}, {}, {}
         skips, flagged = [], []
         for r in recs:
             row, cw, ew = resolve(r, M)
@@ -343,6 +348,7 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300):
                     skips.append(r["fields"].get("Customer Name"))
                 continue
             tech_t[ew] = tech_t.get(ew, 0) + 1
+            status_t[row["status"]] = status_t.get(row["status"], 0) + 1
             if cw in ("fuzzy", "household", "override", "phone", "commercial") or ew == "assumed_maint":
                 flagged.append({"cust": row["source_customer_name"], "cust_via": cw,
                                 "tech": row["source_tech_name"], "tech_via": ew,
@@ -354,7 +360,7 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300):
             "customer_matched": matched, "customer_by_tier": cust_t,
             "skipped_named": sorted(set(x for x in skips if x))[:60],
             "skipped_named_count": len(set(x for x in skips if x)),
-            "tech_by_tier": tech_t,
+            "tech_by_tier": tech_t, "status_split": status_t,
             "flagged_sample": flagged[:40], "flagged_total": len(flagged),
         }
 
