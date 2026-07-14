@@ -1,7 +1,5 @@
-summary: CDC probe (QBO drift backstop) + CreditMemo entity
-description: 'CreditMemo joins the CDC entity list (probe-gap fix 2026-07-14):
-  no drift-compare (CM- key prefix), every surfaced CM re-refreshes via
-  refresh_credit_memo'
+summary: 'CDC probe (rebundle: refresh_payment delete fix)'
+description: redeploy to pick up the imported refresh_payment fix
 lock: '!inline f/service_billing/cdc_reconciler.script.lock'
 has_on_behalf_of: false
 kind: script

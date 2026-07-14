@@ -1,5 +1,6 @@
-summary: QBO inbox drainer (ADR 008 stream loop)
-description: 'fix: literal max_units default (Windmill passes null for constant defaults)'
+summary: 'QBO inbox drainer (rebundle: refresh_payment delete fix)'
+description: redeploy to pick up the imported refresh_payment fix (imports
+  bundle at deploy time)
 lock: '!inline f/service_billing/drain_qbo_inbox.script.lock'
 concurrency_key: qbo_api
 concurrency_time_window_s: 10

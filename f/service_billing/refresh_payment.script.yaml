@@ -1,6 +1,6 @@
 summary: Payment cache handler
-description: 'fix: deleted-in-QBO payments DELETE the mirror row (was: stamp
-  sync_error, leaving unapplied_amt offerable + Lines double-counting)'
+description: 'fix: QBO deleted entities return 400 Object Not Found (not 404) —
+  both now mirror-delete the cache row'
 lock: '!inline f/service_billing/refresh_payment.script.lock'
 has_on_behalf_of: false
 kind: script

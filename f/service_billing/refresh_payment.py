@@ -243,7 +243,13 @@ def main(qbo_payment_id: str, qbo_body: dict | None = None):
         access_token, realm_id = refresh_qbo_token()
         resp = qbo_get(f"payment/{qbo_payment_id}", access_token, realm_id)
 
-        if resp.status_code == 404:
+        # QBO's deleted-entity semantics: a deleted transaction reads back
+        # as 400 + Fault "Object Not Found" (code 610), NOT 404. Both mean
+        # the leader no longer has it. (Found 2026-07-14: the double-count
+        # class survived because this check was 404-only.)
+        deleted_in_qbo = resp.status_code == 404 or (
+            resp.status_code == 400 and "Object Not Found" in (resp.text or ""))
+        if deleted_in_qbo:
             # Deleted in QBO -> the mirror row goes too. The old behavior
             # (stamp sync_error, keep the row) left the dead payment's
             # unapplied_amt offerable as a credit and its application Lines
