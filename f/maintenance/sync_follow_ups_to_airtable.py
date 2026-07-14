@@ -18,7 +18,7 @@
 #                                    echo airtable_record_id/synced_at back;
 #                                    read Status back for open synced rows
 #   public.employees         [read]  tech display name
-#   public."Customers"       [read]  customer display name
+#   public."Customers"       [read]  customer display name + phone
 #
 # External APIs:
 #   - Airtable: POST/GET https://api.airtable.com/v0/apppQeFQh1Mi6Mv3p/tbltojdp1l9k4xmSN
@@ -92,9 +92,10 @@ def _push_pending(sb, headers):
     emp_ids = list({r["tech_employee_id"] for r in rows})
     cust_ids = list({r["customer_id"] for r in rows})
     emps = sb.table("employees").select("id, first_name, last_name").in_("id", emp_ids).execute().data
-    custs = sb.table("Customers").select("id, display_name").in_("id", cust_ids).execute().data
+    custs = sb.table("Customers").select("id, display_name, phone").in_("id", cust_ids).execute().data
     emp_name = {e["id"]: " ".join(filter(None, [e.get("first_name"), e.get("last_name")])) for e in emps}
     cust_name = {c["id"]: c.get("display_name") or "" for c in custs}
+    cust_phone = {c["id"]: c.get("phone") for c in custs}
 
     pushed, failed, errors = 0, 0, []
     for r in rows:
@@ -114,6 +115,9 @@ def _push_pending(sb, headers):
                 "Issue": r["issue"],
                 "Description of Issue": r["description"],
             }
+            phone = cust_phone.get(r["customer_id"])
+            if phone:
+                fields["Phone Number"] = phone
             if r.get("equipment_off") is not None:
                 fields["Equipment Off?"] = "TRUE" if r["equipment_off"] else "FALSE"
             if images:
