@@ -211,8 +211,10 @@ def build_maps(sb):
                 return e["id"]
         return None
 
+    emp_name = {e["id"]: " ".join(w.title() for w in (e["first"], e["last"]) if w) for e in E}
+
     return {"pool": pool, "pool_keys": pool_keys, "surn": surn, "phone_idx": phone_idx,
-            "byfirst": byfirst, "find_emp": find_emp}
+            "byfirst": byfirst, "find_emp": find_emp, "disp": disp, "emp_name": emp_name}
 
 
 def match_customer(name, phone, M):
@@ -330,8 +332,39 @@ def resolve(rec, M):
 
 
 # ---------- main ----------
+def _signed_url(sb, path):
+    res = sb.storage.from_("follow-ups").create_signed_url(path, 3600)
+    return res.get("signedURL") or res.get("signedUrl") or res.get("signed_url")
+
+def _airtable_fields(sb, r, M):
+    created = r.get("created_at")
+    ts = (datetime.fromisoformat(created).astimezone(ZoneInfo("America/New_York"))
+          .strftime("%m/%d/%Y %I:%M %p") if created else "")
+    images, videos = [], []
+    for m in (r.get("media") or []):
+        u = _signed_url(sb, m["path"]) if m.get("path") else None
+        if u:
+            (videos if m.get("type") == "video" else images).append({"url": u})
+    fields = {
+        "Timestamp": ts,
+        "Tech Name": M["emp_name"].get(r.get("tech_employee_id"), r.get("source_tech_name") or ""),
+        "Customer Name": M["disp"].get(r.get("customer_id"), r.get("source_customer_name") or ""),
+        "Issue": r.get("issue"),
+        "Description of Issue": r.get("description") or "",
+    }
+    if r.get("equipment_off") is not None:
+        fields["Equipment Off?"] = "TRUE" if r["equipment_off"] else "FALSE"
+    if r.get("next_steps"):
+        fields["Next Steps"] = r["next_steps"]
+    if images:
+        fields["Images"] = images
+    if videos:
+        fields["video"] = videos
+    return fields
+
+
 def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300,
-         after_id: str = ""):
+         after_id: str = "", apply: bool = True):
     sb = _sb()
     headers = {"Authorization": f"Bearer {_at_key()}", "Content-Type": "application/json"}
     recs = load_airtable(headers)
@@ -412,5 +445,73 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300,
             done += 1
         return {"mode": "rehost_media", "rehosted": done,
                 "last_id": rows[-1]["id"], "done": len(rows) < batch}
+
+    if mode == "daily_sync":
+        # One daily reconcile: push pending app rows -> Airtable, ingest Airtable
+        # rows not yet in our DB, refresh open tickets (status + next_steps).
+        by_id = {r["id"]: r for r in recs}
+        fu = sb.schema("maintenance").table("follow_ups")
+
+        existing = set()
+        start = 0
+        while True:
+            rows = (fu.select("airtable_record_id").not_.is_("airtable_record_id", "null")
+                    .range(start, start + 999).execute().data)
+            existing |= {r["airtable_record_id"] for r in rows}
+            if len(rows) < 1000:
+                break
+            start += 1000
+
+        # 1) push new app rows to Airtable
+        push_rows = (fu.select("*").eq("source", "app").is_("airtable_record_id", "null")
+                     .limit(500).execute().data)
+        pushed = 0
+        for r in push_rows:
+            if not apply:
+                pushed += 1
+                continue
+            resp = requests.post(AIRTABLE_URL, headers=headers,
+                                 json={"records": [{"fields": _airtable_fields(sb, r, M)}], "typecast": True},
+                                 timeout=30)
+            if resp.ok:
+                rid = resp.json()["records"][0]["id"]
+                fu.update({"airtable_record_id": rid, "airtable_synced_at": "now()"}).eq("id", r["id"]).execute()
+                pushed += 1
+
+        # 2) ingest Airtable records not already in our DB
+        ingest = []
+        for r in recs:
+            if r["id"] in existing:
+                continue
+            row = resolve(r, M)[0]
+            if row:
+                row["source"] = "airtable_ingest"
+                ingest.append(row)
+        if apply and ingest:
+            for i in range(0, len(ingest), batch):
+                fu.upsert(ingest[i:i + batch], on_conflict="airtable_record_id").execute()
+
+        # 3) refresh open tickets from their Airtable record
+        open_rows = (fu.select("id,airtable_record_id,status,next_steps").eq("status", "open")
+                     .not_.is_("airtable_record_id", "null").execute().data)
+        closed_n, notes_n = 0, 0
+        for r in open_rows:
+            rec = by_id.get(r["airtable_record_id"])
+            if not rec:
+                continue
+            flds = rec.get("fields", {})
+            upd = {}
+            if DONE_STATUSES & set(flds.get("Status") or []):
+                upd["status"] = "closed"
+                closed_n += 1
+            ns = flds.get("Next Steps")
+            if ns and ns != r.get("next_steps"):
+                upd["next_steps"] = ns
+                notes_n += 1
+            if upd and apply:
+                fu.update(upd).eq("id", r["id"]).execute()
+
+        return {"mode": "daily_sync", "apply": apply, "pushed": pushed,
+                "ingested": len(ingest), "refresh_closed": closed_n, "refresh_notes": notes_n}
 
     return {"error": f"unknown mode {mode}"}
