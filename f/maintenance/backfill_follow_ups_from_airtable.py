@@ -330,7 +330,8 @@ def resolve(rec, M):
 
 
 # ---------- main ----------
-def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300):
+def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300,
+         after_id: str = ""):
     sb = _sb()
     headers = {"Authorization": f"Bearer {_at_key()}", "Content-Type": "application/json"}
     recs = load_airtable(headers)
@@ -376,11 +377,17 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300):
         return {"mode": "import_rows", "imported": n}
 
     if mode == "rehost_media":
-        pend = (sb.schema("maintenance").table("follow_ups")
-                .select("id,media").eq("source", "airtable_backfill")
-                .limit(batch).execute().data)
+        # Forward cursor over backfilled rows so re-runs make progress. Caller
+        # loops passing after_id=last_id until done=True.
+        q = (sb.schema("maintenance").table("follow_ups")
+             .select("id,media").eq("source", "airtable_backfill"))
+        if after_id:
+            q = q.gt("id", after_id)
+        rows = q.order("id").limit(batch).execute().data
+        if not rows:
+            return {"mode": "rehost_media", "done": True, "rehosted": 0}
         done = 0
-        for row in pend:
+        for row in rows:
             media = row.get("media") or []
             if not any("source_url" in m for m in media):
                 continue
@@ -403,7 +410,7 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300):
             sb.schema("maintenance").table("follow_ups").update(
                 {"media": newm}).eq("id", row["id"]).execute()
             done += 1
-        return {"mode": "rehost_media", "processed": done,
-                "note": "re-run until processed=0"}
+        return {"mode": "rehost_media", "rehosted": done,
+                "last_id": rows[-1]["id"], "done": len(rows) < batch}
 
     return {"error": f"unknown mode {mode}"}
