@@ -128,10 +128,15 @@ def load_airtable(headers):
 
 
 # ---------- matcher build ----------
+def _phone10(s):
+    d = re.sub(r"\D", "", str(s or ""))
+    return d[-10:] if len(d) >= 10 else ""
+
 def build_maps(sb):
-    custs = _paginate(sb, "Customers", "id,display_name,first_name,last_name,company,account_name")
+    custs = _paginate(sb, "Customers", "id,display_name,first_name,last_name,company,account_name,phone")
     pool = {}
     disp = {}
+    phone_idx = {}
     for c in custs:
         disp[c["id"]] = c.get("display_name")
         for v in (c.get("display_name"),
@@ -140,6 +145,9 @@ def build_maps(sb):
             k = norm(v)
             if k:
                 pool.setdefault(k, c["id"])
+        p = _phone10(c.get("phone"))
+        if p:
+            phone_idx.setdefault(p, set()).add(c["id"])
     pool_keys = list(pool.keys())
 
     # household surname index over task-linked customers
@@ -167,11 +175,11 @@ def build_maps(sb):
                 return e["id"]
         return None
 
-    return {"pool": pool, "pool_keys": pool_keys, "surn": surn,
+    return {"pool": pool, "pool_keys": pool_keys, "surn": surn, "phone_idx": phone_idx,
             "byfirst": byfirst, "find_emp": find_emp}
 
 
-def match_customer(name, M):
+def match_customer(name, phone, M):
     k = norm(name)
     if not k:
         return None, "blank"
@@ -182,6 +190,12 @@ def match_customer(name, M):
     cm = difflib.get_close_matches(k, M["pool_keys"], n=1, cutoff=0.88)
     if cm:
         return M["pool"][cm[0]], "fuzzy"
+    # context clue: a phone that maps to exactly one customer
+    p = _phone10(phone)
+    if p:
+        ids = M["phone_idx"].get(p)
+        if ids and len(ids) == 1:
+            return next(iter(ids)), "phone"
     cands = M["surn"].get(surname(name), [])
     if len(cands) == 1:
         return cands[0], "household"
@@ -233,7 +247,7 @@ def _created(rec):
 def resolve(rec, M):
     fld = rec.get("fields", {})
     created = _created(rec)
-    cid, cw = match_customer(fld.get("Customer Name"), M)
+    cid, cw = match_customer(fld.get("Customer Name"), fld.get("Phone Number"), M)
     if not cid:
         return None, cw, None
     eid, ew = match_tech(fld.get("Tech Name"), created[:10], M)
@@ -280,12 +294,12 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300):
                     skips.append(r["fields"].get("Customer Name"))
                 continue
             tech_t[ew] = tech_t.get(ew, 0) + 1
-            if cw in ("fuzzy", "household", "override") or ew == "assumed_maint":
+            if cw in ("fuzzy", "household", "override", "phone") or ew == "assumed_maint":
                 flagged.append({"cust": row["source_customer_name"], "cust_via": cw,
                                 "tech": row["source_tech_name"], "tech_via": ew,
                                 "customer_id": row["customer_id"]})
         matched = sum(v for k, v in cust_t.items()
-                      if k in ("exact", "override", "fuzzy", "household"))
+                      if k in ("exact", "override", "fuzzy", "household", "phone"))
         return {
             "mode": "dry_run", "since": since, "total": len(recs),
             "customer_matched": matched, "customer_by_tier": cust_t,
