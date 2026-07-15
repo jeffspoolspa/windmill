@@ -56,6 +56,10 @@ def evaluate(v):
     ta = reads.get("Total Alkalinity"); cya = reads.get("Cyanuric Acid")
     psi = next((reads.get(n) for n in PSI_BEFORE if reads.get(n) is not None), None)
     sal = reads.get("Salinity")
+    # tabs "added" = sold OR recorded on the form (Tablets Used / customer-supplied tabs)
+    tabs_added = ("tabs" in kinds
+                  or (reads.get("Tablets Used") or 0) > 0
+                  or (reads.get("Customer Tabs (Not to be billed)") or 0) > 0)
 
     missing = [lbl for key, lbl in CORE_READINGS.items()
                if lbl in form and reads.get(lbl) is None]
@@ -70,7 +74,7 @@ def evaluate(v):
     if fc is not None and fc < 1:
         exc.append(("fc_low", f"Free chlorine {fc:g} (<1) — needs shock (cal hypo/liquid); tabs alone don't count",
                     "shock" in kinds, fc == 0))
-    if v["is_tab"] and "tabs" not in kinds:
+    if v["is_tab"] and not tabs_added:
         exc.append(("tabs_skipped", "Tablet pool but no tabs added this visit — fine only if noted (CYA high / chlorinator stocked)",
                     False, False))
     if ph is not None and ph > 7.8:

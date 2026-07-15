@@ -1,4 +1,5 @@
-summary: Visit QC scorer (rubric v1) — PILOT defaults (dry_run, 250 visits)
+summary: 'Visit QC scorer v1 — fix: recorded Tablets Used / Customer Tabs count
+  as tabs added'
 description: ''
 lock: '!inline f/maintenance/score_visits.script.lock'
 has_on_behalf_of: false
