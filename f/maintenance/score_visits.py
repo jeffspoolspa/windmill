@@ -270,6 +270,20 @@ def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
             for attempt in range(5):
                 try:
                     verdicts.update(judge_batch(akey, batch)); llm_calls += 1; break
+                except requests.HTTPError as e:
+                    code = getattr(e.response, "status_code", None)
+                    body = getattr(e.response, "text", "") or ""
+                    if code == 400 and "credit balance" in body:
+                        raise RuntimeError(
+                            "ANTHROPIC CREDITS EXHAUSTED — top up f/service_billing/"
+                            "ANTHROPIC_API_KEY, then re-run (upsert makes it idempotent).") from e
+                    if code == 400:  # malformed request won't fix on retry
+                        print(f"batch {i}: 400 {body[:120]}")
+                        failed.extend(it["id"] for it in batch); break
+                    if attempt == 4:
+                        print(f"batch {i} failed: {e}"); failed.extend(it["id"] for it in batch)
+                    else:
+                        time.sleep(retry_wait(e, attempt))
                 except Exception as e:
                     if attempt == 4:
                         print(f"batch {i} failed: {e}"); failed.extend(it["id"] for it in batch)
