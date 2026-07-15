@@ -237,7 +237,7 @@ def score_visit(ev, verdicts):
 
 
 def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
-         dry_run: bool = True, max_visits: int = 200, skip_llm: bool = False,
+         dry_run: bool = False, max_visits: int = 0, skip_llm: bool = False,
          only_visit_ids: list = None):
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"),
                        wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
