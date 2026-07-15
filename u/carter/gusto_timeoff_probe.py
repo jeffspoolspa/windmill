@@ -39,6 +39,10 @@ def main(start_date: str = "2026-06-01", end_date: str = "2026-06-30"):
             start_date=start_date,
             end_date=end_date,
         )
+        get(
+            "report_template_payroll_journal",
+            f"https://api.gusto.com/v1/companies/{company}/report_templates/payroll_journal",
+        )
         # scoped to the June maint-meeting roster (Brunswick/Saint Marys techs
         # from build_june.py) — the exact population the call-outs KPI covers
         ROSTER = {
