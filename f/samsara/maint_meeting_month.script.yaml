@@ -1,5 +1,5 @@
-summary: Samsara per-driver idle/safety/drive for a month (maint-meeting deck),
-  keyed by Gusto UUID
+summary: Samsara per-driver + per-vehicle idle/safety/drive for a month
+  (maint-meeting), Gusto-UUID keyed
 description: ''
 lock: '!inline f/samsara/maint_meeting_month.script.lock'
 has_on_behalf_of: false
