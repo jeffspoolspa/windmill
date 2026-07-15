@@ -1,5 +1,4 @@
-summary: 'Visit QC scorer v1 — fix: recorded Tablets Used / Customer Tabs count
-  as tabs added'
+summary: Visit QC scorer v1 — FULL-RUN defaults (writes, all visits in range)
 description: ''
 lock: '!inline f/maintenance/score_visits.script.lock'
 has_on_behalf_of: false

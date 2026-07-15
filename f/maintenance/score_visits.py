@@ -1,5 +1,5 @@
 # f/maintenance/score_visits — see VISIT_QC_RULES.md (rubric v1)
-# PILOT defaults: dry_run=True, max_visits=250. Flip for the full run.
+# Defaults = FULL RUN for June 2026 (dry_run=False, max_visits=0/all).
 import json
 import re
 import time
@@ -56,7 +56,6 @@ def evaluate(v):
     ta = reads.get("Total Alkalinity"); cya = reads.get("Cyanuric Acid")
     psi = next((reads.get(n) for n in PSI_BEFORE if reads.get(n) is not None), None)
     sal = reads.get("Salinity")
-    # tabs "added" = sold OR recorded on the form (Tablets Used / customer-supplied tabs)
     tabs_added = ("tabs" in kinds
                   or (reads.get("Tablets Used") or 0) > 0
                   or (reads.get("Customer Tabs (Not to be billed)") or 0) > 0)
@@ -88,7 +87,7 @@ def evaluate(v):
     if ta is not None and ta > 120:
         exc.append(("ta_high", f"TA {ta:g} (>120) — needs acid + note", "acid" in kinds, False))
     if cya is not None and cya < 30:
-        exc.append(("cya_low", f"CYA {cya:g} (<30) — needs stabilizer",
+        exc.append(("cya_low", f"CYA {cya:g} (<30) — needs stabilizer (a 'didn't test' placeholder must be noted)",
                     "stabilizer" in kinds, False))
     if cya is not None and cya > 80:
         exc.append(("cya_high", f"CYA {cya:g} (>80) — needs note (dilution plan)", False, False))
@@ -115,8 +114,8 @@ def judge_batch(client_key, items):
         "You are grading pool-maintenance visit logs. For each visit, decide whether the tech's "
         "note explains each listed exception. 'yes' = the note clearly explains or resolves it "
         "(names the issue and what was done, or why it was intentionally skipped, incl. customer-"
-        "supplied chems like 'added cust acid', or a follow-up filed). 'partial' = the note "
-        "touches it but thinly. 'no' = the note doesn't address it.\n"
+        "supplied chems like 'added cust acid', a 'didn't test X' admission, or a follow-up filed). "
+        "'partial' = the note touches it but thinly. 'no' = the note doesn't address it.\n"
         "Return ONLY a JSON array: [{\"id\": ..., \"verdicts\": {\"<key>\": \"yes|partial|no\"}}].\n\n"
         + json.dumps(items, ensure_ascii=False))
     r = requests.post("https://api.anthropic.com/v1/messages",
@@ -177,7 +176,7 @@ def finalize(ev, verdicts):
 
 
 def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
-         dry_run: bool = True, max_visits: int = 250, skip_llm: bool = False):
+         dry_run: bool = False, max_visits: int = 0, skip_llm: bool = False):
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"),
                        wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
     akey = wmill.get_variable("f/service_billing/ANTHROPIC_API_KEY")
