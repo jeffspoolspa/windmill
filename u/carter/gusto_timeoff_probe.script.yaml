@@ -1,0 +1,20 @@
+summary: ''
+description: ''
+lock: '!inline u/carter/gusto_timeoff_probe.script.lock'
+has_on_behalf_of: false
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    end_date:
+      type: string
+      description: ''
+      default: 2026-06-30
+      originalType: string
+    start_date:
+      type: string
+      description: ''
+      default: 2026-06-01
+      originalType: string
+  required: []
