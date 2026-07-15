@@ -26,12 +26,13 @@ SALT_RANGE = (2700, 3400)
 PSI_OVER = 8
 
 # item, weight, missing-label, exception keys
+# TA & CYA are low-weight (slow-moving; recording matters, a miss barely dents).
 CHEM = [("fc", 16, "Free Chlorine", ("fc_low",)),
-        ("ph", 9, "pH", ("ph_high", "ph_low")),
-        ("ta", 7, "Total Alkalinity", ("ta_low", "ta_high")),
-        ("cya", 7, "Cyanuric Acid", ("cya_low", "cya_high")),
-        ("psi", 7, "Filter PSI", ("psi_high",)),
-        ("salt", 6, "Salinity", ("salt_range",))]
+        ("ph", 10, "pH", ("ph_high", "ph_low")),
+        ("ta", 4, "Total Alkalinity", ("ta_low", "ta_high")),
+        ("cya", 4, "Cyanuric Acid", ("cya_low", "cya_high")),
+        ("psi", 8, "Filter PSI", ("psi_high",)),
+        ("salt", 5, "Salinity", ("salt_range",))]
 CHEM_LABEL = {"fc": "Free Chlorine", "ph": "pH", "ta": "Total Alkalinity",
               "cya": "CYA", "psi": "Filter PSI", "salt": "Salinity"}
 # item, weight, miss-name, task names (done if any is completed)
@@ -42,8 +43,9 @@ SERVICE = [("vacbrush", 9, "Vacuum/Brush", ("Vacuum Pool", "Brushed Pool")),
            ("cleaner", 3, "Emptied Cleaner Bag", ("Emptied Cleaner Bag",))]
 SERVICE_LABEL = {"vacbrush": "Vacuum / brush", "skimmer": "Skimmer baskets",
                  "pump": "Pump baskets", "skimnet": "Skim / net", "cleaner": "Cleaner bag"}
-PHOTOS_W = 14
-NOTES_W = 10
+PHOTOS_W = 16
+# No standalone "notes" line — the note is what marks each reading/task
+# addressed vs. not (via the LLM verdict in frac()); it's baked in everywhere.
 
 
 def num(x):
@@ -213,25 +215,11 @@ def score_visit(ev, verdicts):
         earned += w * f; svc_e += w * f
         items.append({"k": SERVICE_LABEL[key], "w": w, "f": f, "why": why})
 
-    # documentation: photos
+    # documentation: photos (note quality is already scored via each item's addressed-ness)
     p = ev["photos"]
     pf = 1.0 if p >= 2 else 0.5 if p == 1 else 0.0
     applicable += PHOTOS_W; earned += PHOTOS_W * pf; doc_e += PHOTOS_W * pf
     items.append({"k": "Photos", "w": PHOTOS_W, "f": pf, "why": f"{p} photo(s)"})
-
-    # documentation: notes explain exceptions
-    all_keys = [(k, a) for (k, a, s) in ev["exceptions"]] + \
-               [("miss:" + m, False) for m in ev["misses"]]
-    if not ev["tabs_ok"]:
-        all_keys.append(("tabs_skipped", False))
-    if not all_keys:
-        nf, nwhy = 1.0, "nothing to explain"
-    else:
-        fs = [frac(k, a) for (k, a) in all_keys]
-        nf = 0.0 if any(x == 0 for x in fs) else 0.5 if any(x == .5 for x in fs) else 1.0
-        nwhy = "all explained" if nf == 1 else "some thin" if nf == .5 else "gaps unexplained"
-    applicable += NOTES_W; earned += NOTES_W * nf; doc_e += NOTES_W * nf
-    items.append({"k": "Notes explain issues", "w": NOTES_W, "f": nf, "why": nwhy})
 
     score = round(earned / applicable * 100, 1) if applicable else 0.0
 
@@ -273,8 +261,6 @@ def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
     for vid, ev in evs.items():
         pend = [{"key": k, "desc": k} for (k, a, s) in ev["exceptions"]] + \
                [{"key": "miss:" + m, "desc": "checklist not done: " + m} for m in ev["misses"]]
-        if not ev["tabs_ok"]:
-            pend.append({"key": "tabs_skipped", "desc": "tablet pool, no tabs added"})
         if pend and ev["note"]:
             judge_items.append({"id": vid, "note": ev["note"][:600], "items": pend})
     verdicts, llm_calls, failed = {}, 0, []
