@@ -1,6 +1,0 @@
-summary: THROWAWAY probe — Francis spare assignment (delete after pipeline)
-description: ''
-lock: '!inline u/carter/maint_meeting_probe.script.lock'
-has_on_behalf_of: false
-kind: script
-schema: null
