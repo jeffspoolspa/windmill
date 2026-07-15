@@ -47,6 +47,29 @@ PHOTOS_W = 16
 # No standalone "notes" line — the note is what marks each reading/task
 # addressed vs. not (via the LLM verdict in frac()); it's baked in everywhere.
 
+# human-readable issue descriptions for the LLM (label, condition + right fix)
+EXC_DESC = {
+    "fc_low": ("Free Chlorine", "below 1 — needs shock / liquid chlorine (tabs don't count)"),
+    "ph_high": ("pH", "above 7.8 — needs acid"),
+    "ph_low": ("pH", "below 7.2 — needs soda ash / bicarb"),
+    "ta_low": ("Total Alkalinity", "below 60 — needs bicarb"),
+    "ta_high": ("Total Alkalinity", "above 120 — needs acid"),
+    "cya_low": ("Cyanuric Acid", "below 30 — needs stabilizer"),
+    "cya_high": ("Cyanuric Acid", "above 80 — needs dilution / note"),
+    "psi_high": ("Filter PSI", "high vs baseline — needs backwash / filter clean"),
+    "salt_range": ("Salinity", "out of range — needs salt"),
+}
+
+
+def exc_desc(key, reads):
+    lbl, cond = EXC_DESC.get(key, (key, ""))
+    if lbl == "Filter PSI":
+        val = next((reads.get(n) for n in PSI_BEFORE if reads.get(n) is not None), None)
+    else:
+        val = reads.get(lbl)
+    v = f" (reading {val:g})" if val is not None else ""
+    return f"{lbl}{v}: {cond}"
+
 
 def num(x):
     m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)", str(x or ""))
@@ -126,21 +149,27 @@ def evaluate(v):
 
     green = bool((tasks.get("Visible Algae") or tasks.get("Cloudy Water"))
                  and "shock" not in kinds and not note)
+    sold_names = sorted({(c.get("n") or "").strip()
+                         for c in (v["consumables"] or []) if c.get("n")})
 
     return {"reads": {k: x for k, x in reads.items() if x is not None},
             "kinds": sorted(kinds), "note": note, "missing": missing, "form": form,
             "is_salt": v["is_salt"], "tasks": tasks, "exceptions": exc,
             "misses": misses, "photos": v["photo_count"], "green": green,
-            "tabs_ok": (not v["is_tab"]) or tabs_added}
+            "sold_names": sold_names, "tabs_ok": (not v["is_tab"]) or tabs_added}
 
 
 def judge_batch(client_key, items):
     prompt = (
-        "You are grading pool-maintenance visit logs. For each visit, decide whether the tech's "
-        "note explains each listed exception. 'yes' = the note clearly explains or resolves it "
-        "(names the issue and what was done, or why it was intentionally skipped, incl. customer-"
-        "supplied chems like 'added cust acid', a 'didn't test X' admission, or a follow-up filed). "
-        "'partial' = the note touches it but thinly. 'no' = the note doesn't address it.\n"
+        "You are grading pool-maintenance visit logs. Each visit gives the tech's note, the list "
+        "of chemicals/products SOLD or used on the visit, and the issues found. For each issue "
+        "decide whether it was addressed, using BOTH the note and what was sold.\n"
+        "'yes' = clearly handled — the right product was used to treat it (e.g. shock/liquid "
+        "chlorine for low chlorine, acid for high pH) and/or the note explains it or a valid "
+        "reason to skip (customer-supplied chems like 'added cust acid', a 'didn't test X' "
+        "admission, or a follow-up filed).\n"
+        "'partial' = touched thinly — e.g. some action but not the right fix, or a vague note.\n"
+        "'no' = neither treated nor explained.\n"
         "Return ONLY a JSON array: [{\"id\": ..., \"verdicts\": {\"<key>\": \"yes|partial|no\"}}].\n\n"
         + json.dumps(items, ensure_ascii=False))
     r = requests.post("https://api.anthropic.com/v1/messages",
@@ -259,10 +288,11 @@ def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
 
     judge_items = []
     for vid, ev in evs.items():
-        pend = [{"key": k, "desc": k} for (k, a, s) in ev["exceptions"]] + \
-               [{"key": "miss:" + m, "desc": "checklist not done: " + m} for m in ev["misses"]]
+        pend = [{"key": k, "desc": exc_desc(k, ev["reads"])} for (k, a, s) in ev["exceptions"]] + \
+               [{"key": "miss:" + m, "desc": "checklist item not done: " + m} for m in ev["misses"]]
         if pend and ev["note"]:
-            judge_items.append({"id": vid, "note": ev["note"][:600], "items": pend})
+            judge_items.append({"id": vid, "note": ev["note"][:600],
+                                "sold": ev["sold_names"], "items": pend})
     verdicts, llm_calls, failed = {}, 0, []
     if judge_items and not skip_llm:
         for i in range(0, len(judge_items), 12):
