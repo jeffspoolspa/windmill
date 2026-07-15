@@ -1,5 +1,4 @@
-summary: Visit QC scorer (rubric v1) — deterministic rules + LLM note-judgment
-  -> maintenance.visit_scores
+summary: Visit QC scorer (rubric v1) — PILOT defaults (dry_run, 250 visits)
 description: ''
 lock: '!inline f/maintenance/score_visits.script.lock'
 has_on_behalf_of: false

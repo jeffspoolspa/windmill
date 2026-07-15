@@ -1,18 +1,5 @@
-# f/maintenance/score_visits
-#
-# Scores completed maintenance visits per VISIT_QC_RULES.md rubric v1
-# (maint_meeting repo). Three 1-4 category scores (checklist / chemicals /
-# documentation), visit_score = mean, upserted into maintenance.visit_scores
-# via public.qc_upsert_scores (unique on visit_id+rubric_version).
-#
-# Two passes:
-#   A. deterministic — readings vs ranges, corrective consumables, checklist
-#      misses, PSI vs per-pool baseline, photo count (via public.qc_visit_bundle)
-#   B. LLM (claude-haiku) — ONLY for visits with >=1 exception AND a note:
-#      "does the note explain each exception?" (yes/partial/no), batched.
-#
-# Args: p_start/p_end (date strings), dry_run (no writes, returns sample),
-#       max_visits (0 = all), skip_llm (exceptions w/ notes score as thin).
+# f/maintenance/score_visits — see VISIT_QC_RULES.md (rubric v1)
+# PILOT defaults: dry_run=True, max_visits=250. Flip for the full run.
 import json
 import re
 import time
@@ -57,7 +44,6 @@ def kinds_of(cons):
 
 
 def evaluate(v):
-    """Deterministic pass -> dict with exceptions, misses, readings, etc."""
     reads = {}
     for r in (v["readings"] or []):
         reads.setdefault(r["n"], num(r["v"]))
@@ -71,7 +57,6 @@ def evaluate(v):
     psi = next((reads.get(n) for n in PSI_BEFORE if reads.get(n) is not None), None)
     sal = reads.get("Salinity")
 
-    # required readings, gated by what this pool's form records
     missing = [lbl for key, lbl in CORE_READINGS.items()
                if lbl in form and reads.get(lbl) is None]
     if any(n in form for n in PSI_BEFORE) and psi is None:
@@ -81,7 +66,6 @@ def evaluate(v):
     if v["is_salt"] and "Salinity" in form and sal is None:
         missing.append("Salinity")
 
-    # chem exceptions: (key, description, addressed, severe)
     exc = []
     if fc is not None and fc < 1:
         exc.append(("fc_low", f"Free chlorine {fc:g} (<1) — needs shock (cal hypo/liquid); tabs alone don't count",
@@ -112,7 +96,6 @@ def evaluate(v):
         exc.append(("salt_range", f"Salinity {sal:g} outside {SALT_RANGE[0]}-{SALT_RANGE[1]} — needs salt or note",
                     "salt" in kinds, False))
 
-    # checklist misses (expected items present on this visit's list, not done)
     misses = [t for t in EXPECTED_TASKS if t in tasks and not tasks[t]]
     if (tasks.get("Visible Algae") or tasks.get("Cloudy Water")) and \
        not any(tasks.get(t) for t in VAC_TASKS):
@@ -124,7 +107,6 @@ def evaluate(v):
 
 
 def judge_batch(client_key, items):
-    """items: [{id, note, items:[{key, desc}]}] -> {id: {key: yes|partial|no}}"""
     prompt = (
         "You are grading pool-maintenance visit logs. For each visit, decide whether the tech's "
         "note explains each listed exception. 'yes' = the note clearly explains or resolves it "
@@ -149,24 +131,20 @@ def judge_batch(client_key, items):
 
 
 def finalize(ev, verdicts):
-    """Apply rubric matrices. verdicts: {key: yes|partial|no} for this visit."""
     vd = verdicts or {}
 
     def status(key, addressed):
-        # -> 'ok' | 'thin' | 'bad'
         j = vd.get(key)
         if addressed:
-            return "ok" if j == "yes" else ("thin" if ev["note"] == "" or j in ("partial", None) else "thin")
+            return "ok" if j == "yes" else "thin"
         if j == "yes": return "ok"
         if j == "partial": return "thin"
         return "bad"
 
-    # checklist: misses not explained count
     miss_status = [status("miss:" + m, False) for m in ev["misses"]]
     eff = sum(1 for s in miss_status if s == "bad") + 0.5 * sum(1 for s in miss_status if s == "thin")
     checklist = 4 if eff == 0 else 3 if eff <= 1 else 2 if eff <= 2 else 1
 
-    # chemicals
     chem_keys = [(k, d, a, sev) for (k, d, a, sev) in ev["exceptions"]]
     chem_status = {k: status(k, a) for (k, d, a, sev) in chem_keys}
     severe_bad = any(sev and chem_status[k] == "bad" for (k, d, a, sev) in chem_keys)
@@ -178,7 +156,6 @@ def finalize(ev, verdicts):
     else: chem = 4
     if ev["missing"]: chem = min(chem, 2)
 
-    # documentation
     to_explain = {**{k: s for k, s in chem_status.items()},
                   **{"miss:" + m: s for m, s in zip(ev["misses"], miss_status)}}
     unexplained = any(s == "bad" for s in to_explain.values())
@@ -196,12 +173,11 @@ def finalize(ev, verdicts):
 
 
 def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
-         dry_run: bool = True, max_visits: int = 0, skip_llm: bool = False):
+         dry_run: bool = True, max_visits: int = 250, skip_llm: bool = False):
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"),
                        wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
     akey = wmill.get_variable("f/service_billing/ANTHROPIC_API_KEY")
 
-    # page through the month
     visits, off = [], 0
     while True:
         page = sb.rpc("qc_visit_bundle", {"p_start": p_start, "p_end": p_end,
@@ -215,7 +191,6 @@ def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
 
     evs = {v["visit_id"]: evaluate(v) for v in visits}
 
-    # LLM pass: exceptions/misses + a note to interpret
     judge_items = []
     for vid, ev in evs.items():
         pend = [{"key": k, "desc": d} for (k, d, a, s) in ev["exceptions"]] + \
