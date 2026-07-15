@@ -39,18 +39,47 @@ def main(start_date: str = "2026-06-01", end_date: str = "2026-06-30"):
             start_date=start_date,
             end_date=end_date,
         )
-        emps = get(
-            "employees",
-            f"https://api.gusto.com/v1/companies/{company}/employees",
-            per=3,
-        )
-        if emps:
-            e = emps[0]["uuid"]
-            out["probe_employee"] = f"{emps[0].get('first_name')} {emps[0].get('last_name')}"
+        # scoped to the June maint-meeting roster (Brunswick/Saint Marys techs
+        # from build_june.py) — the exact population the call-outs KPI covers
+        ROSTER = {
+            "jayden hinson", "jamie teston", "damian elmore", "aaron newbauer",
+            "carlos vaquerano", "joshua carroll", "ernie stegall",
+            "travis redmon", "korey felts", "joshua francis", "jackson morey",
+            "emmanuel thornton",
+        }
+        emps, page = [], 1
+        while True:
+            r = requests.get(
+                f"https://api.gusto.com/v1/companies/{company}/employees",
+                headers=h,
+                params={"page": page, "per": 100},
+            )
+            batch = r.json() if r.ok else []
+            emps += batch
+            if len(batch) < 100:
+                break
+            page += 1
+        roster_emps = [
+            e for e in emps
+            if any(f"{e.get('first_name','')} {e.get('last_name','')}".lower().startswith(n)
+                   for n in ROSTER)
+        ]
+        out["roster_matched"] = len(roster_emps)
+        hits = {}
+        for emp in roster_emps:
             for t in ("vacation", "sick"):
-                get(
-                    f"time_off_activities_{t}",
-                    f"https://api.gusto.com/v1/employees/{e}/time_off_activities",
-                    time_off_type=t,
+                r = requests.get(
+                    f"https://api.gusto.com/v1/employees/{emp['uuid']}/time_off_activities",
+                    headers=h,
+                    params={"time_off_type": t},
                 )
+                body = r.json() if r.ok else []
+                if body:
+                    name = f"{emp.get('first_name')} {emp.get('last_name')}"
+                    # dates + event types only — probing shape, not pulling records
+                    hits.setdefault(name, {})[t] = [
+                        {k: a.get(k) for k in ("effective_time", "event_type", "time_off_type")}
+                        for a in body
+                    ][:10]
+        out["activity_hits"] = hits
     return out
