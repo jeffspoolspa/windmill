@@ -102,7 +102,13 @@ def evaluate(v):
         exc.append(("salt_range", f"Salinity {sal:g} outside {SALT_RANGE[0]}-{SALT_RANGE[1]} — needs salt or note",
                     "salt" in kinds, False))
 
-    misses = [t for t in EXPECTED_TASKS if t in tasks and not tasks[t]]
+    # vacuum/brush are grouped (Carter, July 2026): doing either covers both;
+    # only a miss when neither was done. Other expected items unchanged.
+    misses = [t for t in EXPECTED_TASKS - {"Vacuum Pool", "Brushed Pool"}
+              if t in tasks and not tasks[t]]
+    vb = [t for t in ("Vacuum Pool", "Brushed Pool") if t in tasks]
+    if vb and not any(tasks[t] for t in vb):
+        misses.append("Vacuum/Brush")
     if (tasks.get("Visible Algae") or tasks.get("Cloudy Water")) and \
        not any(tasks.get(t) for t in VAC_TASKS):
         misses.append("Algae/cloudy flagged but no vacuum")

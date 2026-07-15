@@ -1,4 +1,4 @@
-summary: Visit QC scorer v1 — FULL-RUN defaults (writes, all visits in range)
+summary: Visit QC scorer v1 — vacuum/brush grouped (either covers both, per Carter)
 description: ''
 lock: '!inline f/maintenance/score_visits.script.lock'
 has_on_behalf_of: false
