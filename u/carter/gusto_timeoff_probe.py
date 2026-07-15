@@ -47,8 +47,10 @@ def main(start_date: str = "2026-06-01", end_date: str = "2026-06-30"):
         if emps:
             e = emps[0]["uuid"]
             out["probe_employee"] = f"{emps[0].get('first_name')} {emps[0].get('last_name')}"
-            get(
-                "time_off_activities",
-                f"https://api.gusto.com/v1/employees/{e}/time_off_activities",
-            )
+            for t in ("vacation", "sick"):
+                get(
+                    f"time_off_activities_{t}",
+                    f"https://api.gusto.com/v1/employees/{e}/time_off_activities",
+                    time_off_type=t,
+                )
     return out
