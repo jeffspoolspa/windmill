@@ -185,7 +185,7 @@ def finalize(ev, verdicts):
     p = ev["photos"]
     if p == 0:
         docs = 1 if unexplained else 2
-    elif p < 3:
+    elif p < 2:  # photo bar lowered to 2 (Carter, July 2026); 3 remains the goal
         docs = 2 if unexplained else 3
     else:
         docs = 2 if unexplained else 3 if thin else 4
