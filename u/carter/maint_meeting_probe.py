@@ -1,30 +1,31 @@
 import wmill, requests
+from datetime import datetime, timezone, timedelta
 
 def main():
     tok = (wmill.get_variable("f/samsara/api_token") or "").strip()
     BASE = "https://api.samsara.com"; H = {"Authorization": f"Bearer {tok}"}
-    P = {"startDate": "2026-06-01T00:00:00Z", "endDate": "2026-06-30T23:59:59Z"}
-    out = {}
+    FID = "51457306"  # Joshua Francis
 
-    # full vehicle table, sorted by drive proxy (find spares w/ high use)
-    ve = requests.get(f"{BASE}/fleet/reports/vehicles/fuel-energy", headers=H, params=P, timeout=90).json()
-    vt = []
-    for v in ve.get("data", {}).get("vehicleReports", []):
-        veh = v.get("vehicle", {}); run = v.get("engineRunTimeDurationMs") or 0; idle = v.get("engineIdleTimeDurationMs") or 0
-        vt.append({"name": veh.get("name"), "drive_hr": round((run - idle) / 3.6e6, 1),
-                   "mi": round((v.get("distanceTraveledMeters") or 0) / 1609.34)})
-    out["vehicles_by_drive"] = sorted(vt, key=lambda x: -x["drive_hr"])
+    # weekly assignment windows over June (endpoint caps at 7 days)
+    wins, cur = [], datetime(2026, 6, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    while cur < end:
+        nxt = min(cur + timedelta(days=7), end)
+        wins.append((cur.strftime("%Y-%m-%dT%H:%M:%SZ"), nxt.strftime("%Y-%m-%dT%H:%M:%SZ")))
+        cur = nxt
 
-    # driver-vehicle assignments for Francis (try candidate endpoints)
-    fid = "51457306"
-    S, E = "2026-06-01T00:00:00Z", "2026-06-30T23:59:59Z"
-    for nm, path, params in [
-        ("assign_a", "/fleet/driver-vehicle-assignments", {"startTime": S, "endTime": E, "driverIds": fid}),
-        ("assign_b", "/fleet/vehicles/driver-assignments", {"startTime": S, "endTime": E, "driverIds": fid}),
-    ]:
-        try:
-            r = requests.get(f"{BASE}{path}", headers=H, params=params, timeout=30)
-            out[nm] = {"status": r.status_code, "body": r.text[:500]}
-        except Exception as e:
-            out[nm] = {"error": str(e)[:150]}
-    return out
+    veh_ms = {}   # vehicle name -> assigned ms
+    raw = []
+    for s, e in wins:
+        r = requests.get(f"{BASE}/fleet/vehicles/driver-assignments", headers=H,
+                         params={"filterBy": "drivers", "driverIds": FID, "startTime": s, "endTime": e}, timeout=30)
+        if r.status_code != 200:
+            raw.append({"win": s, "status": r.status_code, "body": r.text[:200]}); continue
+        for row in r.json().get("data", []):
+            for a in row.get("assignments", []):
+                v = a.get("vehicle", {}) or {}
+                nm = v.get("name", "?")
+                st = a.get("startTime"); en = a.get("endTime")
+                veh_ms[nm] = veh_ms.get(nm, 0) + 1
+                raw.append({"vehicle": nm, "start": st, "end": en, "isPassenger": a.get("isPassenger")})
+    return {"francis_assignment_counts": veh_ms, "detail": raw[:25]}
