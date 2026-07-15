@@ -1,5 +1,8 @@
 # f/maintenance/score_visits — see VISIT_QC_RULES.md (rubric v1)
 # Defaults = FULL RUN for June 2026 (dry_run=False, max_visits=0/all).
+# Visits whose LLM batch exhausts retries are NOT written; their ids come back in
+# failed_visit_ids — re-run with only_visit_ids=<that list> to score just them
+# (upsert on (visit_id, rubric_version) makes re-scoring safe).
 import json
 import re
 import time
@@ -133,6 +136,16 @@ def judge_batch(client_key, items):
     return out
 
 
+def retry_wait(e, attempt):
+    # 429s: honor Retry-After (Anthropic sends seconds); else exponential-ish backoff
+    resp = getattr(e, "response", None)
+    ra = resp.headers.get("retry-after") if resp is not None else None
+    try:
+        return min(float(ra), 120) + 1
+    except (TypeError, ValueError):
+        return 5 * (attempt + 1)
+
+
 def finalize(ev, verdicts):
     vd = verdicts or {}
 
@@ -176,7 +189,8 @@ def finalize(ev, verdicts):
 
 
 def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
-         dry_run: bool = False, max_visits: int = 0, skip_llm: bool = False):
+         dry_run: bool = False, max_visits: int = 0, skip_llm: bool = False,
+         only_visit_ids: list = None):
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"),
                        wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
     akey = wmill.get_variable("f/service_billing/ANTHROPIC_API_KEY")
@@ -191,6 +205,9 @@ def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
             break
     if max_visits:
         visits = visits[:max_visits]
+    if only_visit_ids:
+        wanted = set(only_visit_ids)
+        visits = [v for v in visits if v["visit_id"] in wanted]
 
     evs = {v["visit_id"]: evaluate(v) for v in visits}
 
@@ -202,21 +219,28 @@ def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
             judge_items.append({"id": vid, "note": ev["note"][:600], "items": pend})
     verdicts = {}
     llm_calls = 0
+    failed_ids = []
     if judge_items and not skip_llm:
         for i in range(0, len(judge_items), 12):
             batch = judge_items[i:i + 12]
-            for attempt in range(3):
+            for attempt in range(5):
                 try:
                     verdicts.update(judge_batch(akey, batch))
                     llm_calls += 1
                     break
                 except Exception as e:
-                    if attempt == 2:
+                    if attempt == 4:
                         print(f"batch {i} failed: {e}")
-                    time.sleep(5 * (attempt + 1))
+                        failed_ids.extend(it["id"] for it in batch)
+                    else:
+                        time.sleep(retry_wait(e, attempt))
+            time.sleep(1)  # ponytail: fixed pacing; switch to the Batches API if monthly runs outgrow this
 
+    failed = set(failed_ids)
     rows, dist = [], {}
     for v in visits:
+        if v["visit_id"] in failed:
+            continue
         ev = evs[v["visit_id"]]
         c, ch, d, tot, chem_status, miss_status = finalize(ev, verdicts.get(v["visit_id"]))
         dist[tot] = dist.get(tot, 0) + 1
@@ -247,5 +271,6 @@ def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
     return {"visits": len(rows), "written": written, "dry_run": dry_run,
             "avg_visit_score": avg, "llm_batches": llm_calls,
             "needed_judgment": len(judge_items),
+            "failed_visit_ids": failed_ids,
             "score_histogram": {str(k): dist[k] for k in sorted(dist)},
             "sample": rows[:3] if dry_run else None}
