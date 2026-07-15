@@ -1,4 +1,4 @@
-summary: THROWAWAY probe — Samsara + Gusto time_off discovery (delete after pipeline)
+summary: THROWAWAY probe — Samsara region + Gusto time_off (delete after pipeline)
 description: ''
 lock: '!inline u/carter/maint_meeting_probe.script.lock'
 has_on_behalf_of: false
