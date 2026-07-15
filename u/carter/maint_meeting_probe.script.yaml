@@ -1,4 +1,4 @@
-summary: THROWAWAY probe — Samsara safety + fuel-energy shapes (delete after pipeline)
+summary: THROWAWAY probe — Samsara fuel-energy idle shape (delete after pipeline)
 description: ''
 lock: '!inline u/carter/maint_meeting_probe.script.lock'
 has_on_behalf_of: false
