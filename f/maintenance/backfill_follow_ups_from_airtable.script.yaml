@@ -1,7 +1,8 @@
-summary: Backfill historical Airtable follow-ups into maintenance.follow_ups
-description: 'One-shot batch import w/ customer+tech matching and media
-  re-hosting. modes: dry_run|import_rows|rehost_media.'
+summary: Backfill/sync Airtable follow-ups (+ Office field on push)
+description: Import + daily sync + real-time push of app follow-ups to Airtable;
+  now maps customer office -> Airtable Office single-select.
 lock: '!inline f/maintenance/backfill_follow_ups_from_airtable.script.lock'
+concurrency_key: airtable_api
 concurrency_time_window_s: 0
 concurrent_limit: 1
 has_on_behalf_of: false

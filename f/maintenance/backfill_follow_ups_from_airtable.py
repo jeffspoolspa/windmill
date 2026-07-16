@@ -49,6 +49,16 @@ AIRTABLE_URL = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}"
 MAINT_DEPT = "757659e3-d73f-48c3-999f-6f071f1e3587"
 BRANCH_CODE = {"BWK": "Brunswick, GA", "CAM": "Saint Marys, GA", "RH": "Richmond Hill, GA"}
 
+# branches.name -> the Airtable "Office" single-select option label. The office's
+# labels are shorter than our branch names; typecast:True auto-creates "Savannah"
+# (the office hadn't added that option yet — 48 active Savannah maint customers).
+OFFICE_TO_AIRTABLE = {
+    "Brunswick, GA": "Brunswick",
+    "Richmond Hill, GA": "Richmond Hill",
+    "Saint Marys, GA": "St Marys",
+    "Savannah, GA": "Savannah",
+}
+
 # Confirmed customer rescues (normalized name -> Customers.id) from manual review.
 CUST_OVERRIDE = {
     "aylor charlotte": 333, "faith hamilton trent": 3107, "hampton inn ssi": 3125,
@@ -169,14 +179,16 @@ def _phone10(s):
     return d[-10:] if len(d) >= 10 else ""
 
 def build_maps(sb):
-    custs = _paginate(sb, "Customers", "id,display_name,first_name,last_name,company,account_name,phone")
+    custs = _paginate(sb, "Customers", "id,display_name,first_name,last_name,company,account_name,phone,office_id")
     pool = {}
     disp = {}
     phone_idx = {}
     cust_phone = {}
+    cust_office_id = {}
     for c in custs:
         disp[c["id"]] = c.get("display_name")
         cust_phone[c["id"]] = c.get("phone")
+        cust_office_id[c["id"]] = c.get("office_id")
         for v in (c.get("display_name"),
                   f"{c.get('first_name') or ''} {c.get('last_name') or ''}",
                   c.get("company"), c.get("account_name")):
@@ -198,6 +210,7 @@ def build_maps(sb):
 
     # employees + branches
     branches = {b["id"]: b["name"] for b in sb.table("branches").select("id,name").execute().data}
+    cust_office = {cid: OFFICE_TO_AIRTABLE.get(branches.get(oid)) for cid, oid in cust_office_id.items()}
     emps = _paginate(sb, "employees", "id,first_name,last_name,hire_date,department_id,branch_id")
     E = [{"id": e["id"], "first": (e.get("first_name") or "").lower(),
           "last": (e.get("last_name") or "").lower(), "hire": e.get("hire_date") or "0000-01-01",
@@ -217,7 +230,7 @@ def build_maps(sb):
 
     return {"pool": pool, "pool_keys": pool_keys, "surn": surn, "phone_idx": phone_idx,
             "byfirst": byfirst, "find_emp": find_emp, "disp": disp, "emp_name": emp_name,
-            "cust_phone": cust_phone}
+            "cust_phone": cust_phone, "cust_office": cust_office}
 
 
 def match_customer(name, phone, M):
@@ -358,6 +371,9 @@ def _airtable_fields(sb, r, M):
     phone = M.get("cust_phone", {}).get(r.get("customer_id"))
     if phone:
         fields["Phone Number"] = phone
+    office = M.get("cust_office", {}).get(r.get("customer_id"))
+    if office:
+        fields["Office"] = office
     if r.get("equipment_off") is not None:
         fields["Equipment Off?"] = "TRUE" if r["equipment_off"] else "FALSE"
     if r.get("next_steps"):
@@ -380,14 +396,16 @@ def _push_pending_app_rows(sb, headers):
         return {"mode": "push", "pushed": 0}
     cust_ids = list({r["customer_id"] for r in rows if r.get("customer_id")})
     emp_ids = list({r["tech_employee_id"] for r in rows if r.get("tech_employee_id")})
-    custs = (sb.table("Customers").select("id,display_name,phone").in_("id", cust_ids).execute().data
+    custs = (sb.table("Customers").select("id,display_name,phone,office_id").in_("id", cust_ids).execute().data
              if cust_ids else [])
     disp = {c["id"]: c.get("display_name") for c in custs}
     cust_phone = {c["id"]: c.get("phone") for c in custs}
+    branches = {b["id"]: b["name"] for b in sb.table("branches").select("id,name").execute().data}
+    cust_office = {c["id"]: OFFICE_TO_AIRTABLE.get(branches.get(c.get("office_id"))) for c in custs}
     enm = {}
     for e in (sb.table("employees").select("id,first_name,last_name").in_("id", emp_ids).execute().data if emp_ids else []):
         enm[e["id"]] = " ".join(w.title() for w in (e.get("first_name") or "", e.get("last_name") or "") if w)
-    M = {"disp": disp, "emp_name": enm, "cust_phone": cust_phone}
+    M = {"disp": disp, "emp_name": enm, "cust_phone": cust_phone, "cust_office": cust_office}
     pushed = 0
     for r in rows:
         att = (r.get("sync_attempts") or 0) + 1
