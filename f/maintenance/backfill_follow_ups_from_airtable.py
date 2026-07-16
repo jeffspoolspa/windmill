@@ -35,6 +35,7 @@
 # supabase
 
 import re
+import time
 import difflib
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
@@ -456,6 +457,46 @@ def _rehost_media(sb, batch, after_id):
     return {"mode": "rehost_media", "rehosted": done, "last_id": rows[-1]["id"], "done": len(rows) < batch}
 
 
+def _backfill_office(sb, headers, M, apply):
+    # One-time: stamp the Airtable Office single-select on every already-mirrored
+    # ticket, derived from the ticket's customer. In-place PATCH on the current
+    # table (all history lives there) — leaves every other field untouched.
+    fu = sb.schema("maintenance").table("follow_ups")
+    rows, start = [], 0
+    while True:
+        page = (fu.select("airtable_record_id,customer_id")
+                .not_.is_("airtable_record_id", "null")
+                .range(start, start + 999).execute().data)
+        rows += page
+        if len(page) < 1000:
+            break
+        start += 1000
+    updates, by_office, no_office = [], {}, 0
+    for r in rows:
+        office = M["cust_office"].get(r["customer_id"])
+        if not office:
+            no_office += 1
+            continue
+        by_office[office] = by_office.get(office, 0) + 1
+        updates.append({"id": r["airtable_record_id"], "fields": {"Office": office}})
+    patched, failed, err = 0, 0, None
+    if apply:
+        # Airtable caps batch update at 10 records; sleep keeps us under 5 req/s.
+        for i in range(0, len(updates), 10):
+            chunk = updates[i:i + 10]
+            resp = requests.patch(AIRTABLE_URL, headers=headers,
+                                  json={"records": chunk, "typecast": True}, timeout=30)
+            if resp.ok:
+                patched += len(chunk)
+            else:
+                failed += len(chunk)
+                err = err or resp.text[:300]
+            time.sleep(0.25)
+    return {"mode": "backfill_office", "apply": apply, "total_mirrored": len(rows),
+            "to_patch": len(updates), "by_office": by_office, "no_office": no_office,
+            "patched": patched, "failed": failed, "error_sample": err}
+
+
 def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300,
          after_id: str = "", apply: bool = True):
     sb = _sb()
@@ -466,6 +507,8 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300,
         return _push_pending_app_rows(sb, headers)
     if mode == "rehost_media":
         return _rehost_media(sb, batch, after_id)
+    if mode == "backfill_office":
+        return _backfill_office(sb, headers, build_maps(sb), apply)
 
     recs = load_airtable(headers)
     recs = [r for r in recs if _created(r)[:10] >= since]
