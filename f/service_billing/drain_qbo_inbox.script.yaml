@@ -1,6 +1,6 @@
-summary: 'QBO inbox drainer (rebundle: refresh_payment delete fix)'
-description: redeploy to pick up the imported refresh_payment fix (imports
-  bundle at deploy time)
+summary: 'QBO inbox drainer: supersession extended to Payment + CreditMemo'
+description: our own writes webhooks moot-finish for all echoed entity types
+  (echo commits fetched_at before QBO fires)
 lock: '!inline f/service_billing/drain_qbo_inbox.script.lock'
 concurrency_key: qbo_api
 concurrency_time_window_s: 10

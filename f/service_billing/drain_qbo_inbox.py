@@ -49,10 +49,18 @@ WHERE id = (SELECT id FROM billing.qbo_inbox
 RETURNING id, entity_type, entity_id, operation, received_at
 """
 
-SUPERSEDED_INVOICE = """
-SELECT 1 FROM billing.invoices
-WHERE qbo_invoice_id = %s AND fetched_at > %s
-"""
+# Supersession probes: cache row already fresher than the signal -> the
+# signal is moot (usually OUR OWN write's webhook — the write-time echo
+# committed fetched_at before QBO even fired the event). Customer has no
+# fetch timestamp; its 4-a-day volume processes unconditionally.
+SUPERSEDED = {
+    "Invoice": """SELECT 1 FROM billing.invoices
+                  WHERE qbo_invoice_id = %s AND fetched_at > %s""",
+    "Payment": """SELECT 1 FROM billing.customer_payments
+                  WHERE qbo_payment_id = %s AND fetched_at > %s""",
+    "CreditMemo": """SELECT 1 FROM billing.customer_payments
+                     WHERE qbo_payment_id = 'CM-' || %s AND fetched_at > %s""",
+}
 
 
 def _row(conn, sql, params):
@@ -97,9 +105,9 @@ def main(max_units: int = 100):
                 break  # inbox empty
 
             # supersession: cache already fresher than the signal -> moot
-            if unit["entity_type"] == "Invoice" and _row(
-                conn, SUPERSEDED_INVOICE, (unit["entity_id"], unit["received_at"])
-            ):
+            sup_sql = SUPERSEDED.get(unit["entity_type"])
+            if sup_sql and _row(conn, sup_sql,
+                                (unit["entity_id"], unit["received_at"])):
                 _exec(conn, "UPDATE billing.qbo_inbox "
                             "SET finished_at = now(), error = NULL WHERE id = %s",
                       (unit["id"],))
