@@ -140,15 +140,11 @@ def main(routes, office=None, turns=False, debug_matrix=False):
         stops = rt["stops"]
         pts = [off] + [(s["lat"], s["lng"]) for s in stops]
         D = _dur_matrix(api_key, pts)
-        weekly = [i + 1 for i, s in enumerate(stops) if s.get("weekly")]
-        extra = [i + 1 for i, s in enumerate(stops) if not s.get("weekly")]
-        if weekly:
-            order = _tsp_backbone(D, weekly)
-        else:  # no weekly anchor -> just solve them all
-            order = _tsp_backbone(D, [i + 1 for i in range(len(stops))])
-            extra = []
-        for x in extra:
-            order = _cheapest_insert(D, order, x)
+        # Full exact TSP over ALL stops (Held-Karp): globally optimal single
+        # ordering on real drive time. (Replaced the weekly-backbone + greedy
+        # biweekly insertion, which could split near-neighbors — the two-Smiths
+        # backtrack on Elaina Wed. Drive time doesn't need the backbone trick.)
+        order = _tsp_backbone(D, [i + 1 for i in range(len(stops))])
         seq = [stops[i - 1]["id"] for i in order]
         # A/B/all drive minutes of the final order
         def mins(idxset):

@@ -1,4 +1,5 @@
-summary: TEMP drive-time route sequencing (Google Routes API) — delete after reroute
+summary: TEMP drive-time route sequencing (Google Routes API, full exact TSP) —
+  delete after reroute
 description: ''
 lock: '!inline f/ION/route_drivetime.script.lock'
 has_on_behalf_of: false
