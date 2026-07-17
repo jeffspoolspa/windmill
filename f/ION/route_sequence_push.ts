@@ -249,7 +249,8 @@ async function customerModes(s: any, customers: any[], mode: string, target_rout
       }
 
       if (mode === "live") {
-        let hit = slots.find((sl) => sl.routeId === target_route_id)
+        const rid = c.route_id ?? target_route_id   // per-customer route wins
+        let hit = slots.find((sl) => sl.routeId === rid)
         if (!hit) {
           // not assigned yet -> place into the requested slot (default or day)
           const slotMap: Record<string, { routeField: string; seqField: string }> = {
@@ -265,10 +266,11 @@ async function customerModes(s: any, customers: any[], mode: string, target_rout
           const want = slotMap[(c.assign_slot ?? "default").toLowerCase()]
           if (!want) { out.error = `bad assign_slot ${c.assign_slot}`; results.push(out); continue }
           const occupied = (fields[want.routeField] ?? "").trim()
-          if (occupied && occupied !== target_route_id) {
+          if (occupied && occupied !== rid && !c.allow_reassign) {
             out.error = `slot ${want.routeField} occupied by RouteID ${occupied} — not clobbering`
             results.push(out); continue
           }
+          if (occupied && occupied !== rid) out.reassigned_from = occupied
           hit = { rowLabel: c.assign_slot ?? "default", routeField: want.routeField, routeId: "", routeName: "(assigning)", seqField: want.seqField, seqValue: fields[want.seqField] ?? "" }
         }
         out.matched = { rowLabel: hit.rowLabel, routeName: hit.routeName, seqField: hit.seqField, before: hit.seqValue }
@@ -276,12 +278,12 @@ async function customerModes(s: any, customers: any[], mode: string, target_rout
           out.skipped = "already at target sequence"
           results.push(out); continue
         }
-        const post = { ...fields, [hit.routeField]: target_route_id, [hit.seqField]: String(c.new_seq), submit: "Update Routes" }
+        const post = { ...fields, [hit.routeField]: rid, [hit.seqField]: String(c.new_seq), submit: "Update Routes" }
         const resp = await ionPost(s, url, post)
         out.post_status = resp.status
         // verify by re-reading
         const check = await ionGet(s, url)
-        const after = parseForm(check.body).slots.find((sl) => sl.routeId === target_route_id)
+        const after = parseForm(check.body).slots.find((sl) => sl.routeId === rid)
         out.after = after?.seqValue ?? null
         out.verified = String(after?.seqValue ?? "").trim() === String(c.new_seq)
       }
