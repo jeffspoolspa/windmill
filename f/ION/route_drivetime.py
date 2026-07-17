@@ -9,30 +9,31 @@ import math
 from itertools import product
 
 OFFICE = (31.95699, -81.32371)
-DM_URL = "https://maps.googleapis.com/maps/api/distancematrix/json"
+RM_URL = "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix"
 
 
 def _dur_matrix(api_key, pts):
-    """Full P x P driving-duration matrix (seconds). Tiled to <=100 elements/req."""
+    """Full P x P driving-duration matrix (seconds) via Routes API computeRouteMatrix.
+    P<=25 keeps elements (P*P) <= 625, the per-request cap, so one request/route."""
     n = len(pts)
-    M = [[0.0] * n for _ in range(n)]
-    loc = [f"{la},{lo}" for la, lo in pts]
-    dchunk = max(1, 100 // n)
-    for d0 in range(0, n, dchunk):
-        dest = loc[d0:d0 + dchunk]
-        r = requests.get(DM_URL, params={
-            "origins": "|".join(loc), "destinations": "|".join(dest),
-            "mode": "driving", "key": api_key,
-        }, timeout=30).json()
-        if r.get("status") != "OK":
-            raise RuntimeError(f"DistanceMatrix {r.get('status')}: {r.get('error_message')}")
-        for i, row in enumerate(r["rows"]):
-            for j, el in enumerate(row["elements"]):
-                if el.get("status") != "OK":
-                    # fall back to a big number so the solver avoids unknown legs
-                    M[i][d0 + j] = 9e5
-                else:
-                    M[i][d0 + j] = el["duration"]["value"]
+    def wp(p):
+        return {"waypoint": {"location": {"latLng": {"latitude": p[0], "longitude": p[1]}}}}
+    body = {"origins": [wp(p) for p in pts], "destinations": [wp(p) for p in pts],
+            "travelMode": "DRIVE"}
+    r = requests.post(RM_URL, headers={
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": "originIndex,destinationIndex,duration,condition",
+    }, json=body, timeout=60)
+    data = r.json()
+    if r.status_code != 200:
+        raise RuntimeError(f"RouteMatrix {r.status_code}: {str(data)[:200]}")
+    M = [[9e5] * n for _ in range(n)]  # ROUTE_NOT_FOUND legs stay large
+    for el in data:
+        i, j = el["originIndex"], el["destinationIndex"]
+        dur = el.get("duration")
+        if dur and el.get("condition") == "ROUTE_EXISTS":
+            M[i][j] = float(str(dur).rstrip("s"))
     return M
 
 
