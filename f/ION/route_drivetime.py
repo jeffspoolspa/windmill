@@ -130,7 +130,7 @@ def _cheapest_insert(D, backbone, x):
     return [i for i in out if i != 0]
 
 
-def main(routes, office=None, turns=False):
+def main(routes, office=None, turns=False, debug_matrix=False):
     """routes: [{key, stops:[{id, lat, lng, weekly(bool)}]}]. Returns per-route order."""
     api_key = wmill.get_variable("f/google_maps/api_key")
     off = tuple(office) if office else OFFICE
@@ -158,5 +158,9 @@ def main(routes, office=None, turns=False):
         if turns:
             ordered_pts = [off] + [(stops[i - 1]["lat"], stops[i - 1]["lng"]) for i in order]
             rec["turns"] = _turn_report(api_key, ordered_pts)
+        if debug_matrix:
+            lab = ["OFFICE"] + [s.get("name", s["id"]) for s in stops]
+            rec["matrix_min"] = {lab[i]: {lab[j]: round(D[i][j] / 60, 1) for j in range(len(lab))}
+                                 for i in range(len(lab))}
         out.append(rec)
     return {"routes": out}
