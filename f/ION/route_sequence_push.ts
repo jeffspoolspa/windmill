@@ -115,7 +115,7 @@ function parseForm(html: string): { fields: Record<string, string>; slots: Slot[
 
 export async function main(
   customers: { ion_cust_id: string; new_seq: number; name: string }[] = [],
-  mode: "dryrun" | "live" = "dryrun",
+  mode: "dryrun" | "live" | "debug" = "dryrun",
   target_route_id = "",
 ) {
   const raw = await wmill.getVariable(CACHE)
@@ -135,6 +135,14 @@ export async function main(
       }
       const { fields, slots } = parseForm(page.body)
       out.slots = slots.filter((sl) => sl.routeId || sl.seqValue)
+      if (mode === "debug") {
+        out.allSlots = slots
+        out.fieldNames = Object.entries(fields).map(([k, v]) => `${k}=${v}`).slice(0, 40)
+        out.bytes = page.body.length
+        out.hasForm = /addcustroute/i.test(page.body)
+        const i = page.body.search(/addcustroute/i)
+        out.formHead = page.body.slice(Math.max(0, i - 100), i + 1800)
+      }
 
       if (mode === "live") {
         const hit = slots.find((sl) => sl.routeId === target_route_id)
