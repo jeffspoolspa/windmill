@@ -1,0 +1,6 @@
+summary: TEMP route/sequence endpoint discovery (read-only) — delete after
+description: ''
+lock: '!inline f/ION/route_sequence_probe.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
