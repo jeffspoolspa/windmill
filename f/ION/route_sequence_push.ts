@@ -115,13 +115,53 @@ function parseForm(html: string): { fields: Record<string, string>; slots: Slot[
 
 export async function main(
   customers: { ion_cust_id: string; new_seq: number; name: string }[] = [],
-  mode: "dryrun" | "live" | "debug" = "dryrun",
+  mode: "dryrun" | "live" | "debug" | "routes" | "admin_form" | "create_routes" = "dryrun",
   target_route_id = "",
+  route_names: string[] = [],
 ) {
   const raw = await wmill.getVariable(CACHE)
   if (!raw) throw new Error("no cached ION session")
   const s = JSON.parse(raw)
   const results: any[] = []
+
+  if (mode === "admin_form") {
+    // READ-ONLY: render the admin add-routes screen, dump its form structure
+    const url = `${s.ionOrigin}/admin/addRoutes.cfm?source=home&rand=0.1&_cf_containerId=cf_layoutarearoutecenter&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${s.cfClientId ?? ""}&_cf_rc=1`
+    const page = await ionGet(s, url)
+    const body = page.body
+    const forms: any[] = []
+    for (const m of body.matchAll(/<form\b[^>]*>/gi)) {
+      const tag = m[0]
+      const g = (k: string) => (new RegExp(`\\b${k}\\s*=\\s*["']([^"']*)["']`, "i").exec(tag) || [])[1] ?? null
+      forms.push({ action: g("action"), method: g("method"), id: g("id"), name: g("name") })
+    }
+    const fields: any[] = []
+    for (const m of body.matchAll(/<(input|select|textarea)\b[^>]*>/gi)) {
+      const tag = m[0]
+      const g = (k: string) => (new RegExp(`\\b${k}\\s*=\\s*["']([^"']*)["']`, "i").exec(tag) || [])[1] ?? null
+      const f: any = { el: m[1], name: g("name"), id: g("id"), type: g("type"), value: g("value") }
+      if (m[1].toLowerCase() === "select") {
+        const close = body.toLowerCase().indexOf("</select>", m.index!)
+        const inner = body.slice(m.index!, close < 0 ? m.index! + 4000 : close)
+        f.options = [...inner.matchAll(/<option\b[^>]*\bvalue\s*=\s*["']([^"']*)["'][^>]*>([^<]*)</gi)]
+          .slice(0, 15).map((o) => ({ value: o[1], label: o[2].trim() }))
+      }
+      fields.push(f)
+    }
+    const hints = new Set<string>()
+    for (const m of body.matchAll(/["'`](\/[A-Za-z0-9_\/]+\.cfm[^"'`]{0,60})["'`]/g)) hints.add(m[1])
+    return {
+      status: page.status, bytes: body.length,
+      looksLogin: /txtPassword/i.test(body.slice(0, 4000)),
+      forms, fields, cfmRefs: [...hints].slice(0, 25),
+      head: body.slice(0, 1500),
+    }
+  }
+
+  return await customerModes(s, customers, mode, target_route_id, results)
+}
+
+async function customerModes(s: any, customers: any[], mode: string, target_route_id: string, results: any[]) {
 
   for (const c of customers) {
     const out: any = { ion_cust_id: c.ion_cust_id, name: c.name, new_seq: c.new_seq }
