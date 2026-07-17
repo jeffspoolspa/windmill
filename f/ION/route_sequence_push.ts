@@ -135,6 +135,17 @@ export async function main(
       }
       const { fields, slots } = parseForm(page.body)
       out.slots = slots.filter((sl) => sl.routeId || sl.seqValue)
+      if (mode === "routes") {
+        // dump the full RouteID dropdown (route roster)
+        const m = /<select\b[^>]*\bname\s*=\s*["']RouteID["'][^>]*>/i.exec(page.body)
+        if (m) {
+          const close = page.body.toLowerCase().indexOf("</select>", m.index)
+          const inner = page.body.slice(m.index, close)
+          out.routes = [...inner.matchAll(/<option\b[^>]*\bvalue\s*=\s*["']([^"']+)["'][^>]*>([^<]*)</gi)]
+            .map((o) => ({ id: o[1], name: o[2].trim() }))
+        }
+        results.push(out); continue
+      }
       if (mode === "debug") {
         out.allSlots = slots
         out.fieldNames = Object.entries(fields).map(([k, v]) => `${k}=${v}`).slice(0, 40)
