@@ -137,7 +137,11 @@ export async function main(
         const url = `${s0.ionOrigin}/customers/addRoute.cfm?id=${a.ion_cust_id}`
         const page = await ionGet(s0, url)
         const { fields } = parseForm(page.body)
+        // clear default + every WEEKDAY slot (RouteID2..6 = Mon..Fri) so stale
+        // in-scope assignments (e.g. a wrong Friday) are removed; PRESERVE weekend
+        // slots RouteID1 (Sun) / RouteID7 (Sat) — those are other techs (Candice).
         const post: Record<string, string> = { ...fields, RouteID: "", sequence: "", submit: "Update Routes" }
+        for (let n = 2; n <= 6; n++) { post[`RouteID${n}`] = ""; post[`sequence${n}`] = "" }
         const want: Record<number, string> = {}
         for (const d of a.days) {
           const n = d.dow + 1
