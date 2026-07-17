@@ -124,6 +124,20 @@ export async function main(
   const s = JSON.parse(raw)
   const results: any[] = []
 
+  if (mode === "routes_list") {
+    // READ-ONLY: the routes listing — see existing routes' tech/location columns + edit link shape
+    const url = `${s.ionOrigin}/routes/routes.cfm`
+    const page = await ionGet(s, url)
+    const rows: string[] = []
+    for (const m of page.body.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+      const row = m[1]
+      if (!/RH - |addRoutes\.cfm|RouteID/i.test(row)) continue
+      rows.push(row.replace(/\s+/g, " ").trim().slice(0, 500))
+      if (rows.length >= 12) break
+    }
+    return { status: page.status, bytes: page.body.length, sampleRows: rows, head: page.body.slice(0, 800) }
+  }
+
   if (mode === "admin_form") {
     // READ-ONLY: render the admin add-routes screen, dump its form structure
     const url = `${s.ionOrigin}/admin/addRoutes.cfm?source=home${target_route_id ? `&RouteID=${target_route_id}` : ""}&rand=0.1&_cf_containerId=cf_layoutarearoutecenter&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${s.cfClientId ?? ""}&_cf_rc=1`
