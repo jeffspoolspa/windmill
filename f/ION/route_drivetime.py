@@ -1,5 +1,3 @@
-# requirements:
-# requests
 # f/ION/route_drivetime — TEMP. Drive-time route sequencing via Google Distance
 # Matrix (reuses f/google_maps/api_key). Per route: build a driving-duration
 # matrix, order the WEEKLY stops by an exact farthest-first TSP (backbone), then
