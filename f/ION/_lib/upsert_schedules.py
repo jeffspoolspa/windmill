@@ -104,6 +104,7 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
         "slots_deactivated": 0,        # surplus dayless / full_reconcile drops
         "tech_resolved": 0,
         "tech_unresolved": 0,
+        "per_day_rows": 0,
         "tech_unresolved_examples": [],
         "by_frequency": defaultdict(int),
         "dry_run": dry_run,
@@ -151,9 +152,20 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
                 if freq:
                     stats["by_frequency"][freq] += 1
                 tech_id = _resolve_tech(by_full, by_suffix, row.get("assignedTo"))
+                # Multi-assignee tasks: taskList concatenates the per-day techs into one
+                # cell; step b attaches perDayTech {dow: techName} from the task DETAIL
+                # form (one tech per day). Resolve each day individually.
+                day_tech = {}
+                for k, v in (row.get("perDayTech") or {}).items():
+                    try:
+                        day_tech[int(k)] = _resolve_tech(by_full, by_suffix, v)
+                    except (TypeError, ValueError):
+                        continue
+                if day_tech:
+                    stats["per_day_rows"] += 1
                 at = row.get("assignedTo") or ""
                 if at and "ASSIGN PEND" not in at.upper():
-                    if tech_id is not None:
+                    if tech_id is not None or any(t is not None for t in day_tech.values()):
                         stats["tech_resolved"] += 1
                     else:
                         stats["tech_unresolved"] += 1
@@ -166,6 +178,7 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
                 dayless = [s for s in own_active if s["dow"] is None]
 
                 for day in desired:
+                    d_tech = day_tech.get(day) or tech_id
                     if day in own_days:
                         # this ION task already serves the day -> refresh tech only
                         cur.execute(
@@ -173,7 +186,7 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
                                SET tech_employee_id = COALESCE(%s, tech_employee_id),
                                    active = true, external_source=%s, updated_at=now()
                                WHERE ion_task_id=%s AND day_of_week=%s""",
-                            (tech_id, source, ion_task_id, day),
+                            (d_tech, source, ion_task_id, day),
                         )
                         stats["slots_updated"] += cur.rowcount
                     elif dayless:
@@ -185,7 +198,7 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
                                    frequency = COALESCE(%s, frequency),
                                    active = true, external_source=%s, updated_at=now()
                                WHERE id=%s""",
-                            (day, tech_id, freq, source, s["id"]),
+                            (day, d_tech, freq, source, s["id"]),
                         )
                         stats["slots_dayfilled"] += 1
                         own_days.add(day)
@@ -195,7 +208,7 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
                                  (task_id, ion_task_id, day_of_week, tech_employee_id,
                                   frequency, active, starts_on, external_source)
                                VALUES (%s, %s, %s, %s, %s, true, CURRENT_DATE, %s)""",
-                            (task_id, ion_task_id, day, tech_id, freq, source),
+                            (task_id, ion_task_id, day, d_tech, freq, source),
                         )
                         stats["slots_inserted"] += 1
                         own_days.add(day)
