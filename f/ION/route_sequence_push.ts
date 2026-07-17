@@ -126,7 +126,7 @@ export async function main(
 
   if (mode === "admin_form") {
     // READ-ONLY: render the admin add-routes screen, dump its form structure
-    const url = `${s.ionOrigin}/admin/addRoutes.cfm?source=home&rand=0.1&_cf_containerId=cf_layoutarearoutecenter&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${s.cfClientId ?? ""}&_cf_rc=1`
+    const url = `${s.ionOrigin}/admin/addRoutes.cfm?source=home${target_route_id ? `&RouteID=${target_route_id}` : ""}&rand=0.1&_cf_containerId=cf_layoutarearoutecenter&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${s.cfClientId ?? ""}&_cf_rc=1`
     const page = await ionGet(s, url)
     const body = page.body
     const forms: any[] = []
@@ -142,9 +142,12 @@ export async function main(
       const f: any = { el: m[1], name: g("name"), id: g("id"), type: g("type"), value: g("value") }
       if (m[1].toLowerCase() === "select") {
         const close = body.toLowerCase().indexOf("</select>", m.index!)
-        const inner = body.slice(m.index!, close < 0 ? m.index! + 4000 : close)
+        const inner = body.slice(m.index!, close < 0 ? m.index! + 40000 : close)
+        const sel = /<option\b[^>]*\bselected\b[^>]*\bvalue\s*=\s*["']([^"']*)["']/i.exec(inner)
+          || /<option\b[^>]*\bvalue\s*=\s*["']([^"']*)["'][^>]*\bselected\b/i.exec(inner)
+        f.selected = sel?.[1] ?? null
         f.options = [...inner.matchAll(/<option\b[^>]*\bvalue\s*=\s*["']([^"']*)["'][^>]*>([^<]*)</gi)]
-          .slice(0, 15).map((o) => ({ value: o[1], label: o[2].trim() }))
+          .slice(0, 400).map((o) => ({ value: o[1], label: o[2].trim() }))
       }
       fields.push(f)
     }
