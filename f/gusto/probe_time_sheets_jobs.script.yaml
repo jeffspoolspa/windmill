@@ -1,0 +1,11 @@
+summary: 'READ-ONLY probe: does Gusto time_tracking/time_sheets expose
+  job/project per shift?'
+description: Diagnostic only. GET-only against Gusto. Uses the non-rotating
+  personal_access_token; deliberately avoids refresh_token (which rotates and is
+  shared with f/webhooks/get_employees and workers_comp). Determines whether
+  job/project allocation is retrievable via API for a native-time-tracking
+  company, vs only via the CSV report export.
+lock: '!inline f/gusto/probe_time_sheets_jobs.script.lock'
+has_on_behalf_of: false
+kind: script
+schema: null
