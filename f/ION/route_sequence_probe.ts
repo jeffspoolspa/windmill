@@ -78,6 +78,28 @@ function forms(html: string): any[] {
   return out
 }
 
+// ALL form fields (name/id/type/value + selected option) — full edit form dump
+function allFields(html: string): any[] {
+  const out: any[] = []
+  const re = /<(input|select|textarea)\b[^>]*>/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html))) {
+    const tag = m[0]
+    const g = (k: string) => (new RegExp(`\\b${k}\\s*=\\s*["']([^"']*)["']`, "i").exec(tag) || [])[1] ?? null
+    const entry: any = { el: m[1], name: g("name"), id: g("id"), type: g("type"), value: g("value") }
+    if (m[1].toLowerCase() === "select") {
+      const close = html.toLowerCase().indexOf("</select>", m.index)
+      const inner = html.slice(m.index, close < 0 ? m.index + 3000 : close)
+      const sel = /<option\b[^>]*\bselected\b[^>]*\bvalue\s*=\s*["']([^"']*)["']/i.exec(inner)
+        || /<option\b[^>]*\bvalue\s*=\s*["']([^"']*)["'][^>]*\bselected\b/i.exec(inner)
+      entry.selected = sel?.[1] ?? null
+      entry.optionCount = (inner.match(/<option\b/gi) || []).length
+    }
+    out.push(entry)
+  }
+  return out
+}
+
 // find function/endpoints referenced near a save (save*, update*, .cfm in JS)
 function saveHints(html: string): string[] {
   const hits = new Set<string>()
@@ -102,29 +124,30 @@ export async function main(customerid = "1124422") {
   // 3) the info container Carter's first curl hit (rendered route/sequence)
   const info = await ionGet(s, `${s.ionOrigin}/customers/customerTabs.cfm?customerid=${customerid}&${q}&_cf_containerId=customerInfo`)
 
-  const snip = (html: string, kw: string, n = 3) => {
+  const snip = (html: string, kw: string, n = 3, back = 30, fwd = 220) => {
     const low = html.toLowerCase(); const out: string[] = []
     let i = low.indexOf(kw), c = 0
-    while (i >= 0 && c < n) { out.push(html.slice(Math.max(0, i - 90), i + 130).replace(/\s+/g, " ").trim()); i = low.indexOf(kw, i + 1); c++ }
+    while (i >= 0 && c < n) { out.push(html.slice(Math.max(0, i - back), i + fwd).replace(/\s+/g, " ").trim()); i = low.indexOf(kw, i + 1); c++ }
     return out
   }
+
+  // 4) the ACTUAL edit form (opened by the "Route Info" button)
+  const addRoute = await ionGet(s, `${s.ionOrigin}/customers/addRoute.cfm?id=${customerid}`)
 
   return {
     customerid,
     prime: { status: prime.status, bytes: prime.body.length, looksLogin: /txtPassword/i.test(prime.body.slice(0, 4000)) },
-    cstdetails: {
-      status: details.status, bytes: details.body.length,
-      forms: forms(details.body),
-      routeSeqFields: fields(details.body),
-      saveHints: saveHints(details.body),
-      seqSnippets: snip(details.body, "sequence"),
-      routeSnippets: snip(details.body, "route"),
-    },
-    customerInfo: {
-      status: info.status, bytes: info.body.length,
-      routeSeqFields: fields(info.body),
-      seqSnippets: snip(info.body, "sequence"),
-      routeSnippets: snip(info.body, "route"),
+    routeSeqDisplay: snip(info.body, "route seq", 2, 15, 120),
+    routeNameDisplay: snip(info.body, "route name", 1, 15, 120),
+    addRoute: {
+      status: addRoute.status, bytes: addRoute.body.length,
+      looksLogin: /txtPassword/i.test(addRoute.body.slice(0, 4000)),
+      forms: forms(addRoute.body),
+      fields: allFields(addRoute.body),
+      saveHints: saveHints(addRoute.body),
+      seqSnippets: snip(addRoute.body, "seq", 4, 40, 160),
+      // first 1500 chars of the form region for eyeballing
+      head: addRoute.body.slice(0, 1200),
     },
   }
 }
