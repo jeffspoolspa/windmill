@@ -1,4 +1,4 @@
-summary: TEMP route re-sequencing (dryrun/live) — delete after reroute
+summary: TEMP route re-sequencing (dryrun/live/assign_full) — delete after reroute
 description: ''
 lock: '!inline f/ION/route_sequence_push.script.lock'
 has_on_behalf_of: false

@@ -115,13 +115,48 @@ function parseForm(html: string): { fields: Record<string, string>; slots: Slot[
 
 export async function main(
   customers: { ion_cust_id: string; new_seq: number; name: string }[] = [],
-  mode: "dryrun" | "live" | "debug" | "routes" | "admin_form" | "create_routes" = "dryrun",
+  mode: "dryrun" | "live" | "debug" | "routes" | "admin_form" | "create_routes" | "assign_full" = "dryrun",
   target_route_id = "",
   route_names: string[] = [],
   new_routes: { name: string; technician?: string }[] = [],
+  accounts: { ion_cust_id: string; name?: string; days: { dow: number; route_id: string; seq: number }[] }[] = [],
 ) {
   const raw = await wmill.getVariable(CACHE)
   if (!raw) throw new Error("no cached ION session")
+  const s0 = JSON.parse(raw)
+
+  if (mode === "assign_full") {
+    // Multi-day account: write each in-scope day into its day-numbered slot
+    // (dow d -> RouteID{d+1}/sequence{d+1}), CLEAR the default slot, and PRESERVE
+    // every other slot (out-of-scope days like Candice weekends). One POST/account.
+    const out: any[] = []
+    for (const a of accounts) {
+      const rec: any = { ion_cust_id: a.ion_cust_id, name: a.name }
+      try {
+        await ionGet(s0, `${s0.ionOrigin}/customers/customerTabs.cfm?customerid=${a.ion_cust_id}`)
+        const url = `${s0.ionOrigin}/customers/addRoute.cfm?id=${a.ion_cust_id}`
+        const page = await ionGet(s0, url)
+        const { fields } = parseForm(page.body)
+        const post: Record<string, string> = { ...fields, RouteID: "", sequence: "", submit: "Update Routes" }
+        const want: Record<number, string> = {}
+        for (const d of a.days) {
+          const n = d.dow + 1
+          post[`RouteID${n}`] = d.route_id
+          post[`sequence${n}`] = String(d.seq)
+          want[n] = d.route_id
+        }
+        const resp = await ionPost(s0, url, post)
+        rec.post_status = resp.status
+        const after = parseForm((await ionGet(s0, url)).body)
+        const amap: Record<string, string> = {}
+        for (const sl of after.slots) if (sl.routeId) amap[sl.routeField] = sl.routeId
+        rec.verified = Object.entries(want).every(([n, rid]) => amap[`RouteID${n}`] === rid)
+        rec.after = after.slots.filter((sl) => sl.routeId).map((sl) => `${sl.routeField}=${sl.routeId}:${sl.seqValue}`)
+      } catch (e: any) { rec.error = String(e?.message ?? e) }
+      out.push(rec)
+    }
+    return { mode, count: out.length, results: out }
+  }
   const s = JSON.parse(raw)
   const results: any[] = []
 
