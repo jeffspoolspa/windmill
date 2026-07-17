@@ -136,6 +136,7 @@ def main(routes, office=None, turns=False, debug_matrix=False):
     off = tuple(office) if office else OFFICE
     out = []
     for rt in routes:
+      try:
         stops = rt["stops"]
         pts = [off] + [(s["lat"], s["lng"]) for s in stops]
         D = _dur_matrix(api_key, pts)
@@ -163,4 +164,6 @@ def main(routes, office=None, turns=False, debug_matrix=False):
             rec["matrix_min"] = {lab[i]: {lab[j]: round(D[i][j] / 60, 1) for j in range(len(lab))}
                                  for i in range(len(lab))}
         out.append(rec)
+      except Exception as e:
+        out.append({"key": rt.get("key"), "error": str(e)[:200], "order": [s["id"] for s in rt["stops"]]})
     return {"routes": out}
