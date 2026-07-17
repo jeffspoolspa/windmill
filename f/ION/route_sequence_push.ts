@@ -118,11 +118,47 @@ export async function main(
   mode: "dryrun" | "live" | "debug" | "routes" | "admin_form" | "create_routes" = "dryrun",
   target_route_id = "",
   route_names: string[] = [],
+  new_routes: { name: string; technician?: string }[] = [],
 ) {
   const raw = await wmill.getVariable(CACHE)
   if (!raw) throw new Error("no cached ION session")
   const s = JSON.parse(raw)
   const results: any[] = []
+
+  if (mode === "create_routes") {
+    const dec = (t: string) => t.replace(/&#x28;/gi, "(").replace(/&#x29;/gi, ")").replace(/&amp;/gi, "&").replace(/\s+/g, " ").trim()
+    const postUrl = `${s.ionOrigin}/admin/addRoutes.cfm?source=home&rand=0.1&_cf_containerId=cf_layoutarearoutecenter&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${s.cfClientId ?? ""}&_cf_rc=1`
+    const created: any[] = []
+    for (const r of new_routes) {
+      const resp = await ionPost(s, postUrl, {
+        RouteName: r.name,
+        Technician: r.technician ?? "",
+        StartLocation: "1416",
+        StopLocation: "1416",
+        RouteDesc: "",
+        RouteID: "",
+        FromSource: "home",
+        Submit: "Submit",
+      })
+      created.push({ name: r.name, post_status: resp.status, err: /error|not\s+authorized|denied/i.test(resp.body.slice(0, 2000)) ? resp.body.slice(0, 300) : null })
+    }
+    // verify: re-pull the route dropdown from a customer page and resolve each name
+    await ionGet(s, `${s.ionOrigin}/customers/customerTabs.cfm?customerid=2465326`)
+    const page = await ionGet(s, `${s.ionOrigin}/customers/addRoute.cfm?id=2465326`)
+    const m = /<select\b[^>]*\bname\s*=\s*["']RouteID["'][^>]*>/i.exec(page.body)
+    const roster: { id: string; name: string }[] = []
+    if (m) {
+      const close = page.body.toLowerCase().indexOf("</select>", m.index)
+      for (const o of page.body.slice(m.index, close).matchAll(/<option\b[^>]*\bvalue\s*=\s*["']([^"']+)["'][^>]*>([^<]*)</gi))
+        roster.push({ id: o[1], name: dec(o[2]) })
+    }
+    for (const c of created) {
+      const hit = roster.filter((r) => r.name.toUpperCase() === c.name.toUpperCase())
+      c.resolved_ids = hit.map((h) => h.id)
+      c.verified = hit.length === 1
+    }
+    return { created, rosterCount: roster.length }
+  }
 
   if (mode === "routes_list") {
     // READ-ONLY: the routes listing — see existing routes' tech/location columns + edit link shape
@@ -213,14 +249,34 @@ async function customerModes(s: any, customers: any[], mode: string, target_rout
       }
 
       if (mode === "live") {
-        const hit = slots.find((sl) => sl.routeId === target_route_id)
-        if (!hit) { out.error = `no slot with RouteID ${target_route_id}`; results.push(out); continue }
+        let hit = slots.find((sl) => sl.routeId === target_route_id)
+        if (!hit) {
+          // not assigned yet -> place into the requested slot (default or day)
+          const slotMap: Record<string, { routeField: string; seqField: string }> = {
+            default: { routeField: "RouteID", seqField: "sequence" },
+            sunday: { routeField: "RouteID1", seqField: "sequence1" },
+            monday: { routeField: "RouteID2", seqField: "sequence2" },
+            tuesday: { routeField: "RouteID3", seqField: "sequence3" },
+            wednesday: { routeField: "RouteID4", seqField: "sequence4" },
+            thursday: { routeField: "RouteID5", seqField: "sequence5" },
+            friday: { routeField: "RouteID6", seqField: "sequence6" },
+            saturday: { routeField: "RouteID7", seqField: "sequence7" },
+          }
+          const want = slotMap[(c.assign_slot ?? "default").toLowerCase()]
+          if (!want) { out.error = `bad assign_slot ${c.assign_slot}`; results.push(out); continue }
+          const occupied = (fields[want.routeField] ?? "").trim()
+          if (occupied && occupied !== target_route_id) {
+            out.error = `slot ${want.routeField} occupied by RouteID ${occupied} — not clobbering`
+            results.push(out); continue
+          }
+          hit = { rowLabel: c.assign_slot ?? "default", routeField: want.routeField, routeId: "", routeName: "(assigning)", seqField: want.seqField, seqValue: fields[want.seqField] ?? "" }
+        }
         out.matched = { rowLabel: hit.rowLabel, routeName: hit.routeName, seqField: hit.seqField, before: hit.seqValue }
         if (String(hit.seqValue).trim() === String(c.new_seq)) {
           out.skipped = "already at target sequence"
           results.push(out); continue
         }
-        const post = { ...fields, [hit.seqField]: String(c.new_seq), submit: "Update Routes" }
+        const post = { ...fields, [hit.routeField]: target_route_id, [hit.seqField]: String(c.new_seq), submit: "Update Routes" }
         const resp = await ionPost(s, url, post)
         out.post_status = resp.status
         // verify by re-reading
