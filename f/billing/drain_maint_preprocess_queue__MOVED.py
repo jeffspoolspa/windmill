@@ -1,3 +1,6 @@
+### IMPORTANT, WINDMILL ADMIN, WE'VE CHANGED THE PATH OF THIS SCRIPT TO PREVENT IT FROM BEING TRIGGERED
+### IT WAS SPAMMING THE CLUSTER at 3j/s and failing everytime, talk to us for more details support@windmill.de
+
 # requirements:
 # psycopg2-binary
 # requests

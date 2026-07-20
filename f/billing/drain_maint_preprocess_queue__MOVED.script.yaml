@@ -4,7 +4,7 @@ description: Claims billing_audit.maint_preprocess_queue entries oldest-first
   in-process, one at a time, limit per tick. Self-heals by enqueueing any
   linked, unpreprocessed period missing a live queue entry. Scheduled every 2
   minutes.
-lock: '!inline f/billing/drain_maint_preprocess_queue.script.lock'
+lock: '!inline f/billing/drain_maint_preprocess_queue__MOVED.script.lock'
 concurrency_key: qbo_writer
 concurrency_time_window_s: 5
 concurrent_limit: 1
@@ -21,5 +21,6 @@ schema:
     max_per_tick:
       type: integer
       description: max customer-months to preprocess per run
-      default: 10
-  required: []
+      default: null
+  required:
+    - max_per_tick
