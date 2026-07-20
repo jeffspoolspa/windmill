@@ -1,10 +1,8 @@
-summary: 'QBO inbox drainer: supersession extended to Payment + CreditMemo'
-description: our own writes webhooks moot-finish for all echoed entity types
-  (echo commits fetched_at before QBO fires)
+summary: 'QBO inbox drainer (supersession: all 4 entities)'
+description: Customer joins supersession (fetched_at 2026-07-20)
 lock: '!inline f/service_billing/drain_qbo_inbox.script.lock'
 concurrency_key: qbo_api
 concurrency_time_window_s: 10
 concurrent_limit: 1
-has_on_behalf_of: false
 kind: script
 schema: null

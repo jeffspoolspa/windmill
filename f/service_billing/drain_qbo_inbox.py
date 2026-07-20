@@ -51,8 +51,9 @@ RETURNING id, entity_type, entity_id, operation, received_at
 
 # Supersession probes: cache row already fresher than the signal -> the
 # signal is moot (usually OUR OWN write's webhook — the write-time echo
-# committed fetched_at before QBO even fired the event). Customer has no
-# fetch timestamp; its 4-a-day volume processes unconditionally.
+# committed fetched_at before QBO even fired the event). All four mirrored
+# entities now carry fetched_at (Customers gained it 2026-07-20), so every
+# QBO entity supersedes uniformly.
 SUPERSEDED = {
     "Invoice": """SELECT 1 FROM billing.invoices
                   WHERE qbo_invoice_id = %s AND fetched_at > %s""",
@@ -60,6 +61,8 @@ SUPERSEDED = {
                   WHERE qbo_payment_id = %s AND fetched_at > %s""",
     "CreditMemo": """SELECT 1 FROM billing.customer_payments
                      WHERE qbo_payment_id = 'CM-' || %s AND fetched_at > %s""",
+    "Customer": """SELECT 1 FROM public."Customers"
+                   WHERE qbo_customer_id = %s AND fetched_at > %s""",
 }
 
 
