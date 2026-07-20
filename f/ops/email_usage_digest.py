@@ -13,6 +13,7 @@
 # send=False returns render metadata without queuing an email (safe preview).
 
 import os
+import math
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
@@ -27,6 +28,14 @@ DASHBOARD_URL = "https://claude.ai/code/artifact/3e5065a9-3ab8-435e-8474-1c5e53a
 RUNAWAY_RUNS = 5000      # nothing legitimate here runs this many times/day
 FAILING_LOOP_RUNS = 200  # + majority-failing => a broken trigger firing hot
 FAILING_LOOP_RATE = 0.30
+
+SEAT_QUOTA = 10000       # Windmill: included billable executions per seat / month
+USER_SEATS = 1           # developers+operators seats (from the billing page)
+
+
+def _seats(monthly_billable):
+    extra = math.ceil(max(0, monthly_billable - SEAT_QUOTA * USER_SEATS) / SEAT_QUOTA)
+    return USER_SEATS + extra
 
 
 def _conn():
@@ -86,7 +95,10 @@ def _render(day, rows, descs):
     total_runs = sum(r["runs"] for r in rows)
     total_s = sum(float(r["compute_s"]) for r in rows)
     total_failed = sum(r["failed"] for r in rows)
+    total_bill = sum(r["billable_execs"] for r in rows)
     n_runaway = sum(1 for r in rows if _runaway_reason(r))
+    monthly_est = total_bill * 30
+    seats_est = _seats(monthly_est)
 
     C = {"ink": "#0e2230", "dim": "#4a5f6d", "mute": "#7c93a1", "line": "#dbe4ea",
          "bg": "#f4f7f9", "card": "#ffffff", "crit": "#c0362c"}
@@ -107,16 +119,17 @@ def _render(day, rows, descs):
             + cell(f'<span style="{name_style}">{_esc(path)}</span>{flag}')
             + cell(f'<span style="color:{C["dim"]};font-size:12.5px;">{_esc(descs.get(path, ""))}</span>',
                    "white-space:normal;min-width:200px;")
-            + cell(f'{float(r["compute_s"]):,.0f}s', f'{mono}text-align:right;font-weight:600;white-space:nowrap;')
-            + cell(f'{r["runs"]:,}', f'{mono}text-align:right;color:{C["dim"]};white-space:nowrap;')
-            + cell(f'{srun:,.1f}s', f'{mono}text-align:right;color:{C["mute"]};white-space:nowrap;')
+            + cell(f'{r["billable_execs"]:,}', f'{mono}text-align:right;font-weight:700;white-space:nowrap;')
+            + cell(f'{float(r["compute_s"]):,.0f}s', f'{mono}text-align:right;color:{C["dim"]};white-space:nowrap;')
+            + cell(f'{r["runs"]:,}', f'{mono}text-align:right;color:{C["mute"]};white-space:nowrap;')
             + cell(f'{r["failed"]:,}', f'{mono}text-align:right;color:{C["crit"] if r["failed"] else C["mute"]};white-space:nowrap;')
             + "</tr>"
         )
 
     th = f'padding:8px 10px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:{C["mute"]};border-bottom:2px solid {C["line"]};'
-    subtitle = (f'{total_runs:,} executions &middot; {total_s/60:,.0f} min compute &middot; '
-                f'{total_failed:,} failures &middot; {len(rows)} scripts')
+    subtitle = (f'<b style="color:{C["ink"]}">{total_bill:,}</b> billable executions &middot; '
+                f'&asymp;{monthly_est:,} / month &rarr; <b style="color:{C["ink"]}">{seats_est} seats</b> at this rate &middot; '
+                f'{total_s/60:,.0f} min compute &middot; {total_failed:,} failures &middot; {len(rows)} scripts')
     if n_runaway:
         subtitle = f'<span style="color:{C["crit"]};font-weight:600;">&#9888; {n_runaway} runaway</span> &middot; ' + subtitle
 
@@ -129,23 +142,26 @@ def _render(day, rows, descs):
         f'<div style="background:{C["card"]};border:1px solid {C["line"]};border-radius:8px;overflow:hidden;">'
         f'<table role="presentation" width="100%" style="border-collapse:collapse;font-size:13px;">'
         f'<tr><th style="{th}">Script</th><th style="{th}">What it does</th>'
-        f'<th style="{th}text-align:right;">Compute/day</th><th style="{th}text-align:right;">Runs</th>'
-        f'<th style="{th}text-align:right;">s/run</th><th style="{th}text-align:right;">Failed</th></tr>'
+        f'<th style="{th}text-align:right;">Billable</th><th style="{th}text-align:right;">Compute</th>'
+        f'<th style="{th}text-align:right;">Runs</th><th style="{th}text-align:right;">Failed</th></tr>'
         f'{"".join(body_rows)}'
         f'</table></div>'
-        f'<p style="font-size:12px;color:{C["mute"]};margin:16px 0 0;">Every script that fired, ranked by compute time. '
-        f'Source <span style="{mono}">ops.script_usage_daily</span>; descriptions from each script&#39;s Windmill summary. '
-        f'<a href="{DASHBOARD_URL}" style="color:#2b8c62;">dashboard</a></p>'
+        f'<p style="font-size:12px;color:{C["mute"]};margin:16px 0 0;">Ranked by <b>billable executions</b> = what Windmill charges '
+        f'(max(1, ceil(seconds)) per job &times; 2GB memory blocks). Source <span style="{mono}">ops.script_usage_daily</span>; '
+        f'descriptions from each script&#39;s Windmill summary. <a href="{DASHBOARD_URL}" style="color:#2b8c62;">dashboard</a></p>'
         f'</div></div>'
     )
 
-    text = f"Windmill execution ledger {day}: {total_runs:,} execs, {total_s/60:,.0f}m compute, {total_failed:,} failed, {len(rows)} scripts.\n"
+    text = (f"Windmill ledger {day}: {total_bill:,} billable execs "
+            f"(~{monthly_est:,}/mo -> {seats_est} seats), {total_s/60:,.0f}m compute, "
+            f"{total_failed:,} failed, {len(rows)} scripts.\n")
     text += "\n".join(
-        f"  {float(r['compute_s']):>7,.0f}s {r['runs']:>6,}x  {r['script_path']}  — {descs.get(r['script_path'],'')}"
+        f"  {r['billable_execs']:>7,} bill {float(r['compute_s']):>7,.0f}s {r['runs']:>6,}x  {r['script_path']}  — {descs.get(r['script_path'],'')}"
         + (f"  [RUNAWAY {_runaway_reason(r)}]" if _runaway_reason(r) else "")
         for r in rows
     )
-    return html, text, {"total_runs": total_runs, "total_s": total_s,
+    return html, text, {"total_runs": total_runs, "total_s": total_s, "total_billable": total_bill,
+                        "monthly_est": monthly_est, "seats_est": seats_est,
                         "total_failed": total_failed, "runaways": n_runaway, "scripts": len(rows)}
 
 
@@ -159,10 +175,10 @@ def main(day: str = "", send: bool = True):
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            """SELECT script_path, runs, compute_s, failed
+            """SELECT script_path, runs, compute_s, failed, billable_execs
                  FROM ops.script_usage_daily
                 WHERE day = %s AND runs > 0
-                ORDER BY compute_s DESC""",
+                ORDER BY billable_execs DESC""",
             (day,),
         )
         rows = cur.fetchall()
@@ -174,7 +190,7 @@ def main(day: str = "", send: bool = True):
 
         descs = _describe([r["script_path"] for r in rows])
         html, text, meta = _render(day, rows, descs)
-        subject = f"[JPS Windmill] {day} ledger — {meta['scripts']} scripts, {meta['total_s']/60:,.0f}m compute"
+        subject = f"[JPS Windmill] {day} — {meta['total_billable']:,} billable execs (~{meta['seats_est']} seats/mo)"
         if meta["runaways"]:
             subject = f"⚠ RUNAWAY — {subject}"
 

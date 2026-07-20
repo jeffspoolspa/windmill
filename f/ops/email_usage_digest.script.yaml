@@ -1,7 +1,8 @@
-summary: Daily Windmill execution ledger email (every script + description,
-  compute-ranked)
-description: Projection of ops.script_usage_daily -> system_alerts. Descriptions
-  from each script's Windmill summary. Flags runaways. send=False previews.
+summary: Daily Windmill execution ledger email (billable execs + seat
+  projection, every script)
+description: Projection of ops.script_usage_daily -> system_alerts. Ranked by
+  billable executions (Windmill's bill unit). Seat projection. Flags runaways.
+  send=False previews.
 lock: '!inline f/ops/email_usage_digest.script.lock'
 kind: script
 schema: null
