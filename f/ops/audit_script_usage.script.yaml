@@ -1,0 +1,5 @@
+summary: Daily per-script Windmill usage rollup -> ops.script_usage_daily
+description: Recurring usage audit. Cursor-paginated jobs/list aggregate by script_path.
+lock: '!inline f/ops/audit_script_usage.script.lock'
+kind: script
+schema: null
