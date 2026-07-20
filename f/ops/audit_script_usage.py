@@ -15,6 +15,7 @@
 
 import os
 import json
+import math
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
@@ -82,9 +83,14 @@ def _fetch_day(day_str: str) -> dict:
             seen.add(jid)
             new += 1
             path = j.get("script_path") or f"<{j.get('job_kind', '?')}>"
-            a = agg.setdefault(path, {"runs": 0, "ms": 0, "failed": 0, "kinds": {}})
+            a = agg.setdefault(path, {"runs": 0, "ms": 0, "failed": 0, "bill": 0, "kinds": {}})
+            durms = j.get("duration_ms") or 0
+            mem_kb = j.get("mem_peak") or 0            # KB; 2 GB = 2097152 KB
+            mem_mult = max(1, math.ceil(mem_kb / 2097152)) if mem_kb else 1
+            # Windmill bill unit: max(1, ceil(seconds)) per job, x memory blocks of 2 GB.
+            a["bill"] += max(1, math.ceil(durms / 1000)) * mem_mult
             a["runs"] += 1
-            a["ms"] += (j.get("duration_ms") or 0)
+            a["ms"] += durms
             if j.get("success") is False:
                 a["failed"] += 1
             k = _classify(j.get("created_by"), bool(j.get("script_path")))
@@ -109,20 +115,21 @@ def main(day: str = ""):
         for path, a in agg.items():
             cur.execute(
                 """INSERT INTO ops.script_usage_daily
-                     (day, script_path, runs, compute_s, failed, kinds)
-                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                     (day, script_path, runs, compute_s, failed, billable_execs, kinds)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                 (day, path, a["runs"], round(a["ms"] / 1000, 1),
-                 a["failed"], json.dumps(a["kinds"])),
+                 a["failed"], a["bill"], json.dumps(a["kinds"])),
             )
         conn.commit()
     finally:
         conn.close()
 
-    total = sum(a["runs"] for a in agg.values())
-    top = sorted(agg.items(), key=lambda kv: kv[1]["runs"], reverse=True)[:5]
+    total_bill = sum(a["bill"] for a in agg.values())
+    top = sorted(agg.items(), key=lambda kv: kv[1]["bill"], reverse=True)[:5]
     return {
         "day": day,
         "distinct_scripts": len(agg),
-        "total_runs": total,
-        "top5": [{"script": p, "runs": a["runs"]} for p, a in top],
+        "total_billable_execs": total_bill,
+        "total_runs": sum(a["runs"] for a in agg.values()),
+        "top5": [{"script": p, "billable": a["bill"], "runs": a["runs"]} for p, a in top],
     }

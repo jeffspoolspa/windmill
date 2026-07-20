@@ -1,5 +1,7 @@
-summary: Daily per-script Windmill usage rollup -> ops.script_usage_daily
-description: Recurring usage audit. Cursor-paginated jobs/list aggregate by script_path.
+summary: Daily per-script Windmill usage rollup (runs + compute + billable
+  execs) -> ops.script_usage_daily
+description: Cursor-paginated jobs/list aggregate. billable_execs = sum
+  max(1,ceil(sec))*mem-blocks per job (Windmill's bill unit).
 lock: '!inline f/ops/audit_script_usage.script.lock'
 kind: script
 schema: null
