@@ -1,20 +1,23 @@
 # f/ops/email_usage_digest
 #
-# Daily Windmill usage digest -> email (via public.system_alerts + the
+# Daily Windmill execution ledger -> email (via public.system_alerts + the
 # send_pending_system_alerts poller). Pure projection of ops.script_usage_daily
-# (written by f/ops/audit_script_usage) — it recomputes nothing, so it can be
+# (written by f/ops/audit_script_usage) — recomputes nothing, so it can be
 # re-sent for any past day from stored data.
 #
-# Ordered by COMPUTE per day (worker occupancy), not run count, per request.
-# Flags runaways: any script over RUNAWAY_RUNS/day, or a high-volume failing
-# loop (a broken wake/trigger). A runaway bumps the alert to severity=high.
+# The email IS the ledger: every script that fired, ranked by COMPUTE per day
+# (worker occupancy), each with a one-line description pulled live from the
+# script's Windmill `summary`. Runaway rows are flagged inline and bump the
+# alert to severity=high (>RUNAWAY_RUNS/day, or a high-volume failing loop).
 #
-# send=False returns the rendered HTML without queuing an email (safe preview).
+# send=False returns render metadata without queuing an email (safe preview).
 
+import os
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import psycopg2.extras
+import requests
 import wmill
 
 SUPABASE_RESOURCE = "u/carter/supabase"
@@ -35,10 +38,36 @@ def _conn():
     )
 
 
-def _fmt_kinds(kinds) -> str:
-    if not kinds:
-        return ""
-    return ", ".join(f"{k}×{v}" for k, v in sorted(kinds.items(), key=lambda kv: -kv[1]))
+def _describe(script_paths):
+    """path -> one-line description, from each script's Windmill `summary`
+    (falls back to the first line of its description). Non-script rows
+    (<flow>, <preview>, hub/...) get a generic label. One GET per path/day."""
+    base = os.environ.get("BASE_INTERNAL_URL") or "https://app.windmill.dev"
+    token = os.environ.get("WM_TOKEN", "")
+    ws = os.environ.get("WM_WORKSPACE", "jps-internal")
+    h = {"Authorization": f"Bearer {token}"}
+    out = {}
+    for p in script_paths:
+        if p.startswith("<"):
+            out[p] = {"<flow>": "inline flow step", "<preview>": "ad-hoc preview run",
+                      "<http>": "HTTP-triggered run"}.get(p, "(non-script job)")
+            continue
+        if p.startswith("hub/"):
+            out[p] = "Windmill Hub script"
+            continue
+        try:
+            r = requests.get(f"{base}/api/w/{ws}/scripts/get/p/{p}", headers=h, timeout=20)
+            if r.ok:
+                d = r.json()
+                desc = (d.get("summary") or "").strip()
+                if not desc:
+                    desc = (d.get("description") or "").strip().splitlines()[0] if d.get("description") else ""
+                out[p] = desc or "(no summary set)"
+            else:
+                out[p] = "(not found)" if r.status_code == 404 else f"(lookup {r.status_code})"
+        except Exception:
+            out[p] = ""
+    return out
 
 
 def _runaway_reason(r) -> str:
@@ -49,102 +78,80 @@ def _runaway_reason(r) -> str:
     return ""
 
 
-def _render(day, rows):
+def _esc(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _render(day, rows, descs):
     total_runs = sum(r["runs"] for r in rows)
     total_s = sum(float(r["compute_s"]) for r in rows)
     total_failed = sum(r["failed"] for r in rows)
-    runaways = [(r, _runaway_reason(r)) for r in rows if _runaway_reason(r)]
+    n_runaway = sum(1 for r in rows if _runaway_reason(r))
 
-    C = {
-        "ink": "#0e2230", "dim": "#4a5f6d", "mute": "#7c93a1", "line": "#dbe4ea",
-        "bg": "#f4f7f9", "card": "#ffffff", "crit": "#c0362c", "critbg": "#fbeceb",
-        "good": "#2b8c62", "head": "#0e2230",
-    }
+    C = {"ink": "#0e2230", "dim": "#4a5f6d", "mute": "#7c93a1", "line": "#dbe4ea",
+         "bg": "#f4f7f9", "card": "#ffffff", "crit": "#c0362c"}
     mono = "font-family:'SF Mono',Menlo,Consolas,monospace;"
 
     def cell(v, style=""):
-        return f'<td style="padding:7px 10px;border-bottom:1px solid {C["line"]};{style}">{v}</td>'
+        return f'<td style="padding:8px 10px;border-bottom:1px solid {C["line"]};vertical-align:top;{style}">{v}</td>'
 
     body_rows = []
     for r in rows:
         reason = _runaway_reason(r)
-        name_style = f"{mono}font-size:12px;color:{C['crit'] if reason else C['ink']};"
+        path = r["script_path"]
+        name_style = f"{mono}font-size:12px;color:{C['crit'] if reason else C['ink']};white-space:nowrap;"
         srun = float(r["compute_s"]) / r["runs"] if r["runs"] else 0
-        flag = f' <span style="color:{C["crit"]};font-weight:600;">&#9888; {reason}</span>' if reason else ""
+        flag = f'<div style="color:{C["crit"]};font-weight:600;font-size:11px;">&#9888; {reason}</div>' if reason else ""
         body_rows.append(
             "<tr>"
-            + cell(f'<span style="{name_style}">{r["script_path"]}</span>{flag}')
-            + cell(f'{float(r["compute_s"]):,.0f}s', f'{mono}text-align:right;font-weight:600;')
-            + cell(f'{r["runs"]:,}', f'{mono}text-align:right;color:{C["dim"]};')
-            + cell(f'{srun:,.1f}s', f'{mono}text-align:right;color:{C["mute"]};')
-            + cell(f'{r["failed"]:,}', f'{mono}text-align:right;color:{C["crit"] if r["failed"] else C["mute"]};')
-            + cell(f'<span style="color:{C["mute"]};font-size:12px;">{_fmt_kinds(r.get("kinds"))}</span>')
+            + cell(f'<span style="{name_style}">{_esc(path)}</span>{flag}')
+            + cell(f'<span style="color:{C["dim"]};font-size:12.5px;">{_esc(descs.get(path, ""))}</span>',
+                   "white-space:normal;min-width:200px;")
+            + cell(f'{float(r["compute_s"]):,.0f}s', f'{mono}text-align:right;font-weight:600;white-space:nowrap;')
+            + cell(f'{r["runs"]:,}', f'{mono}text-align:right;color:{C["dim"]};white-space:nowrap;')
+            + cell(f'{srun:,.1f}s', f'{mono}text-align:right;color:{C["mute"]};white-space:nowrap;')
+            + cell(f'{r["failed"]:,}', f'{mono}text-align:right;color:{C["crit"] if r["failed"] else C["mute"]};white-space:nowrap;')
             + "</tr>"
         )
 
-    runaway_block = ""
-    if runaways:
-        items = "".join(
-            f'<li style="margin:3px 0;"><span style="{mono}">{r["script_path"]}</span> &mdash; {reason}</li>'
-            for r, reason in runaways
-        )
-        runaway_block = (
-            f'<div style="background:{C["critbg"]};border:1px solid {C["crit"]};border-radius:8px;'
-            f'padding:14px 16px;margin:0 0 18px;">'
-            f'<div style="font-weight:700;color:{C["crit"]};margin-bottom:6px;">'
-            f'&#9888; {len(runaways)} runaway signal(s) &mdash; investigate</div>'
-            f'<ul style="margin:0;padding-left:20px;color:{C["ink"]};font-size:14px;">{items}</ul></div>'
-        )
-
-    summary = (
-        f'<table role="presentation" width="100%" style="border-collapse:collapse;margin:0 0 18px;">'
-        f'<tr>'
-        f'<td style="padding:10px 14px;background:{C["card"]};border:1px solid {C["line"]};border-radius:8px;text-align:center;">'
-        f'<div style="font-size:22px;font-weight:700;{mono}color:{C["ink"]};">{total_runs:,}</div>'
-        f'<div style="font-size:11px;color:{C["mute"]};text-transform:uppercase;letter-spacing:.06em;">executions</div></td>'
-        f'<td style="width:10px;"></td>'
-        f'<td style="padding:10px 14px;background:{C["card"]};border:1px solid {C["line"]};border-radius:8px;text-align:center;">'
-        f'<div style="font-size:22px;font-weight:700;{mono}color:{C["ink"]};">{total_s/60:,.0f} min</div>'
-        f'<div style="font-size:11px;color:{C["mute"]};text-transform:uppercase;letter-spacing:.06em;">compute</div></td>'
-        f'<td style="width:10px;"></td>'
-        f'<td style="padding:10px 14px;background:{C["card"]};border:1px solid {C["line"]};border-radius:8px;text-align:center;">'
-        f'<div style="font-size:22px;font-weight:700;{mono}color:{C["crit"] if total_failed else C["good"]};">{total_failed:,}</div>'
-        f'<div style="font-size:11px;color:{C["mute"]};text-transform:uppercase;letter-spacing:.06em;">failures</div></td>'
-        f'</tr></table>'
-    )
-
     th = f'padding:8px 10px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:{C["mute"]};border-bottom:2px solid {C["line"]};'
+    subtitle = (f'{total_runs:,} executions &middot; {total_s/60:,.0f} min compute &middot; '
+                f'{total_failed:,} failures &middot; {len(rows)} scripts')
+    if n_runaway:
+        subtitle = f'<span style="color:{C["crit"]};font-weight:600;">&#9888; {n_runaway} runaway</span> &middot; ' + subtitle
+
     html = (
         f'<div style="background:{C["bg"]};padding:24px 0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:{C["ink"]};">'
-        f'<div style="max-width:760px;margin:0 auto;padding:0 20px;">'
-        f'<div style="font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:{C["mute"]};">Windmill usage &middot; jps-internal</div>'
-        f'<h1 style="font-size:22px;margin:4px 0 16px;color:{C["head"]};">Daily compute report &mdash; {day}</h1>'
-        f'{runaway_block}{summary}'
+        f'<div style="max-width:820px;margin:0 auto;padding:0 20px;">'
+        f'<div style="font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:{C["mute"]};">Windmill execution ledger &middot; jps-internal</div>'
+        f'<h1 style="font-size:22px;margin:4px 0 4px;color:{C["ink"]};">{day}</h1>'
+        f'<div style="font-size:13px;color:{C["dim"]};margin-bottom:16px;">{subtitle}</div>'
         f'<div style="background:{C["card"]};border:1px solid {C["line"]};border-radius:8px;overflow:hidden;">'
         f'<table role="presentation" width="100%" style="border-collapse:collapse;font-size:13px;">'
-        f'<tr><th style="{th}">Script</th><th style="{th}text-align:right;">Compute/day</th>'
-        f'<th style="{th}text-align:right;">Runs</th><th style="{th}text-align:right;">s/run</th>'
-        f'<th style="{th}text-align:right;">Failed</th><th style="{th}">Triggers</th></tr>'
+        f'<tr><th style="{th}">Script</th><th style="{th}">What it does</th>'
+        f'<th style="{th}text-align:right;">Compute/day</th><th style="{th}text-align:right;">Runs</th>'
+        f'<th style="{th}text-align:right;">s/run</th><th style="{th}text-align:right;">Failed</th></tr>'
         f'{"".join(body_rows)}'
         f'</table></div>'
-        f'<p style="font-size:12px;color:{C["mute"]};margin:16px 0 0;">Ranked by compute time (worker occupancy). '
-        f'Source: <span style="{mono}">ops.script_usage_daily</span> &middot; '
-        f'<a href="{DASHBOARD_URL}" style="color:{C["good"]};">live dashboard</a></p>'
+        f'<p style="font-size:12px;color:{C["mute"]};margin:16px 0 0;">Every script that fired, ranked by compute time. '
+        f'Source <span style="{mono}">ops.script_usage_daily</span>; descriptions from each script&#39;s Windmill summary. '
+        f'<a href="{DASHBOARD_URL}" style="color:#2b8c62;">dashboard</a></p>'
         f'</div></div>'
     )
 
-    text = f"Windmill usage {day}: {total_runs:,} executions, {total_s/60:,.0f} min compute, {total_failed:,} failures.\n"
-    if runaways:
-        text += "RUNAWAYS: " + "; ".join(f"{r['script_path']} ({reason})" for r, reason in runaways) + "\n"
-    text += "Top by compute:\n" + "\n".join(
-        f"  {float(r['compute_s']):>7,.0f}s  {r['runs']:>6,}x  {r['script_path']}" for r in rows[:12]
+    text = f"Windmill execution ledger {day}: {total_runs:,} execs, {total_s/60:,.0f}m compute, {total_failed:,} failed, {len(rows)} scripts.\n"
+    text += "\n".join(
+        f"  {float(r['compute_s']):>7,.0f}s {r['runs']:>6,}x  {r['script_path']}  — {descs.get(r['script_path'],'')}"
+        + (f"  [RUNAWAY {_runaway_reason(r)}]" if _runaway_reason(r) else "")
+        for r in rows
     )
     return html, text, {"total_runs": total_runs, "total_s": total_s,
-                        "total_failed": total_failed, "runaways": len(runaways)}
+                        "total_failed": total_failed, "runaways": n_runaway, "scripts": len(rows)}
 
 
 def main(day: str = "", send: bool = True):
-    """Email yesterday's usage digest (ordered by compute/day). send=False = preview only."""
+    """Email the day's execution ledger (every script, ranked by compute).
+    Default day = yesterday. send=False = preview only (no email queued)."""
     if not day:
         day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
 
@@ -152,7 +159,7 @@ def main(day: str = "", send: bool = True):
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            """SELECT script_path, runs, compute_s, failed, kinds
+            """SELECT script_path, runs, compute_s, failed
                  FROM ops.script_usage_daily
                 WHERE day = %s AND runs > 0
                 ORDER BY compute_s DESC""",
@@ -165,21 +172,22 @@ def main(day: str = "", send: bool = True):
             return {"day": day, "status": "no_data",
                     "note": "no ops.script_usage_daily rows — run f/ops/audit_script_usage for this day first"}
 
-        html, text, meta = _render(day, rows)
-        subject = f"[JPS Windmill] {day} — {meta['total_runs']:,} execs, {meta['total_s']/60:,.0f}m compute"
+        descs = _describe([r["script_path"] for r in rows])
+        html, text, meta = _render(day, rows, descs)
+        subject = f"[JPS Windmill] {day} ledger — {meta['scripts']} scripts, {meta['total_s']/60:,.0f}m compute"
         if meta["runaways"]:
             subject = f"⚠ RUNAWAY — {subject}"
 
         if not send:
             return {"day": day, "status": "preview", "would_send_to": RECIPIENT,
-                    "subject": subject, **meta, "html_len": len(html)}
+                    "subject": subject, **meta, "html_len": len(html),
+                    "sample_desc": {r["script_path"]: descs.get(r["script_path"]) for r in rows[:6]}}
 
         cur = conn.cursor()
         cur.execute(
             """INSERT INTO public.system_alerts
                  (source, severity, subject, body_html, body_text, recipient, status)
-               VALUES (%s, %s, %s, %s, %s, %s, 'pending')
-               RETURNING id""",
+               VALUES (%s, %s, %s, %s, %s, %s, 'pending') RETURNING id""",
             ("ops.usage_digest", "high" if meta["runaways"] else "low",
              subject, html, text, RECIPIENT),
         )
