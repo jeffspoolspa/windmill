@@ -1,0 +1,6 @@
+summary: Daily Windmill usage digest email (ordered by compute/day)
+description: Projection of ops.script_usage_daily -> system_alerts. Flags
+  runaways. send=False previews.
+lock: '!inline f/ops/email_usage_digest.script.lock'
+kind: script
+schema: null
