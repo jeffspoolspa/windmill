@@ -1,6 +1,5 @@
 summary: 'CDC probe (rebundle: refresh_payment delete fix)'
 description: redeploy to pick up the imported refresh_payment fix
 lock: '!inline f/service_billing/cdc_reconciler.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
