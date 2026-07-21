@@ -1,0 +1,8 @@
+summary: 'Throwaway: scan RC call log for UF-audit Category C customer numbers
+  (May 15 → today)'
+description: 'One-off for UF audit: single-pass scan of Brunswick RC call log
+  matching Category C customer phone numbers; returns calls + recording IDs per
+  customer.'
+lock: '!inline u/carter/throwaway_uf_audit_call_scan.script.lock'
+kind: script
+schema: null
