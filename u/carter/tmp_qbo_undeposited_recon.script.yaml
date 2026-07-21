@@ -1,9 +1,0 @@
-summary: 'TEMP (delete after run): reconcile undeposited Payments/SalesReceipts
-  against Undeposited Funds balance'
-description: Throwaway reconciliation script created by Claude at Carter's
-  request. Sums all Payments/SalesReceipts posted to Undeposited Funds with no
-  Deposit linkage (minus RefundReceipts from UF) and compares against the UF
-  account's live balance. Delete after retrieving results.
-lock: '!inline u/carter/tmp_qbo_undeposited_recon.script.lock'
-kind: script
-schema: null
