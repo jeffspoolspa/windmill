@@ -1,0 +1,6 @@
+summary: 'Throwaway: batch-transcribe UF-audit Category C recordings near payment dates'
+description: 'One-off: transcribes the RC recordings nearest each Category C
+  payment date via gpt-4o-transcribe-diarize (fallback gpt-4o-transcribe).'
+lock: '!inline u/carter/throwaway_uf_audit_transcribe_batch.script.lock'
+kind: script
+schema: null
