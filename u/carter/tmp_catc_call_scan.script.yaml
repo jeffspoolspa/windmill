@@ -1,5 +1,5 @@
 summary: 'TEMP (delete after run): scan RC call log for Category C customer numbers'
-description: "One-off for the UF audit: pull all calls since 5/12 for the 8
+description: "One-off for the UF audit: pull all calls since 5/12 for the
   Category C customers' phone numbers. Delete after retrieving results."
 lock: '!inline u/carter/tmp_catc_call_scan.script.lock'
 kind: script

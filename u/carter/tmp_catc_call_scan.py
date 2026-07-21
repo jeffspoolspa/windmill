@@ -60,8 +60,41 @@ def main():
                     if from_obj:
                         from_num = from_obj.phoneNumber if hasattr(from_obj, 'phoneNumber') else ''
                         from_name = from_obj.name if hasattr(from_obj, 'name') else ''
-            except Exception:
-                pass
-            time.sleep(0)
-        out[cust] = cust_calls
+                except Exception:
+                    pass
+                try:
+                    if hasattr(r, 'to') and r.to:
+                        to_num = r.to.phoneNumber if hasattr(r.to, 'phoneNumber') else ''
+                except Exception:
+                    pass
+
+                has_rec = hasattr(r, 'recording') and r.recording is not None
+                rec_id = r.recording.id if has_rec else None
+                extra = []
+                if hasattr(r, 'legs') and r.legs:
+                    for leg in r.legs:
+                        leg_rec = leg.recording.id if hasattr(leg, 'recording') and leg.recording else None
+                        if leg_rec and leg_rec != rec_id:
+                            extra.append(leg_rec)
+                cust_calls.append({
+                    'matched_number': digits,
+                    'date': r.startTime if hasattr(r, 'startTime') else '?',
+                    'duration_s': r.duration if hasattr(r, 'duration') else 0,
+                    'direction': r.direction if hasattr(r, 'direction') else '?',
+                    'result': r.result if hasattr(r, 'result') else '?',
+                    'from': f"{from_num} ({from_name})" if from_name else from_num,
+                    'to': to_num,
+                    'recording_id': rec_id,
+                    'extra_recordings': extra
+                })
+            time.sleep(1.2)
+        seen = set()
+        uniq = []
+        for c in sorted(cust_calls, key=lambda x: x['date']):
+            k = (c['date'], c['from'], c['to'])
+            if k not in seen:
+                seen.add(k)
+                uniq.append(c)
+        out[cust] = uniq
+        print(f"{cust}: {len(uniq)} calls")
     return out
