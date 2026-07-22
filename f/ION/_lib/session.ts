@@ -63,6 +63,7 @@ export async function loginToIon(ion: IonResource): Promise<IonSession> {
   const browser = await chromium.launch({
     executablePath: chromiumExecutable(),
     args: CHROMIUM_LAUNCH_ARGS,
+    timeout: 60000, // else a stuck launch hangs the whole job unbounded
   })
   try {
     const context = await browser.newContext({ userAgent: BROWSER_USER_AGENT })
@@ -73,7 +74,7 @@ export async function loginToIon(ion: IonResource): Promise<IonSession> {
       const m = req.url().match(/_cf_clientid=([A-F0-9]{32})/i)
       if (m) cfClientId = m[1]
     })
-    await page.goto(ion.loginUrl)
+    await page.goto(ion.loginUrl, { timeout: 30000 }) // default goto has no cap -> bound it
     await page.locator("#txtUserName").fill(ion.username)
     await page.locator("#txtPassword").fill(ion.password)
     await page.locator('button:has-text("Log In")').click()
