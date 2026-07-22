@@ -3,6 +3,5 @@ summary: 'write-time echoes: recorded payments + credit applies echo the
 description: 'write-time echoes: recorded payments + credit applies echo the
   RESPONSE; only the CM ripple stays computed'
 lock: '!inline f/billing/_lib/payments.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null

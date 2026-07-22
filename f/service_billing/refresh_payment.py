@@ -264,6 +264,12 @@ def main(qbo_payment_id: str, qbo_body: dict | None = None):
                     "DELETE FROM billing.customer_payments WHERE qbo_payment_id = %s",
                     (qbo_payment_id,))
                 deleted = cur.rowcount
+                # a deleted credit can no longer be a candidate anywhere
+                cur.execute("""UPDATE billing.invoice_credit_decisions
+                               SET state = 'stale', decided_by = 'external_qbo',
+                                   decided_at = now()
+                               WHERE credit_id = %s AND state = 'candidate'""",
+                            (qbo_payment_id,))
                 conn.commit()
                 cur.close()
             finally:
@@ -296,6 +302,31 @@ def main(qbo_payment_id: str, qbo_body: dict | None = None):
     try:
         qbo_payment_id, did_write, upserted = upsert_payment(conn, qbo_pmt)
         conn.commit()
+
+        # Open credit-decision candidates are maintained HERE — the payment
+        # single-writer (migration 20260722150834). Terminal rows are history,
+        # never touched. Two reality changes resolve open candidates:
+        #   1. this credit got applied (externally) to an invoice that had it
+        #      as a candidate -> that decision is 'applied' via external_qbo
+        #   2. the credit is fully consumed -> every other open candidate
+        #      referencing it is 'stale'
+        if did_write:
+            cur = conn.cursor()
+            if linked_invoice_ids:
+                cur.execute("""UPDATE billing.invoice_credit_decisions
+                               SET state = 'applied', decided_by = 'external_qbo',
+                                   applied_via = 'external_qbo',
+                                   decided_at = now(), applied_at = now()
+                               WHERE credit_id = %s AND state = 'candidate'
+                                 AND qbo_invoice_id = ANY(%s)""",
+                            (qbo_payment_id, linked_invoice_ids))
+            if float(qbo_pmt.get("UnappliedAmt") or 0) <= 0:
+                cur.execute("""UPDATE billing.invoice_credit_decisions
+                               SET state = 'stale', decided_by = 'external_qbo',
+                                   decided_at = now()
+                               WHERE credit_id = %s AND state = 'candidate'""",
+                            (qbo_payment_id,))
+            conn.commit(); cur.close()
 
         # CC verify reads QBO body + our processing_attempts; safe regardless.
         verification = verify_cc_trans_id(conn, qbo_payment_id, cc_trans_id)

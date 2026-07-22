@@ -1,6 +1,6 @@
-summary: '+ echo_payment: OCC-guarded write-time echo from the write response'
-description: '+ echo_payment: OCC-guarded write-time echo from the write response'
+summary: Verified-echo cache writers; echo_balance now bumps fetched_at
+  (confirming read = verification)
+description: ''
 lock: '!inline f/billing/_lib/cache.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null

@@ -1,5 +1,5 @@
-summary: 'CDC probe (rebundle: refresh_payment delete fix)'
-description: redeploy to pick up the imported refresh_payment fix
+summary: 'CDC probe (comment fix: CreditMemo in swept entity list)'
+description: ''
 lock: '!inline f/service_billing/cdc_reconciler.script.lock'
 kind: script
 schema: null

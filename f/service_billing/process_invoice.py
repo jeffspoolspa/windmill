@@ -161,6 +161,34 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id,
                        reason=f"status='{invoice.get('derived_status')}' "
                               f"(need ready_to_process or force=True)")
 
+    # CLAIM-TIME CREDIT GUARD (Carter 2026-07-22): never charge past an
+    # undecided credit. A credit that landed AFTER review completed has no
+    # decision row for this invoice — the charge is the irreversible act, so
+    # this is the last gate. On trip: no charge; re-enqueue pre-process, which
+    # records the new candidate through the normal path (one writer for
+    # decision rows). Candidate definition MUST match pre-process's
+    # load_applicable_credits defaults (memo_exclude='maint', 6 months) or
+    # the guard bounces forever on credits pre-process never considers.
+    if not (force or recover_orphan):
+        undecided = _row(conn, """
+            SELECT count(*) AS n FROM billing.customer_payments cp
+            WHERE cp.qbo_customer_id = %s
+              AND cp.unapplied_amt > 0
+              AND (cp.txn_date IS NULL OR cp.txn_date >= (now() - interval '6 months')::date)
+              AND (cp.memo IS NULL OR cp.memo !~* 'maint')
+              AND NOT EXISTS (SELECT 1 FROM billing.invoice_credit_decisions d
+                              WHERE d.qbo_invoice_id = %s
+                                AND d.credit_id = cp.qbo_payment_id)
+        """, (customer_id, qbo_invoice_id))
+        if undecided and undecided["n"] > 0:
+            _exec(conn, """INSERT INTO billing.service_preprocess_queue (qbo_invoice_id)
+                           VALUES (%s)
+                           ON CONFLICT (qbo_invoice_id) WHERE finished_at IS NULL
+                           DO NOTHING""", (qbo_invoice_id,))
+            return _result(qbo_invoice_id, "skipped",
+                           reason=f"{undecided['n']} open credit(s) with no decision for "
+                                  f"this invoice — re-enqueued pre-process, not charging")
+
     # PRE-FLIGHT: prior-attempt policy gates. (payment_orphan needs no gate
     # here — charge_and_record refuses orphans and the dispatch handles it.)
     prior = latest_attempt(conn, qbo_invoice_id, STAGE)

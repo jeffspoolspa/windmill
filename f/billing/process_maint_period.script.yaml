@@ -3,6 +3,5 @@ description: 'Refactored onto shared _lib: charge_and_record (single + group
   multi-line) + cache echo verbs; engine keeps roster/group/decline/projection
   policy'
 lock: '!inline f/billing/process_maint_period.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null

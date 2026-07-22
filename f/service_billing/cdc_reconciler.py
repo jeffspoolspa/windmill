@@ -57,7 +57,7 @@
 #
 # What runs every 15 minutes (Windmill cron):
 #   1. Read last cursor from billing.cdc_cursors WHERE source='qbo'
-#   2. Call QBO /cdc?entities=Invoice,Payment,Customer&changedSince=<cursor>
+#   2. Call QBO /cdc?entities=Invoice,Payment,Customer,CreditMemo&changedSince=<cursor>
 #   3. For each returned entity (sorted by qbo_updated ascending so the cursor
 #      can advance incrementally):
 #        - If our cache is older than QBO's MetaData.LastUpdatedTime → drift

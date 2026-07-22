@@ -101,10 +101,6 @@ def qbo_query_all(query, entity, access_token, realm_id):
 
 
 def upsert_payment(cur, row, now):
-    # qbo_customer_id is refreshed on conflict: a QBO customer merge
-    # silently re-points payments to the surviving customer, and a row
-    # stuck on the deleted customer id is invisible to credit matching +
-    # credits_ok (DAKE/DUKE incident, 2026-06-12).
     cur.execute("""
         INSERT INTO billing.customer_payments
             (qbo_payment_id, qbo_customer_id, type, unapplied_amt,
@@ -156,7 +152,8 @@ def upsert_links_from_raw(cur, payment_id, raw, known_invoice_ids, txn_date):
     return written
 
 
-def main(qbo_customer_id: str, lookback_days: int = 365):
+def main(qbo_customer_id: str, lookback_days: int = 365,
+         access_token: str = None, realm_id: str = None):
     """
     Returns:
       {
@@ -167,12 +164,18 @@ def main(qbo_customer_id: str, lookback_days: int = 365):
         "rechecked_invoices": N,
         "changed_invoices": N,
       }
+
+    access_token/realm_id: pass a caller's already-refreshed token to reuse it.
+    QBO refresh tokens rotate on every refresh (CLAUDE.md burn warning), so an
+    in-process caller (e.g. pre_process_invoice's freshness gate) that already
+    holds a token passes it here instead of triggering a second rotation.
     """
     if not qbo_customer_id:
         return {"status": "error", "error": "qbo_customer_id required"}
 
     print(f"=== refresh_customer_credits customer={qbo_customer_id} ===")
-    access_token, realm_id = refresh_qbo_token()
+    if not (access_token and realm_id):
+        access_token, realm_id = refresh_qbo_token()
 
     now = datetime.now(timezone.utc)
     qbo_cutoff = (now - timedelta(days=lookback_days)).strftime("%Y-%m-%d")

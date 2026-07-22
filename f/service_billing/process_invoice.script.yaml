@@ -1,12 +1,9 @@
-summary: Service-billing charge handler + queue worker (ADR 009 sentence over
-  f/billing/_lib)
-description: 'fix: non-charge attempt rows (zero-balance sends, halts, dry-runs
-  without target PM) are channel=email — fn_validate_attempt_channel requires a
-  cpm for card/ach rows'
+summary: Charge handler + queue worker; claim-time credit guard (never charge
+  past an undecided credit)
+description: ''
 lock: '!inline f/service_billing/process_invoice.script.lock'
 concurrency_key: qbo_writer
 concurrency_time_window_s: 5
 concurrent_limit: 1
-has_on_behalf_of: false
 kind: script
 schema: null

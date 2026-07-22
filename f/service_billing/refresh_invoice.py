@@ -262,6 +262,18 @@ def upsert_invoice(conn, qbo_inv):
         qbo_last_updated,
     ))
     did_write = cur.fetchone() is not None
+
+    # Terminal-close (Carter 2026-07-22): an invoice settled in QBO no longer
+    # needs credit decisions — close its OPEN candidates as 'stale'
+    # (external_settlement: the decision context ended, nobody declined; the
+    # credits stay open for other invoices). Terminal decision rows untouched.
+    if did_write and float(qbo_inv.get("Balance", 0) or 0) <= 0:
+        cur.execute("""UPDATE billing.invoice_credit_decisions
+                       SET state = 'stale', decided_by = 'external_settlement',
+                           decided_at = now()
+                       WHERE qbo_invoice_id = %s AND state = 'candidate'""",
+                    (qbo_invoice_id,))
+
     cur.close()
     return was_new, qbo_invoice_id, prev_memo, qbo_memo, did_write
 

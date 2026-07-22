@@ -63,9 +63,12 @@ def echo_invoice(conn, qbo_invoice_id, qbo_invoice):
 
 
 def echo_balance(conn, qbo_invoice_id, balance):
-    """One-column echo of a balance QBO reported on a confirming read."""
+    """Echo of a balance QBO reported on a confirming read. Bumps fetched_at:
+    a confirming read IS a verification against the leader even when the value
+    is unchanged, so it advances the freshness clock (the quiescent-entity
+    case — a row nothing has changed still gets re-verified)."""
     cur = conn.cursor()
-    cur.execute("UPDATE billing.invoices SET balance = %s WHERE qbo_invoice_id = %s",
+    cur.execute("UPDATE billing.invoices SET balance = %s, fetched_at = now() WHERE qbo_invoice_id = %s",
                 (balance, qbo_invoice_id))
     conn.commit(); cur.close()
 
@@ -139,8 +142,8 @@ def _selfcheck():
     ok("echo_invoice writes the read-back values",
        c.executed[0][1][1] == 5.0 and c.executed[0][1][3] == "NotSet")
     echo_balance(c, "I1", 0.0)
-    ok("echo_balance is one column", c.executed[1][0].startswith(
-        "UPDATE billing.invoices SET balance = %s WHERE"))
+    ok("echo_balance writes balance and bumps fetched_at",
+       "SET balance = %s, fetched_at = now()" in c.executed[1][0])
     mark_emailed(c, "I1")
     ok("mark_emailed is one column", "email_status = 'EmailSent'" in c.executed[2][0])
     echo_payment(c, {"Id": "P1", "CustomerRef": {"value": "C1"}, "TotalAmt": "50",
