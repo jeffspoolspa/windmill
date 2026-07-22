@@ -4,7 +4,6 @@ summary: 'Gap-aware visit backfill: each run ingests up to max_weeks weeks in
   01/29/2025..11/11/2025, 16 wk.'
 description: ''
 lock: '!inline f/ION/_run/fill_gap_visits.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium

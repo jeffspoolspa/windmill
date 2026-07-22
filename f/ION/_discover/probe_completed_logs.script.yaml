@@ -1,7 +1,6 @@
 summary: Picker-prime + bare-data fetch test for CompletedLogDetail.cfm
 description: Discovery probe verifying the picker-prime + bare-data-fetch hypothesis.
 lock: '!inline f/ION/_discover/probe_completed_logs.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium

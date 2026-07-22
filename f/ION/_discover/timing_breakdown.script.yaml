@@ -4,7 +4,6 @@ description: Times each stage of the picker-prime + bare-data fetch pattern,
   login+chromium costs are paid once. Confirms whether data-transfer scales
   linearly with window size.
 lock: '!inline f/ION/_discover/timing_breakdown.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium
