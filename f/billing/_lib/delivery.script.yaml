@@ -1,0 +1,5 @@
+summary: Shared idempotent send gate + send preconditions (no first-send past due)
+description: ''
+lock: '!inline f/billing/_lib/delivery.script.lock'
+kind: script
+schema: null
