@@ -1,5 +1,4 @@
-summary: Payment cache handler + open credit-decision candidate maintenance
-  (single-writer)
+summary: Payment cache handler (no decision maintenance — undecided derives, v3)
 description: ''
 lock: '!inline f/service_billing/refresh_payment.script.lock'
 kind: script

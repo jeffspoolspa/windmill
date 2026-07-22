@@ -1,5 +1,5 @@
-summary: 'Enrichment handler: cache-read invoice, credit decision record,
-  evidence-gated cache-first credits, deterministic-only auto-apply'
+summary: 'Enrichment effector: proposed/applied decision events (derived
+  readiness v3), cache-first credits'
 description: ''
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
 concurrency_key: qbo_api

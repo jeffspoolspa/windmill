@@ -123,12 +123,9 @@ def main(qbo_credit_memo_id: str, operation: str = "", qbo_body: dict | None = N
                 RETURNING qbo_customer_id
             """, (storage_id,))
             row = cur.fetchone()
-            # a deleted/voided credit memo can no longer be a candidate anywhere
-            cur.execute("""UPDATE billing.invoice_credit_decisions
-                           SET state = 'stale', decided_by = 'external_qbo',
-                               decided_at = now()
-                           WHERE credit_id = %s AND state = 'candidate'""",
-                        (storage_id,))
+            # (no decision-table maintenance: the unapplied_amt=0 write above
+            # drops this credit out of the derived undecided set on its own —
+            # derived readiness v3)
             conn.commit()
             cur.close()
             return {
@@ -238,25 +235,8 @@ def main(qbo_credit_memo_id: str, operation: str = "", qbo_body: dict | None = N
                 """, (storage_id, inv_id, float(amount), txn_date))
                 links_written += 1
 
-        # Open credit-decision candidates maintained here (the CM single-
-        # writer; same rules as refresh_payment, migration 20260722150834):
-        # externally applied to a candidate's invoice -> 'applied'; fully
-        # consumed -> remaining open candidates 'stale'. Terminal rows never
-        # touched.
-        if linked_invoice_ids:
-            cur.execute("""UPDATE billing.invoice_credit_decisions
-                           SET state = 'applied', decided_by = 'external_qbo',
-                               applied_via = 'external_qbo',
-                               decided_at = now(), applied_at = now()
-                           WHERE credit_id = %s AND state = 'candidate'
-                             AND qbo_invoice_id = ANY(%s)""",
-                        (storage_id, linked_invoice_ids))
-        if unapplied_amt <= 0:
-            cur.execute("""UPDATE billing.invoice_credit_decisions
-                           SET state = 'stale', decided_by = 'external_qbo',
-                               decided_at = now()
-                           WHERE credit_id = %s AND state = 'candidate'""",
-                        (storage_id,))
+        # No decision-table maintenance (derived readiness v3): the upsert
+        # above already moved unapplied_amt, and "undecided" derives from it.
 
         # Recheck linked invoices explicitly. This duplicates work the new
         # trg_recheck_credits_on_payment_change trigger does (since the

@@ -126,14 +126,15 @@ def write_result(conn, qbo_invoice_id, result):
           qbo_invoice_id))
 
 
-# ── decision-record writes (migration 20260722150834) ───────────────────────
-# The pre-process row is the gate state machine; invoice_credit_decisions is
-# the frozen candidate snapshot: EVERY open credit the matcher saw gets a row
-# (reason non-null = auto-recommended). Terminal rows are history; only
-# 'candidate' rows are ever maintained afterwards (by refresh_payment).
+# ── decision-record writes (derived readiness v3, migration 20260722171144) ─
+# Decisions are append-only EVENTS: proposed (matcher recommendation) /
+# applied / rejected. Candidates are NOT stored — "undecided" derives live
+# (open credits minus terminal decisions; billing.invoice_ready). So this
+# script records only what it DID: proposed rows for heuristic matches,
+# applied rows for deterministic ones. Unmatched credits get no row.
 
 # Matches on the WO number are deterministic -> auto-apply. Amount heuristics
-# (full_cover / half_deposit) stay 'candidate' for human review.
+# (full_cover / half_deposit) are proposed for human review.
 DETERMINISTIC_REASONS = {"wo_number_in_ref_num", "wo_number_in_memo"}
 
 
@@ -173,22 +174,25 @@ def upsert_pre_process_row(conn, qbo_invoice_id, credits_verified_at=None):
           (qbo_invoice_id, credits_verified_at))
 
 
-def record_credit_decisions(conn, qbo_invoice_id, open_credits, reason_by_id):
-    """One 'candidate' row per open credit considered, matched or not."""
+def record_credit_proposals(conn, qbo_invoice_id, matches):
+    """One 'proposed' row per matcher recommendation. Unmatched credits get
+    NO row — 'undecided' derives (open credits minus terminal decisions)."""
     cur = conn.cursor()
-    for c in open_credits:
+    for c, _amt, reason in matches:
         cur.execute("""INSERT INTO billing.invoice_credit_decisions
-                         (qbo_invoice_id, credit_id, amount, unapplied_at_decision, reason)
-                       VALUES (%s, %s, %s, %s, %s)
+                         (qbo_invoice_id, credit_id, amount, unapplied_at_decision,
+                          state, reason, decided_by)
+                       VALUES (%s, %s, %s, %s, 'proposed', %s, 'auto')
                        ON CONFLICT (qbo_invoice_id, credit_id) DO UPDATE SET
                          amount = EXCLUDED.amount,
                          unapplied_at_decision = EXCLUDED.unapplied_at_decision,
                          reason = EXCLUDED.reason
-                       WHERE billing.invoice_credit_decisions.state = 'candidate'""",
+                       WHERE billing.invoice_credit_decisions.state
+                             IN ('proposed', 'candidate')""",
                     (qbo_invoice_id, c["qbo_payment_id"],
                      float(c.get("unapplied_amt") or 0),
                      float(c.get("unapplied_amt") or 0),
-                     reason_by_id.get(c["qbo_payment_id"])))
+                     reason))
     conn.commit(); cur.close()
 
 
@@ -196,7 +200,8 @@ def mark_decision_applied(conn, qbo_invoice_id, credit_id, amount):
     _exec(conn, """UPDATE billing.invoice_credit_decisions
                    SET state = 'applied', amount = %s, decided_by = 'auto',
                        applied_via = 'pre_process', decided_at = now(), applied_at = now()
-                   WHERE qbo_invoice_id = %s AND credit_id = %s AND state = 'candidate'""",
+                   WHERE qbo_invoice_id = %s AND credit_id = %s
+                     AND state IN ('proposed', 'candidate')""",
           (amount, qbo_invoice_id, credit_id))
 
 
@@ -577,10 +582,10 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
         matches = match_credits_to_wo(open_credits, wo, qbo_inv)
         reason_by_id = {c["qbo_payment_id"]: reason for c, _amt, reason in matches}
 
-        # Decision record: the gate row + one 'candidate' row per credit SEEN
-        # (matched or not) — the frozen snapshot of what this decision saw.
+        # Decision events: the provenance row + one 'proposed' row per matcher
+        # recommendation. Unmatched credits derive as undecided — no rows.
         upsert_pre_process_row(conn, qbo_invoice_id, credits_verified_at)
-        record_credit_decisions(conn, qbo_invoice_id, open_credits, reason_by_id)
+        record_credit_proposals(conn, qbo_invoice_id, matches)
 
         # Auto-apply ONLY deterministic (WO-number) matches; amount heuristics
         # stay 'candidate' for human review. apply_credits fresh-reads the

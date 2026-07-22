@@ -1,5 +1,5 @@
-summary: Charge handler + queue worker; claim-time credit guard (never charge
-  past an undecided credit)
+summary: Charge worker; claim guard = billing.invoice_ready() (gate and guard
+  are the same code)
 description: ''
 lock: '!inline f/service_billing/process_invoice.script.lock'
 concurrency_key: qbo_writer

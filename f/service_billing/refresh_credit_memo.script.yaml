@@ -1,5 +1,4 @@
-summary: CreditMemo cache handler + open credit-decision candidate maintenance
-  (single-writer)
+summary: CreditMemo cache handler (no decision maintenance — undecided derives, v3)
 description: ''
 lock: '!inline f/service_billing/refresh_credit_memo.script.lock'
 concurrency_time_window_s: 0
