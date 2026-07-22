@@ -3,6 +3,5 @@ summary: 'One-shot: backfill the 2026-06-19 ts.billing_method ingest-outage gap
   Idempotent on ion_log_id.'
 description: ''
 lock: '!inline f/ION/_run/backfill_outage_gap.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null

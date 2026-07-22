@@ -3,7 +3,6 @@ summary: 'One-shot runner: log-based re-ingest of May 2026 visits in weekly
   pricing.'
 description: ''
 lock: '!inline f/ION/_run/ingest_may_v3.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium

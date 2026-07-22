@@ -49,7 +49,7 @@
 
     "postgres": ["postgres@3.4.9", "", {}, "sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw=="],
 
-    "windmill-client": ["windmill-client@1.751.0", "", {}, "sha512-TEz6IS/pkVB48TJTwWRRJwQ5+wovByXq/77QXXS9dWuMtt7w9lzc3NtsqkDGQ2zcwNF1t3lXMIU/WzmawrEmwA=="],
+    "windmill-client": ["windmill-client@1.765.0", "", {}, "sha512-gKRK32y7ZkPnCPDzpfcz5yqnOn3FALyFLGsFvM91ZT6vKbwoHeCB7AnAkB0Cc3FP1kpoI7ThAF976dktLX6LMg=="],
 
     "dom-serializer/entities": ["entities@4.5.0", "", {}, "sha512-V0hjH4dGPh9Ao5p0MoRY6BVqtwCjhz6vI5LT8AJ55H+4g9/4vbHx1I54fS0XuclLhDHArPQCiMjDxjaL8fPxhw=="],
   }

@@ -2,7 +2,6 @@ summary: 'One-shot runner: log-based re-ingest of May 2026 (weekly chunks,
   commits each). Re-bundle with ON CONFLICT dedupe fix.'
 description: ''
 lock: '!inline f/ION/_run/ingest_may_v4.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium

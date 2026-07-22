@@ -1,7 +1,6 @@
 summary: ''
 description: ''
 lock: '!inline f/ION/ingest_day_logs.script.lock'
-has_on_behalf_of: false
 kind: script
 schema:
   $schema: https://json-schema.org/draft/2020-12/schema

@@ -4,7 +4,6 @@ summary: 'One-off: recover blank-submittedBy visit tech from the day-grid
   aliases. Idempotent; self-discovers dates.'
 description: ''
 lock: '!inline f/ION/_run/recover_grid_tech.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium
