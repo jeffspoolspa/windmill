@@ -16,13 +16,8 @@
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
 import { parse } from "node-html-parser"
-import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
+import { getOrRefreshSession, ionFetchText, IonSessionExpiredError } from "/f/ION/_lib/session_cache"
 
-function cookieHeader(s: any) {
-  const host = new URL(s.ionOrigin).hostname
-  return s.cookies.filter((c: any) => { const d = c.domain.replace(/^\./, ""); return host === d || host.endsWith("." + d) })
-    .map((c: any) => `${c.name}=${c.value}`).join("; ")
-}
 function toMin(t: string | null): number | null {
   const m = String(t || "").match(/(\d+):(\d+)\s*(AM|PM)/i)
   if (!m) return null
@@ -48,13 +43,18 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
     s = await getOrRefreshSession(ion)
   }
   const o = s.ionOrigin
-  const H = { Cookie: cookieHeader(s), "User-Agent": "Mozilla/5.0", Accept: "text/html, */*", "X-Requested-With": "XMLHttpRequest", Referer: `${o}/main.cfm` }
 
   const out: any[] = []
   for (const lg of logs) {
     const rec: any = { log_id: lg.log_id, calendar_id: lg.calendar_id ?? null }
     try {
-      const html = await (await fetch(`${o}/tasks/addLog.cfm?calendarID=${lg.calendar_id || ""}&LogID=${lg.log_id}&source=ServiceLog`, { headers: H, redirect: "manual" })).text()
+      // ionFetchText adds the session cookie, throws IonSessionExpiredError on a login redirect, and
+      // bounds each request. A dead session must NOT be buried as a per-log error (that becomes a silent
+      // 0-visit run) -- it is rethrown below so the caller can self-heal.
+      const html = await ionFetchText(s, `${o}/tasks/addLog.cfm?calendarID=${lg.calendar_id || ""}&LogID=${lg.log_id}&source=ServiceLog`, {
+        headers: { "X-Requested-With": "XMLHttpRequest", Referer: `${o}/main.cfm` },
+        signal: AbortSignal.timeout(20000),
+      })
       const r = parse(html)
       const v = (n: string) => r.querySelector(`input[name="${n}"]`)?.getAttribute("value") ?? null
       const selText = (n: string) => r.querySelector(`select[name="${n}"] option[selected]`)?.text?.trim() ?? null
@@ -114,6 +114,7 @@ export async function main(logs: { log_id: string; calendar_id?: string }[] = []
       rec.task_checklist = checklist
       if (!rec.event_id) rec.error = "no EventID (not a service log?)"
     } catch (e: any) {
+      if (e instanceof IonSessionExpiredError) throw e // dead session -> fail loud, don't bury it as a per-log error
       rec.error = String(e?.message ?? e).slice(0, 140)
     }
     out.push(rec)

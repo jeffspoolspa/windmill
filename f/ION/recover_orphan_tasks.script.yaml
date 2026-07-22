@@ -5,7 +5,6 @@ summary: Recover orphan-visit tasks. SELF-HEAL unmatched ION CustomerID ->
   advisory-locked.
 description: ''
 lock: '!inline f/ION/recover_orphan_tasks.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium

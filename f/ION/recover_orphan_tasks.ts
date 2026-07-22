@@ -6,14 +6,9 @@ import "playwright@1.40.0"
 import postgres from "postgres@3.4.5"
 import * as wmill from "windmill-client"
 import { parse } from "node-html-parser"
-import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
+import { getOrRefreshSession, ionFetchText } from "/f/ION/_lib/session_cache"
 import { getTaskDetail } from "/f/ION/_lib/task_detail"
 
-function cookieHeader(s: any) {
-  const host = new URL(s.ionOrigin).hostname
-  return s.cookies.filter((c: any) => { const d = c.domain.replace(/^\./, ""); return host === d || host.endsWith("." + d) })
-    .map((c: any) => `${c.name}=${c.value}`).join("; ")
-}
 const routeStripped = (s: string) => { s = (s || "").trim(); const i = s.indexOf(" "); return i > 0 ? s.slice(i + 1).trim() : s }
 const mapFreq = (r: string) => {
   r = (r || "").trim().toLowerCase().replace(/-/g, "")
@@ -38,8 +33,11 @@ const LOCK_KEY = 916273
 // attributes correctly and future runs match directly. Email/name are reliable; phone drifts. Only a
 // genuinely-new customer (no confident match) stays customer_id = NULL + FLAGGED
 // (external_data.needs_fix). Committing, idempotent, batched highest-visit-first, advisory-locked.
-export async function main(limit = 250) {
-  const cfg = (await wmill.getResource("u/carter/supabase")) as any
+// sess + sb are passed by daily_visit_ingest so NO Windmill API read (getResource/getVariable) happens
+// late in a long run -- the ephemeral job token degrades ~15 min in, and a re-fetch here was the 401 that
+// killed the ingest. Fall back to reading them only when run standalone.
+export async function main(limit = 250, sess: any = null, sb: any = null) {
+  const cfg = (sb ?? await wmill.getResource("u/carter/supabase")) as any
   const conn = { host: cfg.host, port: cfg.port, database: cfg.dbname, username: cfg.user, password: cfg.password, ssl: "require" as const, prepare: false }
   const lock = postgres({ ...conn, max: 1, idle_timeout: 30, connect_timeout: 15 })
   if (!(await lock`select pg_try_advisory_lock(${LOCK_KEY}) as ok`)[0].ok) { await lock.end(); return { skipped: "another recovery run in progress" } }
@@ -81,11 +79,15 @@ export async function main(limit = 250) {
     }
     const adopted = new Set<number>()
 
-    const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
-    const s = await getOrRefreshSession(ion)
+    let s = sess
+    if (!s) {
+      const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
+      s = await getOrRefreshSession(ion)
+    }
     const o = s.ionOrigin
-    const H = { Cookie: cookieHeader(s), "User-Agent": "Mozilla/5.0", Accept: "text/html, */*" }
-    const get = (u: string) => fetch(`${o}${u}`, { headers: H, redirect: "manual" }).then((x) => x.text())
+    // ionFetchText adds the session cookie, throws on a login redirect (dead session -> loud, not empty),
+    // and bounds each request so an ION hang fails fast instead of stalling the run.
+    const get = (u: string) => ionFetchText(s, `${o}${u}`, { signal: AbortSignal.timeout(20000) })
 
     const today = new Date().toISOString().slice(0, 10)
     const stats: any = { batch: targets.length, tasks_created: 0, tasks_created_no_location: 0, tasks_created_needs_customer: 0, self_healed: 0, self_heal_examples: [], schedules_created: 0, visits_linked: 0, customer_unmatched: 0, no_customerid_on_log: 0, errors: 0, examples: [] }

@@ -12,13 +12,7 @@
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
 import { parse } from "node-html-parser"
-import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
-
-function cookieHeader(s: any) {
-  const host = new URL(s.ionOrigin).hostname
-  return s.cookies.filter((c: any) => { const d = c.domain.replace(/^\./, ""); return host === d || host.endsWith("." + d) })
-    .map((c: any) => `${c.name}=${c.value}`).join("; ")
-}
+import { getOrRefreshSession, ionFetchText } from "/f/ION/_lib/session_cache"
 
 // date_us = MM/DD/YYYY
 export async function main(date_us: string, officeid: number | string = 0, sess: any = null) {
@@ -32,10 +26,15 @@ export async function main(date_us: string, officeid: number | string = 0, sess:
     s = await getOrRefreshSession(ion)
   }
   const o = s.ionOrigin
-  const H = { Cookie: cookieHeader(s), "User-Agent": "Mozilla/5.0", Accept: "text/html, */*", "X-Requested-With": "XMLHttpRequest", Referer: `${o}/main.cfm` }
   const url = `/home/customerLogDetails.cfm?officeid=${officeid}&techid=0&status=0&logset=1`
     + `&dayindexsel=${encodeURIComponent(date_us)}&dayindex=&_cf_nodebug=true&_cf_nocache=true&_cf_rc=0`
-  const html = await (await fetch(`${o}${url}`, { headers: H, redirect: "manual" })).text()
+  // ionFetchText adds the session cookie + UA/Accept, throws IonSessionExpiredError on a login redirect
+  // (a dead session errors loudly instead of silently parsing 0 logs), and bounds the request so an ION
+  // hang fails fast instead of running for tens of minutes.
+  const html = await ionFetchText(s, `${o}${url}`, {
+    headers: { "X-Requested-With": "XMLHttpRequest", Referer: `${o}/main.cfm` },
+    signal: AbortSignal.timeout(20000),
+  })
 
   const root = parse(html)
   const logs: any[] = []

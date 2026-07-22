@@ -3,7 +3,6 @@ summary: 'ION API: all service logs for a date via customerLogDetails.cfm
   a session (skips per-call variable read for long runs).'
 description: ''
 lock: '!inline f/ION/api/list_day_logs.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium
