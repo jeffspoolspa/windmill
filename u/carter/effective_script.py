@@ -116,23 +116,18 @@ def main(raw_email: dict, parsed_email: dict):
     wo_details = extract_details(parsed_email.get('html_body'))
     print("Extracted details:", wo_details)
     
-    # Connect to Supabase
+    # Connect to Supabase. Service role, not anon: work_orders RLS only
+    # allows anon SELECT, so anon upserts fail with 42501 (see
+    # estimate_email_processing__flow/ensure_work_order_exists.py).
     url = wmill.get_variable("f/SUPABASE/URL")
-    key = wmill.get_variable("f/SUPABASE/ANON_KEY")
+    key = wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY")
     client = create_client(url, key)
-    
-    # Upsert to database
-    try:
-        result = upsert_work_order(client, wo_details)
-        return {
-            'success': True,
-            'result': result,
-            'extracted_data': wo_details
-        }
-    except Exception as e:
-        print(f"Error upserting work order: {str(e)}")
-        return {
-            'success': False,
-            'error': str(e),
-            'extracted_data': wo_details
-        }
+
+    # Let upsert errors propagate — a swallowed error marks the job green
+    # and the WO data is silently dropped (that's how the RLS bug hid).
+    result = upsert_work_order(client, wo_details)
+    return {
+        'success': True,
+        'result': result,
+        'extracted_data': wo_details
+    }
