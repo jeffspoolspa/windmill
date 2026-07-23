@@ -25,6 +25,8 @@ from decimal import Decimal
 
 import psycopg2.extras
 
+from f.billing._lib.events import emit
+
 
 def json_default(o):
     """json.dumps default for DB-row types (Decimal / date / datetime / UUID)."""
@@ -80,8 +82,22 @@ def create_attempt(conn, qbo_invoice_id, stage, invoice_number, channel,
         (wo_number, invoice_number, qbo_invoice_id, stage, status,
          str(uuid.uuid4()), payment_method or db_channel, charge_amount,
          dry_run, db_channel, cpm_id))
+    row = cur.fetchone()
+    # charge_attempted (ADR 010): the charge aggregate's birth event, in the
+    # SAME write-ahead transaction as the WAL row. Only for real intents —
+    # dry runs made no side effect, and sibling stubs (status != 'pending')
+    # are bookkeeping whose keys are never charged.
+    if not dry_run and status == "pending":
+        emit(conn, "charge", row["id"], "charge_attempted",
+             participants=[f"invoice:{qbo_invoice_id}"]
+                          + ([f"pm:{cpm_id}"] if cpm_id else []),
+             payload={"stage": stage, "amount": charge_amount,
+                      "channel": db_channel, "invoice_number": invoice_number,
+                      "wo_number": wo_number,
+                      "provenance": {"source": "intent",
+                                     "intent_ref": str(row["id"])}})
     conn.commit()
-    row = cur.fetchone(); cur.close()
+    cur.close()
     return dict(row)
 
 

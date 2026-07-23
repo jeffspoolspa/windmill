@@ -1,0 +1,7 @@
+summary: append_event/emit — the single writer to billing.events (ADR 010)
+description: 'Tier-1 event primitives. Names:
+  docs/conventions/EVENT_VOCABULARY.md. No commit inside append_event (joins
+  caller tx); emit is best-effort for the money path.'
+lock: '!inline f/billing/_lib/events.script.lock'
+kind: script
+schema: null
