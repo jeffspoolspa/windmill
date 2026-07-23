@@ -1,7 +1,7 @@
-summary: 'write-time echoes: recorded payments + credit applies echo the
-  RESPONSE; only the CM ripple stays computed'
-description: 'write-time echoes: recorded payments + credit applies echo the
-  RESPONSE; only the CM ripple stays computed'
+summary: charge_and_record + apply_credits with ADR 010 emissions
+description: Emits charge outcomes (captured/declined/uncertain),
+  payment_recorded + payment_applied echoes, receipt_sent. Derived conditions
+  (orphan, succeeded) emit nothing.
 lock: '!inline f/billing/_lib/payments.script.lock'
 kind: script
 schema: null

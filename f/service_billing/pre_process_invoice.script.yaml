@@ -1,6 +1,8 @@
-summary: 'Enrichment effector: proposed/applied decision events (derived
-  readiness v3), cache-first credits'
-description: ''
+summary: 'Enrichment effector: invoice_edited emission + terminal-only decisions
+  (no proposals)'
+description: 'Auto-apply: WO number in ref/memo or full cover; undecided =
+  derived absence. Emits invoice_edited with before/after on the one QBO PATCH
+  (intent_ref pre_process).'
 lock: '!inline f/service_billing/pre_process_invoice.script.lock'
 concurrency_key: qbo_api
 concurrency_time_window_s: 10

@@ -1,5 +1,9 @@
-summary: Payment cache handler (no decision maintenance — undecided derives, v3)
-description: ''
+summary: 'Payment handler: application set-diff, apply-then-verify, invoice
+  fan-out (ADR 010 phase 3)'
+description: 'Diffs Line[].LinkedTxn vs cached raw: emits
+  payment_applied/unapplied, applies leader-attested balance deltas immediately,
+  fans delta invoices into qbo_inbox for the async verify read. Voids emit
+  payment_deleted + unapply.'
 lock: '!inline f/service_billing/refresh_payment.script.lock'
 kind: script
 schema: null

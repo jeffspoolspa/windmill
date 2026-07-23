@@ -36,6 +36,7 @@ from f.billing._lib.qbo import (
 )
 from f.billing._lib.payments import load_applicable_credits, apply_credits
 from f.billing._lib.cache import echo_invoice
+from f.billing._lib.events import emit
 from f.service_billing.refresh_customer_credits import main as refresh_customer_credits
 
 OPENAI_KEY_VAR = "f/service_billing/OPENAI_API_KEY"
@@ -133,9 +134,10 @@ def write_result(conn, qbo_invoice_id, result):
 # script records only what it DID: proposed rows for heuristic matches,
 # applied rows for deterministic ones. Unmatched credits get no row.
 
-# Matches on the WO number are deterministic -> auto-apply. Amount heuristics
-# (full_cover / half_deposit) are proposed for human review.
-DETERMINISTIC_REASONS = {"wo_number_in_ref_num", "wo_number_in_memo"}
+# Auto-apply rules (Carter 2026-07-23): WO number in ref/memo, or the credit
+# covers a full target amount. half_deposit stays undecided for a human —
+# and "undecided" is the ABSENCE of a decision row, never a proposed row.
+DETERMINISTIC_REASONS = {"wo_number_in_ref_num", "wo_number_in_memo", "full_cover"}
 
 
 def credits_cache_fresh(conn, max_sweep_age_min=20):
@@ -582,13 +584,13 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
         matches = match_credits_to_wo(open_credits, wo, qbo_inv)
         reason_by_id = {c["qbo_payment_id"]: reason for c, _amt, reason in matches}
 
-        # Decision events: the provenance row + one 'proposed' row per matcher
-        # recommendation. Unmatched credits derive as undecided — no rows.
+        # Decision rows are TERMINAL-ONLY (no 'proposed' state): auto-applies
+        # get 'applied' rows below; everything else is derived-undecided (no
+        # row) until a human applies/rejects in the UI. Provenance row only.
         upsert_pre_process_row(conn, qbo_invoice_id, credits_verified_at)
-        record_credit_proposals(conn, qbo_invoice_id, matches)
 
-        # Auto-apply ONLY deterministic (WO-number) matches; amount heuristics
-        # stay 'candidate' for human review. apply_credits fresh-reads the
+        # Auto-apply deterministic matches (WO number in ref/memo, full cover);
+        # half_deposit waits for a human. apply_credits fresh-reads the
         # balance, applies in QBO, echoes customer_payments + links from the
         # response; we then flip each applied decision row.
         auto = [(c, amt, r) for c, amt, r in matches if r in DETERMINISTIC_REASONS]
@@ -684,12 +686,29 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, api_key, force=Fal
                                  else str(wo_completed))[:10]
                 if qbo_inv.get("TxnDate") != completed_iso:
                     updates["TxnDate"] = completed_iso
+            before = {"memo": qbo_inv.get("PrivateNote"),
+                      "qbo_class": (qbo_inv.get("ClassRef") or {}).get("name"),
+                      "txn_date": qbo_inv.get("TxnDate")}
             uw = update_invoice_sparse(qbo_invoice_id, updates, access_token, realm_id)
             if not uw["success"]:
                 enrichment_ok = False
                 print(f"  qbo write failed: {(uw.get('error') or '')[:120]}")
             else:
                 qbo_inv = uw.get("invoice") or qbo_inv
+                # invoice_edited (ADR 010): the one PATCH is the fact; which
+                # fields changed is payload; "pre-processing" is provenance
+                changes = {"memo": {"from": before["memo"], "to": composed}}
+                if class_id:
+                    changes["qbo_class"] = {"from": before["qbo_class"],
+                                            "to": result["qbo_class"]}
+                if "TxnDate" in updates:
+                    changes["txn_date"] = {"from": before["txn_date"],
+                                           "to": updates["TxnDate"]}
+                emit(conn, "invoice", qbo_invoice_id, "invoice_edited",
+                     participants=[f"customer:{qbo_customer_id}"] if qbo_customer_id else [],
+                     payload={"changes": changes,
+                              "provenance": {"source": "intent",
+                                             "intent_ref": "pre_process"}})
 
         result["enrichment_ok"] = enrichment_ok
         echo_invoice(conn, qbo_invoice_id, qbo_inv)   # fires subtotal_ok recompute

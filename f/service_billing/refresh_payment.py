@@ -27,6 +27,8 @@ import psycopg2.extras
 import requests
 import wmill
 
+from f.billing._lib.events import emit
+
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
 
@@ -84,6 +86,98 @@ def parse_qbo_timestamp(ts):
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
+
+
+def _application_lines(raw):
+    """The payment's application set from raw Line[].LinkedTxn:
+    {invoice_id: {"amount": float, "cm_id": str|None}}. THE ledger facts
+    (ADR 010 phase 3) — QBO's whole AR rides on these lines."""
+    out = {}
+    for line in (raw or {}).get("Line") or []:
+        inv, cm = None, None
+        for lt in line.get("LinkedTxn") or []:
+            if lt.get("TxnType") == "Invoice":
+                inv = lt.get("TxnId")
+            elif lt.get("TxnType") == "CreditMemo":
+                cm = lt.get("TxnId")
+        if inv:
+            amt = float(line.get("Amount") or 0)
+            prev = out.get(inv, {"amount": 0.0, "cm_id": None})
+            out[inv] = {"amount": round(prev["amount"] + amt, 2),
+                        "cm_id": cm or prev["cm_id"]}
+    return out
+
+
+def _diff_applications(conn, qbo_payment_id, prior_raw, new_raw, ref_num,
+                       qbo_customer_id, discovered_via):
+    """Diff the application set, emit payment_applied / payment_unapplied,
+    and FAN OUT: enqueue every delta invoice into billing.qbo_inbox so
+    refresh_invoice fresh-reads the leader (verified echo — we NEVER compute
+    an invoice balance from payment lines). Coalesced + drained in the same
+    loop; CDC stays the backstop. Empty diff (our own write echoing back, or
+    a re-delivered webhook) emits and enqueues nothing.
+    Returns the list of delta invoice ids."""
+    old_l = _application_lines(prior_raw)
+    new_l = _application_lines(new_raw)
+    added, removed = [], []
+    for inv, d in new_l.items():
+        delta = round(d["amount"] - old_l.get(inv, {}).get("amount", 0.0), 2)
+        if delta > 0:
+            added.append({"invoice_id": inv, "amount": delta,
+                          **({"funding": {"kind": "credit_memo", "id": d["cm_id"]}}
+                             if d["cm_id"] else {})})
+        elif delta < 0:
+            removed.append({"invoice_id": inv, "amount": -delta})
+    for inv, d in old_l.items():
+        if inv not in new_l and d["amount"] > 0:
+            removed.append({"invoice_id": inv, "amount": d["amount"]})
+    if not added and not removed:
+        return []
+
+    # provenance: ours if a WAL attempt recorded this payment (source intent)
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM billing.processing_attempts "
+                "WHERE qbo_payment_id = %s LIMIT 1", (qbo_payment_id,))
+    attempt = cur.fetchone()
+    prov = ({"source": "intent", "intent_ref": str(attempt[0])} if attempt
+            else {"source": "external", "discovered_via": discovered_via})
+    actor = "auto" if attempt else "qbo_webhook"
+    parts = ([f"invoice:{e['invoice_id']}" for e in added + removed]
+             + ([f"customer:{qbo_customer_id}"] if qbo_customer_id else []))
+    if added:
+        emit(conn, "payment", qbo_payment_id, "payment_applied",
+             participants=parts,
+             payload={"ref": ref_num, "lines": added, "provenance": prov},
+             actor=actor)
+    if removed:
+        emit(conn, "payment", qbo_payment_id, "payment_unapplied",
+             participants=parts,
+             payload={"ref": ref_num, "lines": removed, "provenance": prov},
+             actor=actor)
+    # INCREMENTAL REPLICATION (Carter 2026-07-23): the delta is leader-
+    # attested (this payload IS QBO's statement), so apply it to the cached
+    # balance NOW — waiting for the read guarantees staleness for nothing.
+    # Floored at 0 (QBO invoices don't go negative; overpayment lands as
+    # UnappliedAmt on the payment). A balance reaching 0 fires auto-promote
+    # in the same transaction. The fan-out read below stays as the ASYNC
+    # verify + token audit, snapshotting truth seconds later.
+    for e in added:
+        cur.execute(
+            "UPDATE billing.invoices SET balance = greatest(round((balance - %s)::numeric, 2), 0) "
+            "WHERE qbo_invoice_id = %s AND balance IS NOT NULL",
+            (e["amount"], e["invoice_id"]))
+    for e in removed:
+        cur.execute(
+            "UPDATE billing.invoices SET balance = round((balance + %s)::numeric, 2) "
+            "WHERE qbo_invoice_id = %s AND balance IS NOT NULL",
+            (e["amount"], e["invoice_id"]))
+
+    delta_invoices = sorted({e["invoice_id"] for e in added + removed})
+    for inv in delta_invoices:
+        cur.execute("SELECT public.enqueue_qbo_inbox('Invoice', %s, 'Update', "
+                    "'{}'::jsonb, 'payment_fanout', 2)", (inv,))
+    cur.close()
+    return delta_invoices
 
 
 def upsert_payment(conn, qbo_pmt):
@@ -261,6 +355,21 @@ def main(qbo_payment_id: str, qbo_body: dict | None = None):
             try:
                 cur = conn.cursor()
                 cur.execute(
+                    "SELECT raw, ref_num, qbo_customer_id FROM billing.customer_payments "
+                    "WHERE qbo_payment_id = %s", (qbo_payment_id,))
+                prior = cur.fetchone()
+                if prior:
+                    # the void implicitly unapplies its lines: emit + fan out
+                    fanned = _diff_applications(conn, qbo_payment_id, prior[0],
+                                                None, prior[1], prior[2], "webhook")
+                    emit(conn, "payment", qbo_payment_id, "payment_deleted",
+                         participants=([f"customer:{prior[2]}"] if prior[2] else []),
+                         payload={"ref": prior[1],
+                                  "provenance": {"source": "external",
+                                                 "discovered_via": "webhook"}},
+                         actor="qbo_webhook")
+                    print(f"  void: unapplied lines fanned out to {fanned}")
+                cur.execute(
                     "DELETE FROM billing.customer_payments WHERE qbo_payment_id = %s",
                     (qbo_payment_id,))
                 deleted = cur.rowcount
@@ -297,8 +406,27 @@ def main(qbo_payment_id: str, qbo_body: dict | None = None):
 
     conn = get_db_conn()
     try:
+        cur = conn.cursor()
+        cur.execute("SELECT raw FROM billing.customer_payments WHERE qbo_payment_id = %s",
+                    (qbo_payment_id,))
+        prior = cur.fetchone()
+        prior_raw = prior[0] if prior else None
+        cur.close()
+
         qbo_payment_id, did_write, upserted = upsert_payment(conn, qbo_pmt)
         conn.commit()
+
+        # ADR 010 phase 3: the application set-diff — emit the ledger facts
+        # and fan the delta invoices back into the inbox for a fresh-read
+        # (this closes the payment→invoice arc; Kathy Lindsay 2026-07-23).
+        fanned_out = []
+        if did_write:
+            fanned_out = _diff_applications(
+                conn, qbo_payment_id, prior_raw, qbo_pmt,
+                qbo_pmt.get("PaymentRefNum"),
+                (qbo_pmt.get("CustomerRef") or {}).get("value"),
+                "cdc" if qbo_body is not None else "webhook")
+            conn.commit()
 
         # No decision-table maintenance (derived readiness v3): "undecided"
         # derives live from customer_payments minus terminal decisions, so the
@@ -332,6 +460,7 @@ def main(qbo_payment_id: str, qbo_body: dict | None = None):
             "unapplied_amt":             float(qbo_pmt.get("UnappliedAmt") or 0),
             "did_write":                 did_write,
             "linked_invoices_rechecked": recheck_results,
+            "application_fanout":        fanned_out,
             "verification":              verification,
             "payment_id":                str(upserted["id"]) if upserted else None,
         }

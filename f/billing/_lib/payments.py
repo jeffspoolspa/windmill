@@ -45,6 +45,7 @@ from f.billing._lib.wal import (
     insert_webhook_expectation, dumps,
 )
 from f.billing._lib.cache import echo_payment
+from f.billing._lib.events import emit
 
 # Intuit's Request-Id idempotency cache window. Past it, an uncertain
 # attempt's key would be treated as a NEW charge — so we expire the attempt
@@ -211,6 +212,13 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
         base = {"group_lines": lines} if len(lines) > 1 else {}
         return dumps({**base, **extra})
 
+    # charge-aggregate participants: every line invoice + customer + pm.
+    # Emits sit BEFORE their update_attempt so its commit lands both together.
+    _parts = ([f"invoice:{inv}" for inv, _ in lines]
+              + [f"customer:{intent['customer_id']}"]
+              + ([f"pm:{intent['cpm_id']}"] if intent.get("cpm_id") else []))
+    _prov = {"source": "intent", "intent_ref": str(attempt["id"])}
+
     # ── charge (skipped when resuming past a completed charge) ──
     if attempt["status"] in ("pending", "charge_uncertain"):
         fn = charge_bank_account if channel == "ach" else charge_card
@@ -222,6 +230,10 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
         cls = cr["classification"]
         reflected_id = _upsert_charge(conn, cr)  # Intuit's fact, reflected
         if cls == "uncertain":
+            emit(conn, "charge", attempt["id"], "charge_uncertain",
+                 participants=_parts,
+                 payload={"amount": amount, "charge_id": reflected_id,
+                          "error": cr.get("error"), "provenance": _prov})
             update_attempt(conn, attempt["id"], status="charge_uncertain",
                            error_message=cr.get("error"), charge_id=reflected_id,
                            charge_result=dumps(cr), raw_result=_raw({"charge": cr}))
@@ -232,12 +244,20 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
             # stamping the declined charge's id makes the engines' same-PM
             # decline gate work as documented (real declines carry an id;
             # pre-charge halts never do)
+            emit(conn, "charge", attempt["id"], "charge_declined",
+                 participants=_parts,
+                 payload={"amount": amount, "charge_id": reflected_id,
+                          "error": cr.get("error"), "provenance": _prov})
             update_attempt(conn, attempt["id"], status="charge_declined",
                            error_message=cr.get("error"), charge_id=reflected_id,
                            charge_result=dumps(cr), raw_result=_raw({"charge": cr}))
             return res("declined", amount=amount, balances=balances,
                        attempt_id=str(attempt["id"]), error=cr.get("error"),
                        resumed=resumed)
+        emit(conn, "charge", attempt["id"], "charge_captured",
+             participants=_parts,
+             payload={"amount": amount, "charge_id": cr.get("charge_id"),
+                      "channel": channel, "provenance": _prov})
         update_attempt(conn, attempt["id"], status="charge_succeeded",
                        charge_id=cr.get("charge_id"),
                        charge_result=dumps(cr), raw_result=_raw({"charge": cr}))
@@ -261,6 +281,20 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
         return res("payment_orphan", amount=amount,
                    attempt_id=str(attempt["id"]), charge_id=cr.get("charge_id"),
                    error=rec.get("error"), resumed=resumed)
+    if not attempt.get("qbo_payment_id"):
+        # newly recorded (not a resume of an already-recorded payment):
+        # the Payment's birth + its applications, source: our intent
+        emit(conn, "payment", rec["payment_id"], "payment_recorded",
+             participants=_parts,
+             payload={"amount": cr.get("amount", amount),
+                      "charge_id": cr.get("charge_id"),
+                      "funding": {"kind": "charge"}, "provenance": _prov})
+        emit(conn, "payment", rec["payment_id"], "payment_applied",
+             participants=_parts,
+             payload={"funding": {"kind": "payment", "id": rec["payment_id"]},
+                      "lines": [{"invoice_id": inv, "amount": amt}
+                                for inv, amt in lines],
+                      "provenance": _prov})
     update_attempt(conn, attempt["id"], qbo_payment_id=rec["payment_id"])
     if rec.get("payment"):
         # write-time verified echo: the cache shows this payment at commit
@@ -274,6 +308,10 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
         r = send_receipt(rec["payment_id"], intent["receipt_email"],
                          access_token, realm_id)
         receipt_sent, receipt_error = r["ok"], r["error"]
+        if receipt_sent:
+            emit(conn, "payment", rec["payment_id"], "receipt_sent",
+                 participants=[f"customer:{intent['customer_id']}"],
+                 payload={"email": intent["receipt_email"], "provenance": _prov})
 
     update_attempt(conn, attempt["id"], status="succeeded",
                    raw_result=_raw({"charge": cr,
@@ -466,6 +504,19 @@ def apply_credits(conn, customer_id, invoice_id, access_token, realm_id,
                ON CONFLICT (payment_id, invoice_id) DO UPDATE SET
                  amount = billing.payment_invoice_links.amount + EXCLUDED.amount""",
             (c["qbo_payment_id"], invoice_id, amount, applied_via))
+        # payment_applied on the CARRIER: the credit's own Payment, or the $0
+        # bridge Payment a credit-memo apply just minted (ADR 010 §B)
+        is_cm = c["type"] == "credit_memo"
+        carrier = ((r.get("payment") or {}).get("Id") if is_cm else None) \
+            or c["qbo_payment_id"]
+        emit(conn, "payment", carrier, "payment_applied",
+             participants=[f"invoice:{invoice_id}", f"customer:{customer_id}"]
+                          + ([f"payment:{c['qbo_payment_id']}"] if is_cm else []),
+             payload={"funding": {"kind": "credit_memo" if is_cm else "payment",
+                                  "id": c["qbo_payment_id"]},
+                      "lines": [{"invoice_id": invoice_id, "amount": amount}],
+                      "provenance": {"source": "intent",
+                                     "intent_ref": f"apply_credits/{applied_via}"}})
         conn.commit(); cur.close()
         out["applied"].append(entry)
         remaining = round(remaining - amount, 2)
