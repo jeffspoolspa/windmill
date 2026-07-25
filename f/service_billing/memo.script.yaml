@@ -1,0 +1,5 @@
+summary: memo (ADR 009/011 rebuild)
+description: ''
+lock: '!inline f/service_billing/memo.script.lock'
+kind: script
+schema: null

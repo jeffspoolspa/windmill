@@ -38,7 +38,7 @@ import psycopg2.extras
 
 from f.billing._lib.qbo import (
     charge_card, charge_bank_account, get_qbo_invoice_details,
-    record_qbo_payment, send_receipt, apply_credit,
+    record_qbo_payment, send_receipt, apply_credit, fetch_qbo_customer_email,
 )
 from f.billing._lib.wal import (
     latest_attempt, create_attempt, update_attempt,
@@ -67,6 +67,47 @@ def stored_group_lines(attempt):
         return d.get("group_lines")
     except Exception:
         return None
+
+
+def _find_recorded_payment(conn, charge_id):
+    """Leg-2 dedupe: did a QBO Payment for this Intuit charge already land?
+    The Payment we create carries the CCTransId; the cache exposes it
+    (cc_trans_id, converged by webhook + CDC). Found -> the 'failed' record
+    actually succeeded and its response was lost. None on any error (treat
+    as unproven — never heal on a guess)."""
+    if not charge_id:
+        return None
+    try:
+        cur = conn.cursor()
+        # 1) the charge row's own link (stamped at record time — intent-arm)
+        cur.execute("SELECT qbo_payment_id FROM billing.charges "
+                    "WHERE charge_id = %s AND qbo_payment_id IS NOT NULL", (charge_id,))
+        row = cur.fetchone()
+        if not row:
+            # 2) the reflection: a cached Payment carrying this CCTransId
+            #    (covers the response-lost case where we never learned the id)
+            cur.execute("SELECT qbo_payment_id FROM billing.customer_payments "
+                        "WHERE cc_trans_id = %s LIMIT 1", (charge_id,))
+            row = cur.fetchone()
+        cur.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"  (orphan lookup warning: {e})")
+        return None
+
+
+def _link_charge_payment(conn, charge_id, payment_id):
+    """Close the saga on the charge row: leg 2's id stamped onto leg 1's
+    fact. Best-effort — the link is evidence, never the money path."""
+    if not (charge_id and payment_id):
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE billing.charges SET qbo_payment_id = %s "
+                    "WHERE charge_id = %s", (payment_id, charge_id))
+        conn.commit(); cur.close()
+    except Exception as e:
+        print(f"  (charge link warning: {e})")
 
 
 def _upsert_charge(conn, cr):
@@ -118,15 +159,93 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
       payment_ref        QBO PaymentRefNum
       memo_prefix        policy half of the payment PrivateNote
       receipt_email      where the receipt goes, or None for no receipt
+      force_retry        explicit human override: re-charge past a prior
+                         same-PM decline / succeeded / reconcile-review
+                         (default False — the service REFUSES those alone)
+      preferred_type /   alternative to payment_method_id: the service
+      target_payment_method_id   resolves + row-locks the instrument itself
+                         and returns no_payment_method if none is usable
 
     Returns {status, amount, balances, charge_id, payment_id, receipt_sent,
     receipt_error, error, attempt_id, resumed} with status one of:
     read_failed | already_paid | would_charge | uncertain | declined |
-    payment_orphan | succeeded.
+    declined_no_retry | blocked_reconcile | already_succeeded |
+    no_payment_method | payment_orphan | succeeded.
     """
     stage = intent["stage"]
     anchor = intent["qbo_invoice_id"]
     line_ids = list(intent.get("lines") or [anchor])
+
+    # Instrument: the caller may pass payment_method_id/cpm_id/channel
+    # pre-resolved (maint engine), or just preferred_type — then WE resolve,
+    # serialized against a concurrent disable by a FOR UPDATE lock on the pm
+    # row at selection time. (# ponytail: the lock covers selection, not the
+    # external call — WAL-commit-before-charge forces release; a mid-flight
+    # local disable can't stop Intuit anyway, their token is already live.)
+    # the service reads its own labels — callers pass ids, not paperwork
+    if conn is not None and not intent.get("invoice_number"):
+        row = None
+        try:
+            from f.billing._lib.db import query_one
+            row = query_one(conn, """SELECT i.doc_number, i.customer_name,
+                                        i.qbo_customer_id, i.payment_method, w.wo_number
+                                 FROM billing.invoices i
+                                 LEFT JOIN public.work_orders w
+                                        ON w.qbo_invoice_id = i.qbo_invoice_id
+                                 WHERE i.qbo_invoice_id = %s""", (anchor,))
+        except Exception as e:
+            print(f"  (label load warning: {e})")
+        if row:
+            intent = {**{"invoice_number": row["doc_number"],
+                         "customer_name": row["customer_name"] or "",
+                         "customer_id": row["qbo_customer_id"],
+                         "payment_method": row["payment_method"],
+                         "wo_number": row["wo_number"],
+                         "payment_ref": row["wo_number"],
+                         "memo_prefix": f"Auto-charge | WO# {row['wo_number']} "
+                                        f"| Inv# {row['doc_number']}"}, **intent}
+
+    if not intent.get("payment_method_id"):
+        target = intent.get("target_payment_method_id")
+        pm = resolve_payment_method(conn, intent.get("customer_id"),
+                                    preferred_type=intent.get("preferred_type"),
+                                    cpm_id=str(target) if target else None)
+        if not pm.get("has_method"):
+            # WAL halt row — the attempts_ok indicator surfaces this; no
+            # engine stamp anywhere
+            att = create_attempt(conn, anchor, stage, intent.get("invoice_number"),
+                                 "card", 0, dry_run,
+                                 wo_number=intent.get("wo_number"),
+                                 status="no_payment_method")
+            update_attempt(conn, att["id"],
+                           error_message=(pm.get("error") or "no PM on file")[:300])
+            return {"status": "no_payment_method", "amount": None, "balances": None,
+                    "charge_id": None, "payment_id": None, "receipt_sent": False,
+                    "receipt_error": None, "error": pm.get("error") or "no PM on file",
+                    "attempt_id": str(att["id"]), "resumed": None}
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT is_active FROM billing.customer_payment_methods "
+                        "WHERE id = %s FOR UPDATE", (pm["cpm_id"],))
+            row = cur.fetchone()
+            conn.commit(); cur.close()
+            if row and not row[0]:
+                att = create_attempt(conn, anchor, stage, intent.get("invoice_number"),
+                                     "card", 0, dry_run,
+                                     wo_number=intent.get("wo_number"),
+                                     status="no_payment_method")
+                update_attempt(conn, att["id"],
+                               error_message="payment method disabled")
+                return {"status": "no_payment_method", "amount": None, "balances": None,
+                        "charge_id": None, "payment_id": None, "receipt_sent": False,
+                        "receipt_error": None, "error": "payment method disabled",
+                        "attempt_id": str(att["id"]), "resumed": None}
+        except Exception as e:
+            print(f"  (pm lock warning: {e})")
+        intent = {**intent, "payment_method_id": pm["method_id"],
+                  "cpm_id": pm["cpm_id"],
+                  "channel": "card" if pm["payment_type"] in ("credit_card", "card") else "ach"}
+
     channel = "ach" if intent["channel"] == "ach" else "card"
 
     def res(status, **rest):
@@ -146,11 +265,42 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
     if prior:
         st = prior["status"]
         if st == "payment_orphan":
+            healed = _find_recorded_payment(conn, prior.get("charge_id"))
+            if healed:  # the record landed; only its response was lost
+                update_attempt(conn, prior["id"], status="succeeded",
+                               qbo_payment_id=healed)
+                _link_charge_payment(conn, prior.get("charge_id"), healed)
+                return res("already_succeeded", attempt_id=str(prior["id"]),
+                           charge_id=prior.get("charge_id"), payment_id=healed,
+                           amount=float(prior.get("charge_amount") or 0))
             return res("payment_orphan", attempt_id=str(prior["id"]),
                        charge_id=prior.get("charge_id"),
                        amount=float(prior.get("charge_amount") or 0),
-                       error="prior attempt is payment_orphan — human recovery only "
-                             "(a blind record_payment retry can double-record)")
+                       error="prior attempt is payment_orphan and no recorded "
+                             "payment matches its charge — human recovery only "
+                             "(QBO Payment create is not idempotent)")
+        force_retry = bool(intent.get("force_retry"))
+        db_ch = "credit_card" if channel == "card" else "ach"
+        if st == "needs_reconcile_review" and not force_retry:
+            return res("blocked_reconcile", attempt_id=str(prior["id"]),
+                       error=prior.get("error_message")
+                             or "reconciler could not determine prior state")
+        if st == "succeeded" and not force_retry:
+            # done is done; remainder-charging is an explicit human act
+            return res("already_succeeded", attempt_id=str(prior["id"]),
+                       charge_id=prior.get("charge_id"),
+                       payment_id=prior.get("qbo_payment_id"))
+        if (st == "charge_declined" and not force_retry
+                and prior.get("charge_id")            # REAL decline (Intuit id)
+                and prior.get("channel") == db_ch
+                and (str(prior["customer_payment_method_id"])
+                     if prior.get("customer_payment_method_id") else None)
+                    == (str(intent["cpm_id"]) if intent.get("cpm_id") else None)):
+            # the service itself refuses to re-hit a card it just declined —
+            # NO caller can do this accidentally (was engine-only policy)
+            return res("declined_no_retry", attempt_id=str(prior["id"]),
+                       charge_id=prior.get("charge_id"),
+                       error=prior.get("error_message") or "declined")
         if st == "pending":
             reuse = prior  # key never used; fresh-read guard still applies
         elif st == "charge_uncertain":
@@ -179,7 +329,7 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
     else:
         balances = {}
         for inv_id in line_ids:
-            fresh = get_qbo_invoice_details(inv_id, realm_id, access_token)
+            fresh = get_qbo_invoice_details(inv_id, realm_id, access_token, conn=conn)
             if fresh is None:
                 return res("read_failed", balances=balances or None,
                            error="fresh QBO invoice read failed — charge held "
@@ -296,6 +446,7 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
                                 for inv, amt in lines],
                       "provenance": _prov})
     update_attempt(conn, attempt["id"], qbo_payment_id=rec["payment_id"])
+    _link_charge_payment(conn, cr.get("charge_id"), rec["payment_id"])
     if rec.get("payment"):
         # write-time verified echo: the cache shows this payment at commit
         # time, and the payment's own webhook moot-finishes via supersession
@@ -304,6 +455,13 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
 
     # ── receipt: best-effort, after the money is durable, switched by DATA ──
     receipt_sent, receipt_error = False, None
+    if "receipt_email" not in intent:
+        try:
+            intent["receipt_email"] = fetch_qbo_customer_email(
+                intent["customer_id"], access_token, realm_id)
+        except Exception as e:
+            print(f"  (receipt email lookup warning: {e})")
+            intent["receipt_email"] = None
     if intent.get("receipt_email"):
         r = send_receipt(rec["payment_id"], intent["receipt_email"],
                          access_token, realm_id)
@@ -322,6 +480,67 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
                attempt_id=str(attempt["id"]), charge_id=cr.get("charge_id"),
                payment_id=rec["payment_id"], receipt_sent=receipt_sent,
                receipt_error=receipt_error, resumed=resumed)
+
+
+def recover_orphan(conn, qbo_invoice_id, stage, customer_id, payment_ref,
+                   memo_prefix, access_token, realm_id):
+    """Human-verified orphan recovery: retry ONLY record_qbo_payment with the
+    attempt's persisted charge — NEVER charges again. Mechanism, not policy
+    (a blind record retry can double-record; the human verified in QBO/Intuit
+    first). Returns {status: recovered|still_orphan|no_orphan, ...}."""
+    import json
+    prior = latest_attempt(conn, qbo_invoice_id, stage)
+    if not prior or prior["status"] != "payment_orphan":
+        return {"status": "no_orphan",
+                "error": f"prior status: {prior['status'] if prior else 'none'}"}
+    cr = prior.get("charge_result") or {}
+    if isinstance(cr, str):
+        cr = json.loads(cr)
+    charge_id = prior.get("charge_id") or cr.get("charge_id")
+    if not charge_id:
+        return {"status": "no_orphan", "error": "no charge_id on orphan attempt"}
+    cr.setdefault("charge_id", charge_id)
+    healed = _find_recorded_payment(conn, charge_id)
+    if healed:  # record landed earlier; response was lost — no second create
+        update_attempt(conn, prior["id"], status="succeeded", qbo_payment_id=healed)
+        _link_charge_payment(conn, charge_id, healed)
+        return {"status": "recovered", "attempt_id": str(prior["id"]),
+                "charge_id": charge_id, "payment_id": healed,
+                "amount": float(prior["charge_amount"] or 0),
+                "note": "healed from cache — QBO already had the payment"}
+    amount = float(prior["charge_amount"] or 0)
+    lines = ([(inv, float(amt)) for inv, amt in stored_group_lines(prior) or []]
+             or [(qbo_invoice_id, amount)])
+    rec = record_qbo_payment(customer_id, amount, cr, payment_ref, memo_prefix,
+                             access_token, realm_id, lines)
+    if not rec["success"]:
+        update_attempt(conn, prior["id"], status="payment_orphan",
+                       error_message=f"orphan recovery: record still failing: "
+                                     f"{str(rec.get('error'))[:300]}")
+        return {"status": "still_orphan", "attempt_id": str(prior["id"]),
+                "charge_id": charge_id, "amount": amount, "error": rec.get("error")}
+    emit(conn, "payment", rec["payment_id"], "payment_recorded",
+         participants=[f"invoice:{inv}" for inv, _ in lines]
+                      + [f"customer:{customer_id}"],
+         payload={"amount": amount, "charge_id": charge_id,
+                  "funding": {"kind": "charge"},
+                  "provenance": {"source": "intent", "intent_ref": str(prior["id"]),
+                                 "recovered_from": "payment_orphan"}})
+    emit(conn, "payment", rec["payment_id"], "payment_applied",
+         participants=[f"invoice:{inv}" for inv, _ in lines]
+                      + [f"customer:{customer_id}"],
+         payload={"funding": {"kind": "payment", "id": rec["payment_id"]},
+                  "lines": [{"invoice_id": inv, "amount": amt} for inv, amt in lines],
+                  "provenance": {"source": "intent", "intent_ref": str(prior["id"])}})
+    if rec.get("payment"):
+        echo_payment(conn, rec["payment"])
+    _link_charge_payment(conn, charge_id, rec["payment_id"])
+    insert_webhook_expectation(conn, "Payment", rec["payment_id"])
+    update_attempt(conn, prior["id"], status="succeeded",
+                   qbo_payment_id=rec["payment_id"])
+    return {"status": "recovered", "attempt_id": str(prior["id"]),
+            "charge_id": charge_id, "amount": amount,
+            "payment_id": rec["payment_id"]}
 
 
 # ── payment-method resolution (the 3 divergent engine copies, unified) ──────
@@ -459,7 +678,7 @@ def apply_credits(conn, customer_id, invoice_id, access_token, realm_id,
                                           memo_exclude=memo_exclude, ref_match=ref_match)
     if not credits:
         return out
-    fresh = get_qbo_invoice_details(invoice_id, realm_id, access_token)
+    fresh = get_qbo_invoice_details(invoice_id, realm_id, access_token, conn=conn)
     if fresh is None:
         out["errors"].append("fresh invoice read failed — no credits applied")
         return out
@@ -550,7 +769,7 @@ def _selfcheck():
         state["updates"].append(fields)
     def fake_expect(conn, et, eid):
         calls.append(f"expect:{et}")
-    def fake_fresh(inv, realm, at):
+    def fake_fresh(inv, realm, at, conn=None):
         calls.append(f"fresh:{inv}"); return state["fresh"].get(inv)
     def fake_charge(pmid, amount, key, num, name, at):
         calls.append(f"charge:{amount}:{key}")
@@ -701,6 +920,103 @@ def _selfcheck():
            "echo_payment:C1" in calls and "echo_payment:C2" in calls
            and sum("customer_payments SET unapplied_amt" in q for q in fconn.sql) == 1
            and sum("payment_invoice_links" in q for q in fconn.sql) == 2)
+
+        # 13. prior succeeded REFUSES without force_retry; proceeds with it
+        calls.clear(); state["updates"].clear()
+        state["prior"] = {"id": "A0", "status": "succeeded", "charge_id": "chX",
+                          "qbo_payment_id": "P70", "charge_amount": 30.0,
+                          "channel": "credit_card", "customer_payment_method_id": None,
+                          "raw_result": None, "attempted_at": None, "error_message": None}
+        state["fresh"] = {"I1": {"balance": 12.0, "email_status": None}}
+        state["charge"] = {"classification": "success", "charge_id": "ch10",
+                           "amount": 12.0, "payment_type": "card",
+                           "auth_code": "A", "card_type": "V", "card_last4": "1"}
+        state["record"] = {"success": True, "payment_id": "P80"}
+        r = charge_and_record(None, dict(base_intent), "at", "rid")
+        ok("prior succeeded -> already_succeeded, nothing fires",
+           r["status"] == "already_succeeded" and r["payment_id"] == "P70"
+           and not any(c.startswith(("charge", "fresh", "record")) for c in calls))
+        r = charge_and_record(None, {**base_intent, "force_retry": True}, "at", "rid")
+        ok("force_retry charges the remainder past a prior success",
+           r["status"] == "succeeded" and "charge:12.0:KEY-1" in calls)
+
+        # 14. prior needs_reconcile_review blocks
+        state["prior"] = {"id": "A0", "status": "needs_reconcile_review",
+                          "error_message": "cc mismatch", "charge_amount": 5.0}
+        r = charge_and_record(None, dict(base_intent), "at", "rid")
+        ok("reconcile-review blocks", r["status"] == "blocked_reconcile"
+           and r["error"] == "cc mismatch")
+
+        # 15. same-PM real decline refuses; different PM retries freely
+        calls.clear()
+        state["prior"] = {"id": "A0", "status": "charge_declined", "charge_id": "chD",
+                          "channel": "credit_card", "customer_payment_method_id": None,
+                          "error_message": "card expired", "charge_amount": 5.0,
+                          "raw_result": None, "attempted_at": None}
+        r = charge_and_record(None, dict(base_intent), "at", "rid")
+        ok("same-PM decline -> declined_no_retry, card untouched",
+           r["status"] == "declined_no_retry" and r["charge_id"] == "chD"
+           and not any(c.startswith("charge") for c in calls))
+        r = charge_and_record(None, {**base_intent, "cpm_id": "OTHER"}, "at", "rid")
+        ok("different PM retries freely", r["status"] == "succeeded")
+
+        # 16. recover_orphan: records with the persisted charge, never re-charges
+        calls.clear(); state["updates"].clear()
+        state["prior"] = {"id": "A0", "status": "payment_orphan", "charge_id": "chX",
+                          "charge_amount": 30.0, "charge_result": None, "raw_result": None}
+        state["record"] = {"success": True, "payment_id": "P81"}
+        r = recover_orphan(None, "I1", "maint", "C1", "1042", "memo", "at", "rid")
+        ok("orphan recovery records + succeeds without charging",
+           r["status"] == "recovered" and r["payment_id"] == "P81"
+           and not any(c.startswith("charge") for c in calls)
+           and any(u.get("status") == "succeeded" for u in state["updates"]))
+        state["prior"] = None
+
+        # 17. service-side instrument resolution: none usable -> no_payment_method;
+        #     usable -> resolved + charged (lock warning tolerated on fake conn)
+        state["prior"] = None
+        g["resolve_payment_method"] = lambda conn, cust, **kw: {"has_method": False,
+                                                                "error": "no card"}
+        calls.clear()
+        r = charge_and_record(None, {k: v for k, v in base_intent.items()
+                                     if k not in ("payment_method_id", "channel")}
+                              | {"preferred_type": "credit_card"}, "at", "rid")
+        ok("unresolvable instrument -> no_payment_method + WAL halt row",
+           r["status"] == "no_payment_method" and r["error"] == "no card"
+           and "create" in calls and r["attempt_id"] == "A1")
+        g["resolve_payment_method"] = lambda conn, cust, **kw: {
+            "has_method": True, "method_id": "pmX", "cpm_id": "CPMX",
+            "payment_type": "credit_card"}
+        state["fresh"] = {"I1": {"balance": 9.0, "email_status": None}}
+        state["charge"] = {"classification": "success", "charge_id": "ch11",
+                           "amount": 9.0, "payment_type": "card",
+                           "auth_code": "A", "card_type": "V", "card_last4": "2"}
+        state["record"] = {"success": True, "payment_id": "P82"}
+        r = charge_and_record(None, {k: v for k, v in base_intent.items()
+                                     if k not in ("payment_method_id", "channel")}
+                              | {"preferred_type": "credit_card"}, "at", "rid")
+        ok("service resolves + charges", r["status"] == "succeeded"
+           and "charge:9.0:KEY-1" in calls)
+
+        # 18. orphan with a cache-matched payment SELF-HEALS (leg-2 dedupe);
+        #     unproven orphan still refuses
+        class _LookupConn:
+            def __init__(self, row): self._row = row
+            def cursor(self): return self
+            def execute(self, q, p=None): pass
+            def fetchone(self): return self._row
+            def close(self): pass
+        calls.clear(); state["updates"].clear()
+        state["prior"] = {"id": "A0", "status": "payment_orphan", "charge_id": "chX",
+                          "charge_amount": 30.0}
+        r = charge_and_record(_LookupConn(("P90",)), dict(base_intent), "at", "rid")
+        ok("orphan heals when the record provably landed",
+           r["status"] == "already_succeeded" and r["payment_id"] == "P90"
+           and any(u.get("qbo_payment_id") == "P90" for u in state["updates"])
+           and not any(c.startswith(("charge", "record")) for c in calls))
+        r = charge_and_record(_LookupConn(None), dict(base_intent), "at", "rid")
+        ok("unproven orphan still refuses", r["status"] == "payment_orphan")
+        state["prior"] = None
 
         # 12. apply_credits halts on a failed fresh read; caller-picked
         #     credits list bypasses the selector load

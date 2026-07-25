@@ -112,13 +112,22 @@ def qbo_post(path, access_token, realm_id, body):
     )
 
 
-def fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id):
-    """Full invoice read: (Invoice dict, None) or (None, error). Use
-    get_qbo_invoice_details when only balance/email_status matter."""
+def fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id, conn=None):
+    """THE invoice reader: (Invoice dict, None) or (None, error). Pass conn
+    and every read converges the cache (reads verify — ADR 010; this is also
+    the chokepoint where the SyncToken read-audit lands). Echo failure never
+    fails the read."""
     resp = qbo_get(f"invoice/{qbo_invoice_id}", access_token, realm_id)
     if not resp.ok:
         return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
-    return resp.json().get("Invoice"), None
+    invoice = resp.json().get("Invoice")
+    if invoice and conn is not None:
+        try:
+            from f.billing._lib.cache import echo_invoice
+            echo_invoice(conn, qbo_invoice_id, invoice)
+        except Exception as e:
+            print(f"  (invoice echo warning [{qbo_invoice_id}]: {e})")
+    return invoice, None
 
 
 def fetch_qbo_customer_email(customer_id, access_token, realm_id):
@@ -244,20 +253,13 @@ def charge_bank_account(bank_id, amount, request_id, invoice_num, customer_name,
 
 # ── invoice read (the money-path fresh read) ────────────────────────────────
 
-def get_qbo_invoice_details(invoice_id, realm_id, access_token):
-    """Fresh leader read of ONE invoice — money paths decide on this, not the
-    cache. Returns {balance, email_status} or None on ANY failure (caller MUST
-    halt on None; never fall back to the cache for a charge decision)."""
-    _claim()
+def get_qbo_invoice_details(invoice_id, realm_id, access_token, conn=None):
+    """{balance, email_status} view over fetch_qbo_invoice (ONE reader, one
+    echo/audit chokepoint), or None on ANY failure — caller MUST halt on
+    None; never fall back to the cache for a charge decision."""
     try:
-        resp = requests.get(
-            f"{_QBO_BASE}/{realm_id}/invoice/{invoice_id}?minorversion=65",
-            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
-            timeout=30)
-        if not resp.ok:
-            return None
-        inv = resp.json().get("Invoice", {})
-        if "Balance" not in inv:
+        inv, _err = fetch_qbo_invoice(invoice_id, access_token, realm_id, conn=conn)
+        if not inv or "Balance" not in inv:
             return None
         return {"balance": float(inv["Balance"]), "email_status": inv.get("EmailStatus")}
     except Exception:
@@ -425,10 +427,26 @@ def send_payment_receipt(payment_id, customer_id, access_token, realm_id):
     return {"success": True, "sent_to": email}
 
 
-def update_invoice_sparse(qbo_invoice_id, updates, access_token, realm_id, max_retries=2):
+# invoice_edited payload field names for the QBO keys we PATCH; unknown
+# keys pass through as-is. CustomerMemo mirrors PrivateNote — skip the dup.
+_EDIT_FIELDS = {"PrivateNote": "memo", "CustomerMemo": None,
+                "ClassRef": "qbo_class", "TxnDate": "txn_date"}
+
+
+def _edit_value(v):
+    return (v.get("name") or v.get("value")) if isinstance(v, dict) else v
+
+
+def update_invoice_sparse(qbo_invoice_id, updates, access_token, realm_id,
+                          max_retries=2, conn=None, intent_ref=None, actor="auto"):
     """Sparse-PATCH an invoice with SyncToken CAS: fetch fresh, send the
     cached token, retry on Stale Object (someone else won the race). updates
-    is the dict of QBO fields to set — pure data, no policy here."""
+    is the dict of QBO fields to set — pure data, no policy here.
+
+    WRITE = ECHO + EMIT (ADR 010): pass conn and the primitive converges the
+    cache from the response and emits invoice_edited itself (before-image =
+    its own CAS fetch, provenance = intent_ref). Callers do their action and
+    stay dumb — change tracking is the architecture's job, not theirs."""
     last_err = None
     for attempt in range(max_retries + 1):
         inv, _err = fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id)
@@ -441,7 +459,32 @@ def update_invoice_sparse(qbo_invoice_id, updates, access_token, realm_id, max_r
                         {"Id": inv["Id"], "SyncToken": inv["SyncToken"],
                          "sparse": True, **updates})
         if resp.ok:
-            return {"success": True, "invoice": resp.json().get("Invoice")}
+            after = resp.json().get("Invoice")
+            if conn is not None:
+                try:
+                    from f.billing._lib.cache import echo_invoice
+                    from f.billing._lib.events import emit
+                    if after:
+                        echo_invoice(conn, qbo_invoice_id, after)
+                    changes = {}
+                    for key, value in updates.items():
+                        field = _EDIT_FIELDS.get(key, key)
+                        if field is None:
+                            continue
+                        before_v, after_v = _edit_value(inv.get(key)), _edit_value(value)
+                        if before_v != after_v:
+                            changes[field] = {"from": before_v, "to": after_v}
+                    if changes:
+                        customer = ((after or inv).get("CustomerRef") or {}).get("value")
+                        emit(conn, "invoice", qbo_invoice_id, "invoice_edited",
+                             participants=[f"customer:{customer}"] if customer else [],
+                             payload={"changes": changes,
+                                      "provenance": {"source": "intent",
+                                                     "intent_ref": intent_ref or "update_invoice_sparse"}},
+                             actor=actor)
+                except Exception as e:
+                    print(f"  (write echo/emit warning [{qbo_invoice_id}]: {e})")
+            return {"success": True, "invoice": after}
         text = resp.text[:400]
         last_err = f"HTTP {resp.status_code}: {text}"
         if "Stale Object" in text and attempt < max_retries:

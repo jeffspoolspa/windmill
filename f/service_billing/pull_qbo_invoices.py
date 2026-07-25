@@ -10,8 +10,10 @@
 #   Single-WO:        pull_qbo_invoices(wo_number="4746495")
 #       - Fetches just that WO's invoice from QBO live
 #       - Upserts + links
-#       - Auto-chains to pre_process_invoice with force=True
-#       - Returns combined result (use case: manual UI "Sync from QBO" button)
+#       - Linking fires trg_enqueue_service_preprocess; the dispatcher
+#         enriches it. This script never calls pre_process_invoice itself —
+#         that would be a second, unqueued run of the same enrichment.
+#       - Returns the link result (use case: manual UI "Sync from QBO" button)
 
 import requests
 import wmill
@@ -311,14 +313,17 @@ def main(force_refresh: bool = False, max_age_minutes: int = 60,
                 return sync_result
 
             qbo_invoice_id = sync_result["qbo_invoice_id"]
-            print(f"  triggering pre_process_invoice (force=True) for {qbo_invoice_id}")
-            try:
-                pp_result = wmill.run_script_by_path(
-                    "f/service_billing/pre_process_invoice",
-                    {"qbo_invoice_id": qbo_invoice_id, "force": True, "bulk_all": False},
-                )
-            except Exception as e:
-                pp_result = {"status": "error", "error": f"pre_process trigger failed: {e}"}
+            # No direct pre_process call. Linking the WO above already set
+            # work_orders.qbo_invoice_id, which fires
+            # trg_enqueue_service_preprocess -> the queue -> the dispatcher.
+            # Calling the script here too would run the SAME enrichment a
+            # second time, in parallel, outside the queue — so the partial
+            # unique index that serialises one invoice would not apply, and
+            # both runs would PATCH QBO and walk the credit loop off the same
+            # pre-application balance. The old code survived this only because
+            # `force` plus an already-pre-processed check made the loser a
+            # no-op; `force` is gone.
+            print(f"  linked {qbo_invoice_id} — enqueued for pre-processing")
 
             return {
                 "status": "success",
@@ -326,7 +331,7 @@ def main(force_refresh: bool = False, max_age_minutes: int = 60,
                 "wo_number": wo_number,
                 "invoice_number": sync_result.get("invoice_number"),
                 "qbo_invoice_id": qbo_invoice_id,
-                "pre_processing": pp_result,
+                "pre_processing": "enqueued (trg_enqueue_service_preprocess)",
             }
 
         # ─── BULK MODE ─────────────────────────────────────────────────

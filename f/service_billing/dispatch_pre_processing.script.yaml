@@ -3,7 +3,6 @@ summary: Pre-process queue worker (claim loop, claim-time eligibility, one token
 description: Pre-process queue worker (claim loop, claim-time eligibility, one
   token refresh per drain)
 lock: '!inline f/service_billing/dispatch_pre_processing.script.lock'
-concurrency_key: ''
 concurrency_time_window_s: 5
 concurrent_limit: 1
 kind: script

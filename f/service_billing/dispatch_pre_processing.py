@@ -1,138 +1,111 @@
+# requirements:
+# psycopg2-binary
+# requests
+# wmill
+
 # f/service_billing/dispatch_pre_processing — the pre-process queue worker.
 #
 # WORKFLOW_EXECUTION applied to service-billing enrichment: the WO-link
-# trigger (trg_enqueue_service_preprocess) writes billing.service_preprocess_
-# queue + wakes this worker; the 60s schedule is the heartbeat + self-heal
-# (pg_net is at-most-once — the outbox lesson: ~6% of direct fires dropped
-# under burst and invoices stuck invisibly).
+# trigger (trg_enqueue_service_preprocess) writes the queue and wakes this
+# worker; the 60s schedule is the heartbeat + self-heal (pg_net is
+# at-most-once — the outbox lesson: ~6% of direct fires dropped under burst
+# and invoices stuck invisibly).
 #
-# Claim one row at a time (SKIP LOCKED, priority order, 3-attempt
-# dead-letter), check ELIGIBILITY AT CLAIM TIME (billable WO, not skipped,
-# still awaiting, subtotal_ok — enqueue is dumb, the worker decides), then
-# run the enrichment sentence IN-PROCESS (one DB connection + ONE token
-# refresh per drain, not per invoice — the old per-invoice main() calls
-# rotated the QBO refresh token once per unit).
+# Claim, run, finish. Eligibility is a SQL predicate, stated once and used
+# three ways: enqueue what's missing, retire what's moot, claim what's live.
+# One QboClient for the whole drain — one token refresh, not one per invoice.
 #
-# Concurrency: concurrent_limit 1 (sole caller of the enrichment handler;
-# per-call QBO volume is governed by the shared rate bucket).
+# Concurrency: concurrent_limit 1.
 
 import time
 
-import psycopg2.extras
-import wmill
-
-from f.billing._lib.db import get_db_conn
-from f.billing._lib.qbo import set_rate_limiter, refresh_qbo_token
-import f.service_billing.pre_process_invoice as pre_process
+from f.billing._lib.db import get_db_conn, query_one, execute_sql
+from f.billing._lib.clients import QboClient
+from f.service_billing.pre_process_invoice import enrich
 
 PER_RUN_LIMIT = 50
 GRACE_MINUTES = 2  # let the wake path win before self-heal re-enqueues
 
-CLAIM = """
-UPDATE billing.service_preprocess_queue
-SET started_at = now(), attempts = attempts + 1
-WHERE id = (SELECT id FROM billing.service_preprocess_queue
-            WHERE finished_at IS NULL AND attempts < 3
-            ORDER BY priority, received_at
-            FOR UPDATE SKIP LOCKED LIMIT 1)
-RETURNING id, qbo_invoice_id
-"""
-
-# Lost-trigger backstop: any eligible invoice with no live queue row gets one.
-SELF_HEAL = """
-INSERT INTO billing.service_preprocess_queue (qbo_invoice_id)
-SELECT i.qbo_invoice_id
-FROM billing.invoices i
-JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
-WHERE i.billing_status = 'awaiting_pre_processing'
-  AND w.billable = true AND w.skipped_at IS NULL
+# The one rule: is this invoice still worth enriching?
+ELIGIBLE = """
+  i.billing_status = 'awaiting_pre_processing'
   AND i.pre_processed_at IS NULL
   AND i.subtotal_ok IS TRUE
-  AND i.fetched_at < now() - make_interval(mins => %s)
+  AND w.billable IS TRUE AND w.skipped_at IS NULL
+"""
+
+# Lost-trigger backstop: an eligible invoice with no live queue row gets one.
+SELF_HEAL = f"""
+INSERT INTO billing.service_preprocess_queue (qbo_invoice_id)
+SELECT i.qbo_invoice_id FROM billing.invoices i
+JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
+WHERE {ELIGIBLE} AND i.fetched_at < now() - make_interval(mins => %s)
 ON CONFLICT (qbo_invoice_id) WHERE finished_at IS NULL DO NOTHING
 """
 
-# Claim-time truth: is this unit still worth enriching?
-ELIGIBLE = """
-SELECT (i.billing_status = 'awaiting_pre_processing'
-        AND w.billable IS TRUE AND w.skipped_at IS NULL
-        AND i.pre_processed_at IS NULL
-        AND i.subtotal_ok IS TRUE) AS ok
-FROM billing.invoices i
-LEFT JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
-WHERE i.qbo_invoice_id = %s
+# Moot rows (gate flipped them, WO unlinked, already enriched) retire in one
+# set-based pass, so CLAIM only ever returns live work.
+RETIRE = f"""
+UPDATE billing.service_preprocess_queue q SET finished_at = now(), error = NULL
+WHERE q.finished_at IS NULL AND NOT EXISTS (
+  SELECT 1 FROM billing.invoices i
+  JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
+  WHERE i.qbo_invoice_id = q.qbo_invoice_id AND {ELIGIBLE})
 """
 
+# Eligibility is re-checked here, not just in RETIRE: a drain can run for a
+# while, and a work order skipped in the UI mid-drain must not still be
+# enriched. Claiming a row is the only moment that decision is safe to make.
+CLAIM = f"""
+UPDATE billing.service_preprocess_queue
+SET started_at = now(), attempts = attempts + 1
+WHERE id = (SELECT q.id FROM billing.service_preprocess_queue q
+            JOIN billing.invoices i ON i.qbo_invoice_id = q.qbo_invoice_id
+            JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
+            WHERE q.finished_at IS NULL AND q.attempts < 3
+              AND billing.credits_cache_fresh()
+              AND {ELIGIBLE}
+            ORDER BY q.priority, q.received_at
+            FOR UPDATE OF q SKIP LOCKED LIMIT 1)
+RETURNING id, qbo_invoice_id
+"""
 
-def _row(conn, sql, params):
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(sql, params)
-    row = cur.fetchone(); cur.close()
-    return dict(row) if row else None
-
-
-def _exec(conn, sql, params):
-    cur = conn.cursor()
-    cur.execute(sql, params)
-    conn.commit(); cur.close()
+FINISH = ("UPDATE billing.service_preprocess_queue "
+          "SET finished_at = now(), error = NULL WHERE id = %s")
+# Failed units stay open and re-claim until attempts >= 3, then dead-letter.
+RELEASE = ("UPDATE billing.service_preprocess_queue "
+           "SET started_at = NULL, error = %s WHERE id = %s")
 
 
 def main():
-    """Self-heal, then drain the pre-process queue until empty (or the
-    per-run cap). Idle runs make no QBO calls (no token rotation)."""
+    """Self-heal, retire, then drain until empty (or the per-run cap). An
+    idle run makes no QBO calls — the client is built on the first real unit."""
     started = time.time()
     conn = get_db_conn()
-    set_rate_limiter(conn)  # ADR 008 §4: every QBO call claims
     try:
-        _exec(conn, SELF_HEAL, (GRACE_MINUTES,))
+        execute_sql(conn, SELF_HEAL, (GRACE_MINUTES,))
+        execute_sql(conn, RETIRE, ())
 
-        stats, results, creds = {}, [], None
+        qbo, done, failed, results = None, 0, 0, []
         for _ in range(PER_RUN_LIMIT):
-            unit = _row(conn, CLAIM, ())
+            unit = query_one(conn, CLAIM, ())
             conn.commit()
             if not unit:
-                break  # queue empty
-            qid = unit["qbo_invoice_id"]
-
-            elig = _row(conn, ELIGIBLE, (qid,))
-            if not elig or not elig["ok"]:
-                # moot at claim time (gate flipped it, WO unlinked, already
-                # enriched) — finish clean; self-heal re-enqueues if it ever
-                # becomes eligible again
-                _exec(conn, "UPDATE billing.service_preprocess_queue "
-                            "SET finished_at = now(), error = NULL WHERE id = %s",
-                      (unit["id"],))
-                stats["moot"] = stats.get("moot", 0) + 1
-                continue
-
-            if creds is None:  # first real unit: ONE refresh per drain
-                at, rid = refresh_qbo_token()
-                api_key = wmill.get_variable(pre_process.OPENAI_KEY_VAR)
-                creds = (at, rid, api_key)
-
+                break
+            qbo = qbo or QboClient(conn)   # first real unit: one token refresh
             try:
-                res = pre_process.process_one(conn, qid, *creds, force=False)
-                _exec(conn, "UPDATE billing.service_preprocess_queue "
-                            "SET finished_at = now(), error = NULL WHERE id = %s",
-                      (unit["id"],))
+                results.append(enrich(conn, qbo, unit["qbo_invoice_id"]))
+                execute_sql(conn, FINISH, (unit["id"],))
+                done += 1
             except Exception as e:
                 conn.rollback()
-                res = {"status": "error", "qbo_invoice_id": qid,
-                       "error": f"{type(e).__name__}: {str(e)[:200]}"}
-                # stays open: re-claims until attempts >= 3, then dead-letters
-                _exec(conn, "UPDATE billing.service_preprocess_queue "
-                            "SET started_at = NULL, error = %s WHERE id = %s",
-                      (res["error"], unit["id"]))
+                error = f"{type(e).__name__}: {str(e)[:200]}"
+                execute_sql(conn, RELEASE, (error, unit["id"]))
+                results.append({"qbo_invoice_id": unit["qbo_invoice_id"],
+                                "error": error})
+                failed += 1
 
-            status = res.get("status", "error")
-            stats[status] = stats.get(status, 0) + 1
-            if len(results) < 20:
-                results.append({"qbo_invoice_id": qid, "outcome": status,
-                                "reason": res.get("needs_review_reason")
-                                          or res.get("reason") or res.get("error")})
-            print(f"  {qid} -> {status}")
-
-        return {"status": "ok", "drained": sum(stats.values()), "stats": stats,
-                "results": results, "elapsed_s": round(time.time() - started, 1)}
+        return {"enriched": done, "failed": failed, "results": results[:20],
+                "elapsed_s": round(time.time() - started, 1)}
     finally:
         conn.close()

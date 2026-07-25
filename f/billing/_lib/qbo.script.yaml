@@ -1,6 +1,5 @@
 summary: write primitives return their response bodies (free verified echoes)
 description: write primitives return their response bodies (free verified echoes)
 lock: '!inline f/billing/_lib/qbo.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
