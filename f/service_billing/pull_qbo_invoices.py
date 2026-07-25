@@ -1,3 +1,8 @@
+# requirements:
+# psycopg2-binary
+# requests
+# wmill
+
 # Pull QBO invoices into billing.invoices cache + link to WOs.
 #
 # Two modes:

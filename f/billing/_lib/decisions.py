@@ -1,5 +1,6 @@
 # requirements:
 # psycopg2-binary
+# wmill
 
 """
 f/billing/_lib/decisions — credit decision facts.

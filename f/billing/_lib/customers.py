@@ -1,6 +1,6 @@
 # requirements:
 # psycopg2-binary
-# requests
+# wmill
 
 """
 f/billing/_lib/customers — what we know about a customer.

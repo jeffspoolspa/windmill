@@ -1,6 +1,7 @@
 # requirements:
 # psycopg2-binary
 # requests
+# wmill
 
 """
 f/billing/_lib/payment_methods — the customer's wallet.
