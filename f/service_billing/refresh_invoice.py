@@ -30,11 +30,18 @@
 #        runs automatically
 #
 #   3. Voided in QBO (operation == "Void", or detected from response):
-#      → Unlink any WO pointing at it (qbo_invoice_id → NULL) so the WO
-#        falls back to awaiting_invoice (v_awaiting_invoice filters where
-#        qbo_invoice_id IS NULL AND billable AND sub_total > 0)
-#      → Mark billing_status = needs_review with reason invoice_voided
+#      → KEEP the WO link. Nulling it destroyed the only record that this WO
+#        ever produced this invoice. The link is history.
+#      → Emit invoice_voided (participants: the linked WOs). billing
+#        .invoice_voided() folds it; billing.v_invoice_state then shows the
+#        invoice as `audit` — a reconciliation item, not operator work.
+#      → Scope is STATED, not implied by deletion: invoice_ready() and
+#        enqueue_service_preprocess() both check invoice_voided(), so a
+#        linked-but-voided invoice is never claimed, charged or re-queued.
 #      → Keep the cache row for forensics
+#      NOTE: the WO no longer reappears in Awaiting Invoice by itself (that
+#      view filters on qbo_invoice_id IS NULL). Re-invoicing a voided job is
+#      now an explicit act from the audit view.
 #
 #   4. Hard-deleted in QBO (404):
 #      → Same as void path but reason = invoice_deleted_in_qbo
@@ -45,8 +52,11 @@ from decimal import Decimal
 
 import psycopg2
 import psycopg2.extras
+
 import requests
 import wmill
+
+from f.billing._lib.events import append_event
 
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
@@ -283,24 +293,50 @@ def link_to_work_order(conn, qbo_invoice_id, doc_number):
     if not doc_number:
         return {"linked": False, "reason": "invoice has no doc_number"}
 
+    # The PREVIOUS qbo_invoice_id is captured before the overwrite. A relink
+    # happens when ION changes the WO's invoice_number — typically after a void
+    # — and the invoice it used to point at is the thing we must not lose. The
+    # link survives a void (see handle_voided), so this genuinely overwrites a
+    # live value rather than filling a null, and the log is the only place the
+    # old number will still exist afterwards.
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
-        UPDATE public.work_orders
-        SET qbo_invoice_id = %s
-        WHERE invoice_number = %s
-          AND billable = true
-          AND qbo_invoice_id IS DISTINCT FROM %s
-        RETURNING wo_number, qbo_invoice_id
-    """, (qbo_invoice_id, doc_number, qbo_invoice_id))
+        WITH prev AS (
+            SELECT wo_number, qbo_invoice_id AS previous_id
+              FROM public.work_orders
+             WHERE invoice_number = %s
+               AND billable = true
+               AND qbo_invoice_id IS DISTINCT FROM %s
+               FOR UPDATE
+        )
+        UPDATE public.work_orders w
+           SET qbo_invoice_id = %s
+          FROM prev
+         WHERE w.wo_number = prev.wo_number
+        RETURNING w.wo_number, prev.previous_id
+    """, (doc_number, qbo_invoice_id, qbo_invoice_id))
     rows = cur.fetchall()
     cur.close()
 
     if not rows:
         return {"linked": False, "reason": "already linked or no matching billable WO",
                 "doc_number": doc_number}
+
+    for r in rows:
+        append_event(conn, "invoice", qbo_invoice_id, "invoice_linked",
+                     participants=[f"work_order:{r['wo_number']}"],
+                     payload={"doc_number": doc_number,
+                              "work_order": r["wo_number"],
+                              # None on a first link; the displaced invoice on a relink
+                              "previous_qbo_invoice_id": r["previous_id"],
+                              "provenance": {"source": "intent",
+                                             "intent_ref": "link_to_work_order"}})
+    conn.commit()
+
     return {
         "linked": True,
         "wo_numbers": [r["wo_number"] for r in rows],
+        "relinked_from": [r["previous_id"] for r in rows if r["previous_id"]],
         "doc_number": doc_number,
         "note": "trg_pre_processing_on_link will fire pre_process_invoice for the linked WO(s)",
     }
@@ -335,13 +371,30 @@ def handle_voided(conn, qbo_invoice_id, qbo_inv=None, kind="voided"):
         reason = "invoice_deleted_in_qbo"
         sync_err = "deleted in QBO"
 
+    # The WO link SURVIVES a void. Nulling it destroyed the only record that
+    # this work order ever produced this invoice — the doc number was the sole
+    # surviving trace, and only by luck. The link is history; keeping it lets
+    # the invoice surface in AUDIT (billing.v_invoice_state) as the
+    # reconciliation item it is, instead of vanishing.
+    #
+    # Safe because scope is now stated rather than implied by deletion:
+    # billing.invoice_ready() and enqueue_service_preprocess() both check
+    # billing.invoice_voided() directly, so a linked-but-voided invoice is
+    # never claimed, charged, or re-queued.
     cur.execute("""
-        UPDATE public.work_orders
-        SET qbo_invoice_id = NULL
-        WHERE qbo_invoice_id = %s
-        RETURNING wo_number
+        SELECT wo_number FROM public.work_orders WHERE qbo_invoice_id = %s
     """, (qbo_invoice_id,))
-    unlinked_wos = [r["wo_number"] for r in cur.fetchall()]
+    linked_wos = [r["wo_number"] for r in cur.fetchall()]
+
+    # The fact, before the status string. billing.invoice_voided() folds this;
+    # the WOs ride as participants so the link is readable from either side.
+    append_event(conn, "invoice", qbo_invoice_id, "invoice_voided",
+                 participants=[f"work_order:{w}" for w in linked_wos],
+                 payload={"kind": kind,
+                          "work_orders": linked_wos,
+                          "provenance": {"source": "external",
+                                         "discovered_via": "webhook",
+                                         "intent_ref": "handle_voided"}})
 
     if qbo_inv:
         cur.execute("""
@@ -380,7 +433,7 @@ def handle_voided(conn, qbo_invoice_id, qbo_inv=None, kind="voided"):
     return {
         "kind": kind,
         "reason": reason,
-        "unlinked_wos": unlinked_wos,
+        "linked_wos": linked_wos,
         "rows_marked": affected,
     }
 

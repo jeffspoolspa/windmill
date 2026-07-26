@@ -110,30 +110,69 @@ def _link_charge_payment(conn, charge_id, payment_id):
         print(f"  (charge link warning: {e})")
 
 
-def _upsert_charge(conn, cr):
-    """Reflect Intuit's charge event into billing.charges (keyed by INTUIT's
-    charge_id — the leader's identity, never ours). Written for success AND
-    declines (Intuit ids declines too); reconcile_payments also converges this
-    reflection as it discovers state. Best-effort: a reflection failure never
-    fails the money path. Returns the charge_id (or None)."""
+#: Intuit's status vocabulary -> ours. billing.charges has a CHECK on this;
+#: the vendor's literal wording survives in `raw`.
+_CHARGE_STATUS = {"CAPTURED": "succeeded", "SETTLED": "succeeded",
+                  "DECLINED": "declined", "CANCELLED": "error",
+                  "FAILED": "error", "ERROR": "error"}
+
+
+def charge_status(cr):
+    """Our status for a charge result. `classification` is the money-path
+    verdict and outranks Intuit's wording — an uncertain charge is uncertain
+    even if a response body says CAPTURED."""
+    cls = (cr.get("classification") or "").lower()
+    if cls == "uncertain":
+        return "uncertain"
+    raw_status = (cr.get("status") or (cr.get("raw_response") or {}).get("status") or "")
+    return _CHARGE_STATUS.get(raw_status.upper(),
+                              "succeeded" if cls == "success" else
+                              "declined" if cls == "declined" else "error")
+
+
+def _upsert_charge(conn, cr, qbo_invoice_id):
+    """Record the charge ATTEMPT against its invoice (ADR 011).
+
+    A charge belongs to an invoice; charge_id and qbo_payment_id are OUTCOMES
+    and may be absent. This previously bailed out when Intuit returned no id,
+    which silently dropped every decline that failed before Intuit issued one —
+    the invoice then looked never-charged and automation would retry the card.
+
+    Best-effort: a reflection failure never fails the money path.
+    Returns Intuit's charge_id when there is one, else None.
+    """
     raw = cr.get("raw_response") or {}
     charge_id = cr.get("charge_id") or raw.get("id")
-    if not charge_id:
-        return None
     try:
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO billing.charges
-              (charge_id, payment_type, status, amount, auth_code, card_type, card_last4, raw)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-            ON CONFLICT (charge_id) DO UPDATE SET
-              status = EXCLUDED.status, raw = EXCLUDED.raw, updated_at = now()
-        """, (charge_id, cr.get("payment_type"),
-              cr.get("status") or raw.get("status"),
-              cr.get("amount") or raw.get("amount"),
-              cr.get("auth_code") or raw.get("authCode"),
-              cr.get("card_type") or (raw.get("card") or {}).get("cardType"),
-              cr.get("card_last4"), dumps(raw)))
+        if charge_id:
+            # Intuit gave us an identity — converge on it
+            cur.execute("""
+                INSERT INTO billing.charges
+                  (qbo_invoice_id, charge_id, payment_type, status, amount,
+                   auth_code, card_type, card_last4, error_message, raw, source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, 'live')
+                ON CONFLICT (charge_id) WHERE charge_id IS NOT NULL DO UPDATE SET
+                  status = EXCLUDED.status, raw = EXCLUDED.raw,
+                  qbo_invoice_id = coalesce(billing.charges.qbo_invoice_id,
+                                            EXCLUDED.qbo_invoice_id),
+                  updated_at = now()
+            """, (qbo_invoice_id, charge_id, cr.get("payment_type"),
+                  charge_status(cr), cr.get("amount") or raw.get("amount"),
+                  cr.get("auth_code") or raw.get("authCode"),
+                  cr.get("card_type") or (raw.get("card") or {}).get("cardType"),
+                  cr.get("card_last4"), cr.get("error"), dumps(raw)))
+        else:
+            # No identity from Intuit — still a real attempt against this
+            # invoice, and the ONLY record that we tried.
+            cur.execute("""
+                INSERT INTO billing.charges
+                  (qbo_invoice_id, payment_type, status, amount,
+                   error_message, raw, source)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, 'live')
+            """, (qbo_invoice_id, cr.get("payment_type"), charge_status(cr),
+                  cr.get("amount") or raw.get("amount"),
+                  cr.get("error"), dumps(raw)))
         conn.commit(); cur.close()
     except Exception as e:
         print(f"  (charge reflection warning: {e})")
@@ -378,7 +417,8 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
                 intent.get("charge_label") or intent.get("invoice_number") or "",
                 intent.get("customer_name") or "", access_token)
         cls = cr["classification"]
-        reflected_id = _upsert_charge(conn, cr)  # Intuit's fact, reflected
+        # the attempt is recorded against the ANCHOR invoice, id or not
+        reflected_id = _upsert_charge(conn, cr, anchor)
         if cls == "uncertain":
             emit(conn, "charge", attempt["id"], "charge_uncertain",
                  participants=_parts,

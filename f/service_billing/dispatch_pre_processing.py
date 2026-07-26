@@ -85,6 +85,11 @@ def main():
     try:
         execute_sql(conn, SELF_HEAL, (GRACE_MINUTES,))
         execute_sql(conn, RETIRE, ())
+        # An unsent invoice past billing.delivery_age_limit() stops being worth
+        # sending. Emits delivery_waived(aged_out); idempotent. Time-based, so
+        # it needs a heartbeat rather than a trigger — this loop already is one.
+        aged = query_one(conn, "SELECT billing.waive_aged_deliveries() AS n", ())
+        conn.commit()
 
         qbo, done, failed, results = None, 0, 0, []
         for _ in range(PER_RUN_LIMIT):
@@ -105,7 +110,7 @@ def main():
                                 "error": error})
                 failed += 1
 
-        return {"enriched": done, "failed": failed, "results": results[:20],
+        return {"enriched": done, "failed": failed, "aged_out_waived": aged["n"], "results": results[:20],
                 "elapsed_s": round(time.time() - started, 1)}
     finally:
         conn.close()

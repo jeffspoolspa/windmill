@@ -21,13 +21,24 @@ invoice is legitimately past due).
 
 Layer: service (composes the _lib/qbo send primitive + the _lib/cache echo).
 
-Import as:  from f.billing._lib.delivery import deliver_invoice
+Import as:  from f.billing._lib.delivery import deliver_invoice, send_and_record
 """
 
 from datetime import date
 
-from f.billing._lib.qbo import send_invoice
-from f.billing._lib.cache import mark_emailed
+from f.billing._lib.qbo import (
+    send_invoice, send_invoice_email, bump_invoice_due_date_to_today,
+    fetch_qbo_invoice,
+)
+from f.billing._lib.cache import mark_emailed, echo_invoice
+from f.billing._lib.wal import (
+    latest_attempt, create_attempt, update_attempt,
+    insert_webhook_expectation, dumps as _dumps,
+)
+from f.billing._lib.events import emit
+
+SEND_RETRIES = 3
+SEND_BACKOFF_S = 5
 
 
 def _due_date(conn, invoice_id):
@@ -62,6 +73,50 @@ def deliver_invoice(conn, invoice_id, email, email_status,
     if r.get("ok"):
         mark_emailed(conn, invoice_id)
     return r
+
+
+def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
+    """The WORKFLOW send: WAL-book an attempt, remedy a past-due first send by
+    bumping the due date (we have the primitive; refusing was the pre-bump
+    rule), send with retries, emit invoice_emailed, echo the mirror. Shared by
+    any engine that delivers as part of processing. Returns {success, ...}."""
+    import time
+    qbo_invoice_id = invoice_row["qbo_invoice_id"]
+    prior = latest_attempt(conn, qbo_invoice_id, stage)
+    attempt = prior if (prior and prior["status"] == "pending") else create_attempt(
+        conn, qbo_invoice_id, stage, invoice_row.get("doc_number"), "email",
+        balance or 0, False, wo_number=invoice_row.get("wo_number"),
+        payment_method=invoice_row.get("payment_method"))
+
+    if (balance or 0) > 0:  # unpaid + emailed shouldn't arrive OVERDUE
+        due = bump_invoice_due_date_to_today(qbo_invoice_id, access_token, realm_id)
+        if due.get("success") and not due.get("skipped"):
+            insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
+
+    last_error = None
+    for i in range(SEND_RETRIES):
+        email = send_invoice_email(qbo_invoice_id, invoice_row.get("qbo_customer_id"),
+                                   access_token, realm_id)
+        if email["success"]:
+            update_attempt(conn, attempt["id"], status="succeeded", email_sent=True,
+                           raw_result=_dumps({"email": email, "tries": i + 1}))
+            if not email.get("skipped"):
+                emit(conn, "invoice", qbo_invoice_id, "invoice_emailed",
+                     participants=[f"customer:{invoice_row.get('qbo_customer_id')}"],
+                     payload={"sent_to": email.get("sent_to"),
+                              "provenance": {"source": "intent",
+                                             "intent_ref": str(attempt["id"])}})
+                insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
+            fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id, conn=conn)
+            return {"success": True, "sent_to": email.get("sent_to"),
+                    "skipped": email.get("skipped", False)}
+        last_error = email.get("error")
+        if i + 1 < SEND_RETRIES:
+            time.sleep(SEND_BACKOFF_S)
+
+    update_attempt(conn, attempt["id"], status="email_failed", error_message=last_error,
+                   raw_result=_dumps({"tries": SEND_RETRIES, "last_erroror": last_error}))
+    return {"success": False, "error": last_error}
 
 
 def _selfcheck():
@@ -105,6 +160,34 @@ def _selfcheck():
         # first send, no due date on record -> sends (no false block)
         r = deliver_invoice(None, "i4", "a@b.com", "NotSet", "t", "r")
         assert r["ok"] and calls["sent"] == 3
+        # send_and_record: success books the WAL + emits; failure books email_failed
+        updates, emits = [], []
+        saved = {k: g[k] for k in ("latest_attempt", "create_attempt", "update_attempt",
+                                   "insert_webhook_expectation", "emit",
+                                   "send_invoice_email", "bump_invoice_due_date_to_today",
+                                   "fetch_qbo_invoice", "echo_invoice")}
+        g.update(
+            latest_attempt=lambda c, q, st: None,
+            create_attempt=lambda *a, **k: {"id": "A1"},
+            update_attempt=lambda c, aid, **f: updates.append(f),
+            insert_webhook_expectation=lambda c, t, i: None,
+            emit=lambda *a, **k: emits.append(a[3]),
+            send_invoice_email=lambda q, cu, at, r: {"success": True, "sent_to": "x@y"},
+            bump_invoice_due_date_to_today=lambda q, at, r: {"success": True},
+            fetch_qbo_invoice=lambda q, at, r, conn=None: (None, None),
+            echo_invoice=lambda c, q, b: None)
+        try:
+            inv = {"qbo_invoice_id": "i9", "qbo_customer_id": "c1",
+                   "doc_number": "1", "wo_number": "w1", "payment_method": None}
+            r = send_and_record(None, inv, 50.0, "process", "t", "r")
+            assert r["success"] and updates[-1]["status"] == "succeeded" \
+                and emits == ["invoice_emailed"]
+            g["send_invoice_email"] = lambda q, cu, at, r: {"success": False, "error": "boom"}
+            g["SEND_BACKOFF_S"] = 0
+            r = send_and_record(None, inv, 0, "process", "t", "r")
+            assert not r["success"] and updates[-1]["status"] == "email_failed"
+        finally:
+            g.update(saved)
     finally:
         g["send_invoice"], g["mark_emailed"], g["_due_date"] = real_send, real_mark, real_due
     return "ok"
