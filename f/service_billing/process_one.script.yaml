@@ -1,0 +1,7 @@
+summary: 'Per-invoice money sentence: charge and/or send'
+description: ADR 011. step(settled, delivered, route) -> charge | send | done.
+  Force-only direct entry for human overrides; normal flow comes from
+  process_invoice.
+lock: '!inline f/service_billing/process_one.script.lock'
+kind: script
+schema: null
