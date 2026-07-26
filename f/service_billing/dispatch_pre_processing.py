@@ -123,7 +123,26 @@ def main():
                                 "error": error})
                 failed += 1
 
-        return {"enriched": done, "failed": failed, "aged_out_waived": aged["n"], "results": results[:20],
+        # SELF-PERPETUATING DRAIN. There is no schedule any more — the wake
+        # trigger is the only starter, and pg_net is at-most-once. So if this
+        # run stops with work still claimable (hit PER_RUN_LIMIT, or a unit was
+        # released for retry), it wakes the next run itself rather than relying
+        # on a wake that may never come. An empty queue wakes nothing.
+        remaining = query_one(conn, f"""
+            SELECT count(*) AS n
+              FROM billing.service_preprocess_queue q
+              JOIN billing.invoices i ON i.qbo_invoice_id = q.qbo_invoice_id
+              JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
+             WHERE q.finished_at IS NULL AND q.attempts < 3
+               AND billing.credits_cache_fresh()
+               AND {ELIGIBLE}""", ())
+        if remaining and remaining["n"]:
+            execute_sql(conn, "SELECT billing.wake_queue_worker(%s, '{}'::jsonb)",
+                        ("f/service_billing/dispatch_pre_processing",))
+
+        return {"enriched": done, "failed": failed, "aged_out_waived": aged["n"],
+                "still_claimable": (remaining or {}).get("n", 0),
+                "results": results[:20],
                 "elapsed_s": round(time.time() - started, 1)}
     finally:
         conn.close()

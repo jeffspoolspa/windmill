@@ -77,7 +77,20 @@ def main(qbo_invoice_id: str = None, qbo_invoice_ids: list = None):
             print(f"  [{drained}] {claimed['qbo_invoice_id']} -> {outcome['status']}"
                   + (f" ({outcome.get('reason') or outcome.get('error') or ''})"
                      if outcome["status"] != "succeeded" else ""))
-        print(f"=== drained {drained} ===")
-        return {"status": "success", "drained": drained}
+        # SELF-PERPETUATING DRAIN. No schedule backs this worker any more — the
+        # wake trigger on service_charge_queue is the only starter, and pg_net
+        # is at-most-once. If work is still claimable when this run ends (hit
+        # MAX_UNITS, or a unit was released for retry) it wakes the next run
+        # itself. An empty queue wakes nothing, so an idle system stays idle.
+        remaining = query_one(conn, """
+            SELECT count(*) AS n FROM billing.service_charge_queue
+             WHERE finished_at IS NULL AND attempts < 3
+               AND billing.invoice_ready(qbo_invoice_id)""")
+        if remaining and remaining["n"]:
+            execute_sql(conn, "SELECT billing.wake_queue_worker(%s, %s::jsonb)",
+                        ("f/service_billing/process_invoice", '{"drain": true}'))
+        print(f"=== drained {drained}, still claimable {(remaining or {}).get('n', 0)} ===")
+        return {"status": "success", "drained": drained,
+                "still_claimable": (remaining or {}).get("n", 0)}
     finally:
         conn.close()
