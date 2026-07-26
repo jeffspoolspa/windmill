@@ -27,11 +27,21 @@ PER_RUN_LIMIT = 50
 GRACE_MINUTES = 2  # let the wake path win before self-heal re-enqueues
 
 # The one rule: is this invoice still worth enriching?
+#
+# NOT subtotal_ok. That column is stored derived state, NULL on 2,716 of 3,732
+# rows, and requiring it starved this queue completely — 27 invoices waiting,
+# none drainable. Subtotal agreement is a GATE question (billing.invoice_ready
+# computes it); an invoice with drift still needs its memo and class, it just
+# can't be processed afterwards.
+#
+# action_available keeps out the ones with nothing left to do: 21 of those 27
+# were already SENT, so they are A/R, and enrichment is not owed on them.
 ELIGIBLE = """
-  i.billing_status = 'awaiting_pre_processing'
-  AND i.pre_processed_at IS NULL
-  AND i.subtotal_ok IS TRUE
+      i.pre_processed_at IS NULL
   AND w.billable IS TRUE AND w.skipped_at IS NULL
+  AND NOT billing.invoice_voided(i.qbo_invoice_id)
+  AND NOT billing.invoice_on_hold(i.qbo_invoice_id)
+  AND billing.action_available(i.qbo_invoice_id)
 """
 
 # Lost-trigger backstop: an eligible invoice with no live queue row gets one.
