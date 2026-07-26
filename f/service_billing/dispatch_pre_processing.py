@@ -80,8 +80,11 @@ WHERE id = (SELECT q.id FROM billing.service_preprocess_queue q
 RETURNING id, qbo_invoice_id
 """
 
+# error is NOT cleared: a later success used to erase the record of the
+# failed attempt that preceded it, which is how a rolled-back credit
+# application left no trace anywhere in the database.
 FINISH = ("UPDATE billing.service_preprocess_queue "
-          "SET finished_at = now(), error = NULL WHERE id = %s")
+          "SET finished_at = now() WHERE id = %s")
 # Failed units stay open and re-claim until attempts >= 3, then dead-letter.
 RELEASE = ("UPDATE billing.service_preprocess_queue "
            "SET started_at = NULL, error = %s WHERE id = %s")

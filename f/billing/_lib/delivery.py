@@ -100,12 +100,21 @@ def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
         if email["success"]:
             update_attempt(conn, attempt["id"], status="succeeded", email_sent=True,
                            raw_result=_dumps({"email": email, "tries": i + 1}))
+            # Emit even when QBO reports it already EmailSent. The emit used to
+            # be suppressed on `skipped`, which meant a retry, resume or
+            # re-drain after a partial failure delivered the invoice and left
+            # NO record — the same shape as the credit application that lost
+            # $1,000 on 2026-07-26. `skipped` says who sent it, not whether it
+            # happened; billing.invoice_emailed is deduped by the fold, not by
+            # us declining to write it.
+            emit(conn, "invoice", qbo_invoice_id, "invoice_emailed",
+                 participants=[f"customer:{invoice_row.get('qbo_customer_id')}"],
+                 payload={"sent_to": email.get("sent_to"),
+                          "already_sent": bool(email.get("skipped")),
+                          "provenance": {"source": "intent" if not email.get("skipped")
+                                                   else "external",
+                                         "intent_ref": str(attempt["id"])}})
             if not email.get("skipped"):
-                emit(conn, "invoice", qbo_invoice_id, "invoice_emailed",
-                     participants=[f"customer:{invoice_row.get('qbo_customer_id')}"],
-                     payload={"sent_to": email.get("sent_to"),
-                              "provenance": {"source": "intent",
-                                             "intent_ref": str(attempt["id"])}})
                 insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
             fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id, conn=conn)
             return {"success": True, "sent_to": email.get("sent_to"),

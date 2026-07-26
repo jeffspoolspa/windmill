@@ -507,8 +507,14 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
                          access_token, realm_id)
         receipt_sent, receipt_error = r["ok"], r["error"]
         if receipt_sent:
+            # The invoice MUST be a participant. receipt_sent is a payment
+            # event by design (you are sending a payment receipt, not an
+            # invoice), and the invoice history is participants-aware — so
+            # without this the receipt is invisible on the invoice it was
+            # for, while every sibling event (charge_captured,
+            # payment_recorded, payment_applied) already carries it.
             emit(conn, "payment", rec["payment_id"], "receipt_sent",
-                 participants=[f"customer:{intent['customer_id']}"],
+                 participants=_parts,
                  payload={"email": intent["receipt_email"], "provenance": _prov})
 
     update_attempt(conn, attempt["id"], status="succeeded",
@@ -742,41 +748,84 @@ def apply_credits(conn, customer_id, invoice_id, access_token, realm_id,
             out["failed"].append({**entry, "error": r["error"]})
             out["errors"].append(f"{c['qbo_payment_id']}: {r['error']}")
             continue
-        cur = conn.cursor()
-        if r.get("payment") and not r.get("is_cm_link"):
-            # WRITE-TIME VERIFIED ECHO: the response carries the payment's
-            # TRUE UnappliedAmt — write what QBO said, not what we computed
-            echo_payment(conn, r["payment"])
-        else:
-            if r.get("payment"):
-                echo_payment(conn, r["payment"])  # the new zero-total link payment
-            # the CREDIT MEMO's remaining balance is a cross-entity RIPPLE
-            # (the response describes the link payment, not the CM) — this
-            # decrement is COMPUTED, converged by pull_qbo_credits/CDC
+        # ── PAST THE POINT OF NO RETURN ──────────────────────────────────
+        # The credit is now applied in QBO and that cannot be undone. Nothing
+        # below may raise out of this function: an exception would abort the
+        # transaction, discard every record of a real movement of money, and
+        # the retry could not tell "we already applied it" from "nothing to
+        # do" — it would fresh-read a zero balance and record nothing.
+        #
+        # 2026-07-26: a CHECK violation on payment_invoice_links.applied_via
+        # did exactly that to $1,000 of Latimer credits. The failure survived
+        # only in a Windmill job result, outside the system entirely.
+        try:
+            cur = conn.cursor()
+            if r.get("payment") and not r.get("is_cm_link"):
+                # WRITE-TIME VERIFIED ECHO: the response carries the payment's
+                # TRUE UnappliedAmt — write what QBO said, not what we computed
+                echo_payment(conn, r["payment"])
+            else:
+                if r.get("payment"):
+                    echo_payment(conn, r["payment"])  # the new zero-total link payment
+                # the CREDIT MEMO's remaining balance is a cross-entity RIPPLE
+                # (the response describes the link payment, not the CM) — this
+                # decrement is COMPUTED, converged by pull_qbo_credits/CDC
+                cur.execute(
+                    "UPDATE billing.customer_payments SET unapplied_amt = GREATEST(unapplied_amt - %s, 0) "
+                    "WHERE qbo_payment_id = %s", (amount, c["qbo_payment_id"]))
             cur.execute(
-                "UPDATE billing.customer_payments SET unapplied_amt = GREATEST(unapplied_amt - %s, 0) "
-                "WHERE qbo_payment_id = %s", (amount, c["qbo_payment_id"]))
-        cur.execute(
-            """INSERT INTO billing.payment_invoice_links
-                 (payment_id, invoice_id, amount, applied_via)
-               VALUES (%s, %s, %s, %s)
-               ON CONFLICT (payment_id, invoice_id) DO UPDATE SET
-                 amount = billing.payment_invoice_links.amount + EXCLUDED.amount""",
-            (c["qbo_payment_id"], invoice_id, amount, applied_via))
-        # payment_applied on the CARRIER: the credit's own Payment, or the $0
-        # bridge Payment a credit-memo apply just minted (ADR 010 §B)
-        is_cm = c["type"] == "credit_memo"
-        carrier = ((r.get("payment") or {}).get("Id") if is_cm else None) \
-            or c["qbo_payment_id"]
-        emit(conn, "payment", carrier, "payment_applied",
-             participants=[f"invoice:{invoice_id}", f"customer:{customer_id}"]
-                          + ([f"payment:{c['qbo_payment_id']}"] if is_cm else []),
-             payload={"funding": {"kind": "credit_memo" if is_cm else "payment",
-                                  "id": c["qbo_payment_id"]},
-                      "lines": [{"invoice_id": invoice_id, "amount": amount}],
-                      "provenance": {"source": "intent",
-                                     "intent_ref": f"apply_credits/{applied_via}"}})
-        conn.commit(); cur.close()
+                """INSERT INTO billing.payment_invoice_links
+                     (payment_id, invoice_id, amount, applied_via)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (payment_id, invoice_id) DO UPDATE SET
+                     amount = billing.payment_invoice_links.amount + EXCLUDED.amount""",
+                (c["qbo_payment_id"], invoice_id, amount, applied_via))
+            # payment_applied on the CARRIER: the credit's own Payment, or the $0
+            # bridge Payment a credit-memo apply just minted (ADR 010 §B)
+            is_cm = c["type"] == "credit_memo"
+            carrier = ((r.get("payment") or {}).get("Id") if is_cm else None) \
+                or c["qbo_payment_id"]
+            emit(conn, "payment", carrier, "payment_applied",
+                 participants=[f"invoice:{invoice_id}", f"customer:{customer_id}"]
+                              + ([f"payment:{c['qbo_payment_id']}"] if is_cm else []),
+                 payload={"funding": {"kind": "credit_memo" if is_cm else "payment",
+                                      "id": c["qbo_payment_id"]},
+                          "lines": [{"invoice_id": invoice_id, "amount": amount}],
+                          "provenance": {"source": "intent",
+                                         "intent_ref": f"apply_credits/{applied_via}"}})
+            conn.commit(); cur.close()
+        except Exception as book_err:
+            # The money moved; our books did not. Record THAT on a clean
+            # transaction — an unrecorded external write is the one outcome
+            # this function must never produce.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                emit(conn, "payment", c["qbo_payment_id"], "payment_apply_unrecorded",
+                     participants=[f"invoice:{invoice_id}", f"customer:{customer_id}"],
+                     payload={"amount": amount, "invoice_id": invoice_id,
+                              "error": f"{type(book_err).__name__}: {str(book_err)[:400]}",
+                              "note": "credit APPLIED in QBO but bookkeeping failed; "
+                                      "reconcile from QBO LinkedTxn",
+                              "provenance": {"source": "intent",
+                                             "intent_ref": f"apply_credits/{applied_via}"}})
+                conn.commit()
+            except Exception as emit_err:
+                print(f"  (CRITICAL: applied {amount} of {c['qbo_payment_id']} to "
+                      f"{invoice_id} and could NOT record it: {book_err}; "
+                      f"emit also failed: {emit_err})")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            out["failed"].append({**entry, "error": str(book_err)[:300],
+                                  "applied_in_qbo_unrecorded": True})
+            out["errors"].append(f"{c['qbo_payment_id']}: APPLIED IN QBO but not "
+                                 f"recorded: {str(book_err)[:200]}")
+            remaining = round(remaining - amount, 2)
+            continue
         out["applied"].append(entry)
         remaining = round(remaining - amount, 2)
     out["remaining_balance"] = remaining

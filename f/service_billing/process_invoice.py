@@ -64,8 +64,9 @@ def main(qbo_invoice_id: str = None, qbo_invoice_ids: list = None):
                                       "WHERE id = %s",
                                 (outcome["reason"][:300], claimed["id"]))
                 else:
+                    # error preserved: a success must not erase the failure before it
                     execute_sql(conn, "UPDATE billing.service_charge_queue "
-                                      "SET finished_at = now(), error = NULL "
+                                      "SET finished_at = now() "
                                       "WHERE id = %s", (claimed["id"],))
             except Exception as e:
                 conn.rollback()  # poison unit: stays claimable until 3 attempts
