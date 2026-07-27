@@ -9,14 +9,19 @@ SOLE AUTHOR (python side) of billing.invoice_credit_decisions. Terminal rows
 (applied / rejected) are never overwritten. There is NO 'proposed' state —
 undecided is the ABSENCE of a row.
 
-The row and its event commit TOGETHER (one transaction) — a decision can
-never exist without its credit_applied event.
+NO EVENT is emitted here. Applying a credit moves money, and that movement is
+already `payment_applied` on the carrier payment — with the amount, the
+invoice as participant, and a link to the transaction in QBO. A separate
+`credit_applied` on the invoice said the same thing a second time from the
+other side, so the history showed one application twice.
+
+The decision ROW is our record of WHY (the match reason); the EVENT is the
+record of WHAT MOVED, and it belongs to the payment.
 
 Import as:  from f.billing._lib.decisions import record_applied
 """
 
 from f.billing._lib.db import execute
-from f.billing._lib.events import emit
 
 
 def record_applied(conn, qbo_invoice_id, credit_id, amount, reason=None,
@@ -35,9 +40,5 @@ def record_applied(conn, qbo_invoice_id, credit_id, amount, reason=None,
          WHERE billing.invoice_credit_decisions.state
                NOT IN ('applied', 'rejected')""",
         (qbo_invoice_id, credit_id, amount, amount, reason, decided_by, applied_via))
-    emit(conn, "invoice", qbo_invoice_id, "credit_applied",
-         participants=[f"payment:{credit_id}"],
-         payload={"amount": amount, "applied_via": applied_via, "reason": reason,
-                  "provenance": {"source": "intent", "intent_ref": applied_via}})
     if commit:
-        conn.commit()   # ONE commit — fact + event atomic
+        conn.commit()
