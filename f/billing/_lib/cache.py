@@ -49,15 +49,25 @@ def echo_invoice(conn, qbo_invoice_id, qbo_invoice):
     """Full-snapshot echo of a freshly READ QBO invoice (balance, email
     status, raw). The payload must come from QBO — never synthesized."""
     cur = conn.cursor()
+    # due_date / txn_date are echoed too: WE move them (bump_due_date on send,
+    # TxnDate on enrichment), and leaving the typed columns behind meant our
+    # row disagreed with our own write. Invoice 69199 read due 2026-07-24 while
+    # QBO said 2026-07-27 — aging and days-past-due were computed off a date
+    # the system itself had already changed.
     cur.execute("""
         UPDATE billing.invoices
         SET subtotal = %s, balance = %s, total_amt = %s,
-            email_status = %s, raw = %s::jsonb, fetched_at = now()
+            email_status = %s,
+            due_date = COALESCE(%s::date, due_date),
+            txn_date = COALESCE(%s::date, txn_date),
+            raw = %s::jsonb, fetched_at = now()
         WHERE qbo_invoice_id = %s
     """, (invoice_subtotal(qbo_invoice),
           float(qbo_invoice.get("Balance", 0) or 0),
           float(qbo_invoice.get("TotalAmt", 0) or 0),
           qbo_invoice.get("EmailStatus"),
+          qbo_invoice.get("DueDate") or None,
+          qbo_invoice.get("TxnDate") or None,
           _dumps(qbo_invoice), qbo_invoice_id))
     conn.commit(); cur.close()
 

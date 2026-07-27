@@ -8,4 +8,4 @@ httpx==0.28.1
 idna==3.18
 psycopg2-binary==2.9.12
 typing-extensions==4.16.0
-wmill==1.770.0
+wmill==1.771.1

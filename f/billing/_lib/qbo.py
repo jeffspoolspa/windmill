@@ -430,7 +430,8 @@ def send_payment_receipt(payment_id, customer_id, access_token, realm_id):
 # invoice_edited payload field names for the QBO keys we PATCH; unknown
 # keys pass through as-is. CustomerMemo mirrors PrivateNote — skip the dup.
 _EDIT_FIELDS = {"PrivateNote": "memo", "CustomerMemo": None,
-                "ClassRef": "qbo_class", "TxnDate": "txn_date"}
+                "ClassRef": "qbo_class", "TxnDate": "txn_date",
+                "DueDate": "due_date"}
 
 
 def _edit_value(v):
@@ -553,37 +554,37 @@ def apply_credit(credit_id, credit_type, invoice_id, customer_ref, amount,
         return {"success": False, "error": str(e)[:200]}
 
 
-def bump_invoice_due_date_to_today(invoice_id, access_token, realm_id, max_retries=2):
-    """Sparse-PATCH the invoice's DueDate to today so a long-parked invoice
-    doesn't arrive showing OVERDUE in the QBO portal. No-ops when DueDate is
-    already today/future. Retries stale SyncToken."""
+def bump_invoice_due_date_to_today(invoice_id, access_token, realm_id,
+                                   max_retries=2, conn=None):
+    """Move the invoice's DueDate to today so a long-parked invoice doesn't
+    arrive showing OVERDUE in the QBO portal. No-ops when DueDate is already
+    today or later.
+
+    Goes through update_invoice_sparse — the ONE invoice-edit path — rather
+    than posting to QBO itself. It used to call qbo_post directly, which meant
+    the due date changed in QBO with no cache echo and no invoice_edited event:
+    on 2026-07-26 invoice 69199 read 2026-07-24 in our column while QBO said
+    2026-07-27, and nothing in the history said we had moved it.
+
+    Every invoice edit belongs to update_invoice_sparse, which fetches for the
+    SyncToken CAS, echoes the response, and emits invoice_edited with a
+    before/after diff — atomically with the write.
+    """
     today_iso = date.today().isoformat()
-    last_err = None
-    for attempt in range(max_retries + 1):
-        inv_resp = qbo_get(f"invoice/{invoice_id}", access_token, realm_id)
-        if not inv_resp.ok:
-            if attempt < max_retries:
-                time.sleep(0.5 * (attempt + 1))
-                continue
-            return {"success": False, "error": f"fetch failed: {inv_resp.status_code}"}
-        inv = inv_resp.json().get("Invoice")
-        if not inv:
-            return {"success": False, "error": "QBO returned no Invoice"}
-        current = inv.get("DueDate")
-        if current and current >= today_iso:
-            return {"success": True, "skipped": True, "current_due_date": current}
-        resp = qbo_post("invoice", access_token, realm_id,
-                        {"Id": inv["Id"], "SyncToken": inv["SyncToken"],
-                         "sparse": True, "DueDate": today_iso})
-        if resp.ok:
-            return {"success": True, "old_due_date": current, "new_due_date": today_iso}
-        text = resp.text[:400]
-        last_err = f"HTTP {resp.status_code}: {text}"
-        if "Stale Object" in text and attempt < max_retries:
-            time.sleep(0.5 * (attempt + 1))
-            continue
-        break
-    return {"success": False, "error": last_err}
+    inv, err = fetch_qbo_invoice(invoice_id, access_token, realm_id)
+    if not inv:
+        return {"success": False, "error": err or "fetch failed"}
+    current = inv.get("DueDate")
+    if current and current >= today_iso:
+        return {"success": True, "skipped": True, "current_due_date": current}
+
+    result = update_invoice_sparse(invoice_id, {"DueDate": today_iso},
+                                   access_token, realm_id,
+                                   max_retries=max_retries, conn=conn,
+                                   intent_ref="bump_due_date")
+    if not result.get("success"):
+        return {"success": False, "error": result.get("error")}
+    return {"success": True, "old_due_date": current, "new_due_date": today_iso}
 
 
 # ── self-check: pure logic, NO network (run this to verify the extraction) ──
