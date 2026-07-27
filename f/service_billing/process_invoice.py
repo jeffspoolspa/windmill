@@ -11,6 +11,7 @@
 # recovery are process_one / recover_payment's own entries.
 
 from f.billing._lib.db import get_db_conn, query_one, execute_sql
+from f.billing._lib.events import emit
 from f.billing._lib.qbo import set_rate_limiter, refresh_qbo_token
 from f.service_billing.process_one import process_one
 
@@ -68,6 +69,17 @@ def main(qbo_invoice_id: str = None, qbo_invoice_ids: list = None):
                     execute_sql(conn, "UPDATE billing.service_charge_queue "
                                       "SET finished_at = now() "
                                       "WHERE id = %s", (claimed["id"],))
+                    # LAST act for this invoice. Emitted from the script, not
+                    # the queue trigger: by the time we get here everything this
+                    # stage did — charge, payment, receipt, send — is already
+                    # written, so "finished" genuinely follows it.
+                    emit(conn, "invoice", claimed["qbo_invoice_id"],
+                         "processing_finished",
+                         payload={"stage": "charge",
+                                  "outcome": outcome.get("status"),
+                                  "provenance": {"source": "intent",
+                                                 "intent_ref": "process_invoice"}})
+                    conn.commit()
             except Exception as e:
                 conn.rollback()  # poison unit: stays claimable until 3 attempts
                 outcome = {"status": "error", "error": str(e)[:300]}

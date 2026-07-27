@@ -20,6 +20,7 @@
 import time
 
 from f.billing._lib.db import get_db_conn, query_one, execute_sql
+from f.billing._lib.events import emit
 from f.billing._lib.clients import QboClient
 from f.service_billing.pre_process_invoice import enrich
 
@@ -114,6 +115,16 @@ def main():
             try:
                 results.append(enrich(conn, qbo, unit["qbo_invoice_id"]))
                 execute_sql(conn, FINISH, (unit["id"],))
+                # LAST act of the run for this invoice. Emitted here, not by the
+                # queue trigger: everything this stage did is already written,
+                # so "finished" genuinely follows it. From the trigger it did
+                # not — enrich's write fires the CHARGE enqueue inside its own
+                # statement, so a later stage's event preceded this one.
+                emit(conn, "invoice", unit["qbo_invoice_id"], "processing_finished",
+                     payload={"stage": "preprocess", "attempt": unit.get("attempts"),
+                              "provenance": {"source": "intent",
+                                             "intent_ref": "dispatch_pre_processing"}})
+                conn.commit()
                 done += 1
             except Exception as e:
                 conn.rollback()
