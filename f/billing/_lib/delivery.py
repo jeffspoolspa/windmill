@@ -31,10 +31,9 @@ from f.billing._lib.qbo import (
     fetch_qbo_invoice,
 )
 from f.billing._lib.cache import mark_emailed, echo_invoice
-# NOT the charge WAL. A send books itself in billing.invoice_send_log; only
-# the webhook expectation is shared. Importing create_attempt/update_attempt
-# here is what let a plain email write a processing_attempts row and emit
-# charge_attempted.
+# NOT the charge WAL — only the webhook expectation is shared. Importing
+# create_attempt/update_attempt here is what let a plain email write a
+# processing_attempts row and emit charge_attempted.
 from f.billing._lib.wal import insert_webhook_expectation
 from f.billing._lib.events import emit
 
@@ -76,48 +75,6 @@ def deliver_invoice(conn, invoice_id, email, email_status,
     return r
 
 
-def _book_send(conn, invoice_row):
-    """Write-ahead the send in billing.invoice_send_log and return its id.
-
-    Booked BEFORE the QBO call so an interrupted send leaves a 'pending' row
-    rather than nothing — the same discipline the charge WAL uses, in the
-    send's own table. billing_month is the invoice's own month; the column is
-    NOT NULL and predates service billing.
-    """
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO billing.invoice_send_log
-          (billing_month, qbo_invoice_id, qbo_customer_id, customer_name,
-           email_address, status, created_at)
-        SELECT date_trunc('month', COALESCE(i.txn_date, current_date))::date,
-               i.qbo_invoice_id, i.qbo_customer_id, i.customer_name,
-               c.email, 'pending', now()
-          FROM billing.invoices i
-          LEFT JOIN public."Customers" c ON c.qbo_customer_id = i.qbo_customer_id
-         WHERE i.qbo_invoice_id = %s
-        RETURNING id""", (invoice_row["qbo_invoice_id"],))
-    row = cur.fetchone()
-    conn.commit(); cur.close()
-    return row[0] if row else None
-
-
-def _close_send(conn, send_id, status, sent_to=None, error=None):
-    """Close the send-log row. 'sent' stamps sent_at; 'failed' keeps the error
-    so a bad address is visible in our own data, not only in a job result."""
-    if not send_id:
-        return
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE billing.invoice_send_log
-           SET status = %s,
-               sent_at = CASE WHEN %s = 'sent' THEN now() ELSE sent_at END,
-               email_address = COALESCE(%s, email_address),
-               error_message = %s
-         WHERE id = %s""",
-        (status, status, sent_to, (error or None) and str(error)[:500], send_id))
-    conn.commit(); cur.close()
-
-
 def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
     """The WORKFLOW send: WAL-book an attempt, remedy a past-due first send by
     bumping the due date (we have the primitive; refusing was the pre-bump
@@ -126,15 +83,21 @@ def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
     import time
     qbo_invoice_id = invoice_row["qbo_invoice_id"]
 
-    # A SEND books itself in billing.invoice_send_log — its own table.
-    # It used to call create_attempt, the CHARGE write-ahead log, which wrote a
-    # processing_attempts row and emitted charge_attempted on the charge
-    # aggregate. Emailing an invoice is not a charge attempt: it made
-    # billing.charge_attempted() ambiguous, put a charge event on the history of
-    # invoices that were never charged, and was the last thing keeping the
-    # retired per-processing-attempt model alive. Charge writes to
-    # billing.charges, send writes here, and each emits its own event.
-    send_id = _book_send(conn, invoice_row)
+    # A send books NOTHING ahead of itself, and that is deliberate.
+    #
+    # It used to call create_attempt — the CHARGE write-ahead log — which wrote
+    # a processing_attempts row and emitted charge_attempted. Emailing an
+    # invoice is not a charge attempt: it made billing.charge_attempted()
+    # ambiguous and put a charge event on invoices that were never charged.
+    #
+    # And a send needs no WAL of its own. A WAL exists so an interrupted effect
+    # is recoverable, which matters for a credit application because "did we
+    # already do this?" is unanswerable without rebuilding LinkedTxn. A send is
+    # different: QBO's own EmailStatus answers it, and re-sending is idempotent
+    # (QBO skips an already-EmailSent invoice). The event stream is the log —
+    # invoice_emailed on success, processing_failed with the error via the
+    # queue on failure. When inbound/outbound email gets its own table, the
+    # emit is what feeds it.
 
     if (balance or 0) > 0:  # unpaid + emailed shouldn't arrive OVERDUE
         # conn is passed so the bump goes through update_invoice_sparse and
@@ -149,7 +112,6 @@ def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
         email = send_invoice_email(qbo_invoice_id, invoice_row.get("qbo_customer_id"),
                                    access_token, realm_id)
         if email["success"]:
-            _close_send(conn, send_id, "sent", sent_to=email.get("sent_to"))
             # Emit even when QBO reports it already EmailSent. The emit used to
             # be suppressed on `skipped`, which meant a retry, resume or
             # re-drain after a partial failure delivered the invoice and left
@@ -163,7 +125,7 @@ def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
                           "already_sent": bool(email.get("skipped")),
                           "provenance": {"source": "intent" if not email.get("skipped")
                                                    else "external",
-                                         "intent_ref": str(send_id)}})
+                                         "intent_ref": stage}})
             if not email.get("skipped"):
                 insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
             fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id, conn=conn)
@@ -173,7 +135,8 @@ def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
         if i + 1 < SEND_RETRIES:
             time.sleep(SEND_BACKOFF_S)
 
-    _close_send(conn, send_id, "failed", error=last_error)
+    # No row to close: the failure surfaces as processing_failed (the queue
+    # writes the error) and the invoice simply stays unsent, which the gate sees.
     return {"success": False, "error": last_error}
 
 
@@ -220,14 +183,11 @@ def _selfcheck():
         assert r["ok"] and calls["sent"] == 3
         # send_and_record books the SEND LOG (not the charge WAL), emits
         # invoice_emailed, and never emits a charge event
-        closes, emits, bumps = [], [], []
-        saved = {k: g[k] for k in ("_book_send", "_close_send",
-                                   "insert_webhook_expectation", "emit",
+        emits, bumps = [], []
+        saved = {k: g[k] for k in ("insert_webhook_expectation", "emit",
                                    "send_invoice_email", "bump_invoice_due_date_to_today",
                                    "fetch_qbo_invoice", "echo_invoice")}
         g.update(
-            _book_send=lambda c, inv: "S1",
-            _close_send=lambda c, sid, status, **kw: closes.append((sid, status, kw)),
             insert_webhook_expectation=lambda c, t, i: None,
             emit=lambda *a, **k: emits.append(a[3]),
             send_invoice_email=lambda q, cu, at, r: {"success": True, "sent_to": "x@y"},
@@ -240,7 +200,6 @@ def _selfcheck():
                    "doc_number": "1", "wo_number": "w1", "payment_method": None}
             r = send_and_record(None, inv, 50.0, "process", "t", "r")
             assert r["success"], "send should succeed"
-            assert closes[-1][:2] == ("S1", "sent"), closes
             assert emits == ["invoice_emailed"], emits
             assert "charge_attempted" not in emits, "a send must NOT emit a charge event"
             assert bumps == [None], "the bump must receive conn so it emits invoice_edited"
@@ -251,7 +210,6 @@ def _selfcheck():
             g["SEND_BACKOFF_S"] = 0
             r = send_and_record(None, inv, 0, "process", "t", "r")
             assert not r["success"] and r["error"] == "boom"
-            assert closes[-1][1] == "failed" and closes[-1][2].get("error") == "boom", closes
             assert bumps == [], "settled invoice needs no due-date bump"
 
             # a QBO-side 'skipped' send still emits: a retry must not deliver silently

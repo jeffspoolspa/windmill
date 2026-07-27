@@ -12,7 +12,7 @@ locks:
   f/billing/_lib/customers: 7e2fa0e0b02c3254201b8de847f65358c1fcbbe57030b722c51d712d06249298
   f/billing/_lib/db: 03cbe2042dfd29362856e29ec03dc918b1958a43766bd9b5597cded478aa4f06
   f/billing/_lib/decisions: 25a8e8c5e093c0d9b7f5314551cc182b256c6bc685e342f4f34d5d9a72c2f2f8
-  f/billing/_lib/delivery: 827fa4615ea0a5e8f37cb09a54f16b54a77d40a3581251ed00fcd038c0d9ebda
+  f/billing/_lib/delivery: e00637fac324168534427e83080f2e126b695284f358fb845b82929c93d9a97e
   f/billing/_lib/events: d380ce657dbb7f985ae7d5e6a8adf3e0cbf07c6895b19eea91d42c57c230cc8f
   f/billing/_lib/invoices: 0e31c7e7f6186697e1eb9694999a4d710764e1540d52b46f54dbbb21069e58f9
   f/billing/_lib/payment_methods: 44106faaa09907133c85c8df429c4b289f2eea3d54aca667d73c464b4631f133
