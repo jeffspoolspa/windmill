@@ -31,10 +31,11 @@ from f.billing._lib.qbo import (
     fetch_qbo_invoice,
 )
 from f.billing._lib.cache import mark_emailed, echo_invoice
-from f.billing._lib.wal import (
-    latest_attempt, create_attempt, update_attempt,
-    insert_webhook_expectation, dumps as _dumps,
-)
+# NOT the charge WAL. A send books itself in billing.invoice_send_log; only
+# the webhook expectation is shared. Importing create_attempt/update_attempt
+# here is what let a plain email write a processing_attempts row and emit
+# charge_attempted.
+from f.billing._lib.wal import insert_webhook_expectation
 from f.billing._lib.events import emit
 
 SEND_RETRIES = 3
@@ -75,6 +76,48 @@ def deliver_invoice(conn, invoice_id, email, email_status,
     return r
 
 
+def _book_send(conn, invoice_row):
+    """Write-ahead the send in billing.invoice_send_log and return its id.
+
+    Booked BEFORE the QBO call so an interrupted send leaves a 'pending' row
+    rather than nothing — the same discipline the charge WAL uses, in the
+    send's own table. billing_month is the invoice's own month; the column is
+    NOT NULL and predates service billing.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO billing.invoice_send_log
+          (billing_month, qbo_invoice_id, qbo_customer_id, customer_name,
+           email_address, status, created_at)
+        SELECT date_trunc('month', COALESCE(i.txn_date, current_date))::date,
+               i.qbo_invoice_id, i.qbo_customer_id, i.customer_name,
+               c.email, 'pending', now()
+          FROM billing.invoices i
+          LEFT JOIN public."Customers" c ON c.qbo_customer_id = i.qbo_customer_id
+         WHERE i.qbo_invoice_id = %s
+        RETURNING id""", (invoice_row["qbo_invoice_id"],))
+    row = cur.fetchone()
+    conn.commit(); cur.close()
+    return row[0] if row else None
+
+
+def _close_send(conn, send_id, status, sent_to=None, error=None):
+    """Close the send-log row. 'sent' stamps sent_at; 'failed' keeps the error
+    so a bad address is visible in our own data, not only in a job result."""
+    if not send_id:
+        return
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE billing.invoice_send_log
+           SET status = %s,
+               sent_at = CASE WHEN %s = 'sent' THEN now() ELSE sent_at END,
+               email_address = COALESCE(%s, email_address),
+               error_message = %s
+         WHERE id = %s""",
+        (status, status, sent_to, (error or None) and str(error)[:500], send_id))
+    conn.commit(); cur.close()
+
+
 def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
     """The WORKFLOW send: WAL-book an attempt, remedy a past-due first send by
     bumping the due date (we have the primitive; refusing was the pre-bump
@@ -82,14 +125,22 @@ def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
     any engine that delivers as part of processing. Returns {success, ...}."""
     import time
     qbo_invoice_id = invoice_row["qbo_invoice_id"]
-    prior = latest_attempt(conn, qbo_invoice_id, stage)
-    attempt = prior if (prior and prior["status"] == "pending") else create_attempt(
-        conn, qbo_invoice_id, stage, invoice_row.get("doc_number"), "email",
-        balance or 0, False, wo_number=invoice_row.get("wo_number"),
-        payment_method=invoice_row.get("payment_method"))
+
+    # A SEND books itself in billing.invoice_send_log — its own table.
+    # It used to call create_attempt, the CHARGE write-ahead log, which wrote a
+    # processing_attempts row and emitted charge_attempted on the charge
+    # aggregate. Emailing an invoice is not a charge attempt: it made
+    # billing.charge_attempted() ambiguous, put a charge event on the history of
+    # invoices that were never charged, and was the last thing keeping the
+    # retired per-processing-attempt model alive. Charge writes to
+    # billing.charges, send writes here, and each emits its own event.
+    send_id = _book_send(conn, invoice_row)
 
     if (balance or 0) > 0:  # unpaid + emailed shouldn't arrive OVERDUE
-        due = bump_invoice_due_date_to_today(qbo_invoice_id, access_token, realm_id)
+        # conn is passed so the bump goes through update_invoice_sparse and
+        # emits invoice_edited {due_date: from -> to} like any other edit
+        due = bump_invoice_due_date_to_today(qbo_invoice_id, access_token, realm_id,
+                                             conn=conn)
         if due.get("success") and not due.get("skipped"):
             insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
 
@@ -98,8 +149,7 @@ def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
         email = send_invoice_email(qbo_invoice_id, invoice_row.get("qbo_customer_id"),
                                    access_token, realm_id)
         if email["success"]:
-            update_attempt(conn, attempt["id"], status="succeeded", email_sent=True,
-                           raw_result=_dumps({"email": email, "tries": i + 1}))
+            _close_send(conn, send_id, "sent", sent_to=email.get("sent_to"))
             # Emit even when QBO reports it already EmailSent. The emit used to
             # be suppressed on `skipped`, which meant a retry, resume or
             # re-drain after a partial failure delivered the invoice and left
@@ -113,7 +163,7 @@ def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
                           "already_sent": bool(email.get("skipped")),
                           "provenance": {"source": "intent" if not email.get("skipped")
                                                    else "external",
-                                         "intent_ref": str(attempt["id"])}})
+                                         "intent_ref": str(send_id)}})
             if not email.get("skipped"):
                 insert_webhook_expectation(conn, "Invoice", qbo_invoice_id)
             fetch_qbo_invoice(qbo_invoice_id, access_token, realm_id, conn=conn)
@@ -123,8 +173,7 @@ def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
         if i + 1 < SEND_RETRIES:
             time.sleep(SEND_BACKOFF_S)
 
-    update_attempt(conn, attempt["id"], status="email_failed", error_message=last_error,
-                   raw_result=_dumps({"tries": SEND_RETRIES, "last_erroror": last_error}))
+    _close_send(conn, send_id, "failed", error=last_error)
     return {"success": False, "error": last_error}
 
 
@@ -169,32 +218,48 @@ def _selfcheck():
         # first send, no due date on record -> sends (no false block)
         r = deliver_invoice(None, "i4", "a@b.com", "NotSet", "t", "r")
         assert r["ok"] and calls["sent"] == 3
-        # send_and_record: success books the WAL + emits; failure books email_failed
-        updates, emits = [], []
-        saved = {k: g[k] for k in ("latest_attempt", "create_attempt", "update_attempt",
+        # send_and_record books the SEND LOG (not the charge WAL), emits
+        # invoice_emailed, and never emits a charge event
+        closes, emits, bumps = [], [], []
+        saved = {k: g[k] for k in ("_book_send", "_close_send",
                                    "insert_webhook_expectation", "emit",
                                    "send_invoice_email", "bump_invoice_due_date_to_today",
                                    "fetch_qbo_invoice", "echo_invoice")}
         g.update(
-            latest_attempt=lambda c, q, st: None,
-            create_attempt=lambda *a, **k: {"id": "A1"},
-            update_attempt=lambda c, aid, **f: updates.append(f),
+            _book_send=lambda c, inv: "S1",
+            _close_send=lambda c, sid, status, **kw: closes.append((sid, status, kw)),
             insert_webhook_expectation=lambda c, t, i: None,
             emit=lambda *a, **k: emits.append(a[3]),
             send_invoice_email=lambda q, cu, at, r: {"success": True, "sent_to": "x@y"},
-            bump_invoice_due_date_to_today=lambda q, at, r: {"success": True},
+            bump_invoice_due_date_to_today=lambda q, at, r, conn=None: (
+                bumps.append(conn) or {"success": True}),
             fetch_qbo_invoice=lambda q, at, r, conn=None: (None, None),
             echo_invoice=lambda c, q, b: None)
         try:
             inv = {"qbo_invoice_id": "i9", "qbo_customer_id": "c1",
                    "doc_number": "1", "wo_number": "w1", "payment_method": None}
             r = send_and_record(None, inv, 50.0, "process", "t", "r")
-            assert r["success"] and updates[-1]["status"] == "succeeded" \
-                and emits == ["invoice_emailed"]
+            assert r["success"], "send should succeed"
+            assert closes[-1][:2] == ("S1", "sent"), closes
+            assert emits == ["invoice_emailed"], emits
+            assert "charge_attempted" not in emits, "a send must NOT emit a charge event"
+            assert bumps == [None], "the bump must receive conn so it emits invoice_edited"
+
+            # unpaid=0 -> no due-date bump (nothing would arrive overdue)
+            bumps.clear()
             g["send_invoice_email"] = lambda q, cu, at, r: {"success": False, "error": "boom"}
             g["SEND_BACKOFF_S"] = 0
             r = send_and_record(None, inv, 0, "process", "t", "r")
-            assert not r["success"] and updates[-1]["status"] == "email_failed"
+            assert not r["success"] and r["error"] == "boom"
+            assert closes[-1][1] == "failed" and closes[-1][2].get("error") == "boom", closes
+            assert bumps == [], "settled invoice needs no due-date bump"
+
+            # a QBO-side 'skipped' send still emits: a retry must not deliver silently
+            emits.clear()
+            g["send_invoice_email"] = lambda q, cu, at, r: {
+                "success": True, "skipped": True, "sent_to": "x@y"}
+            r = send_and_record(None, inv, 0, "process", "t", "r")
+            assert r["success"] and r["skipped"] and emits == ["invoice_emailed"], emits
         finally:
             g.update(saved)
     finally:
