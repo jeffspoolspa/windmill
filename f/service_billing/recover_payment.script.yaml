@@ -3,4 +3,4 @@ description: ADR 011. Explicit engine sentence over the primitives;
   record_qbo_payment is not idempotent so orphans never auto-resume.
 lock: '!inline f/service_billing/recover_payment.script.lock'
 kind: script
-schema: null
+schema: {}

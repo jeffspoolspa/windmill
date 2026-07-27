@@ -34,7 +34,7 @@ def main(qbo_invoice_id: str):
             return {"status": "error", "error": "invoice not cached / WO not linked"}
         recovery = recover_orphan(conn, qbo_invoice_id, "process", invoice_row["qbo_customer_id"],
                            invoice_row["wo_number"],
-                           f"Auto-charge | WO# {invoice_row['wo_number']} | Inv# {invoice_row['doc_number']}",
+                           f"WO# {invoice_row['wo_number']} | Inv# {invoice_row['doc_number']}",
                            access_token, realm_id)
         if recovery["status"] != "recovered":
             return {"status": "error", **recovery}

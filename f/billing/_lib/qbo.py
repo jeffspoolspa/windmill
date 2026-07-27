@@ -270,7 +270,7 @@ def get_qbo_invoice_details(invoice_id, realm_id, access_token, conn=None):
 
 def build_payment_note(memo_prefix, charge_result):
     """PrivateNote for a recorded payment: caller's policy prefix (e.g.
-    'Auto-charge | WO# 123 | Inv# 456' or 'June Pool Maintenance | Inv# 456')
+    'WO# 123 | Inv# 456' or 'June Pool Maintenance | Inv# 456')
     + the charge facts. Pure — the prefix is DATA; this module never knows
     what kind of invoice was charged."""
     return (f"{memo_prefix} | "

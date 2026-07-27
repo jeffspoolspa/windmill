@@ -241,7 +241,10 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
                          "payment_method": row["payment_method"],
                          "wo_number": row["wo_number"],
                          "payment_ref": row["wo_number"],
-                         "memo_prefix": f"Auto-charge | WO# {row['wo_number']} "
+                         # the customer reads this on their receipt —
+                         # "Auto-charge" told them how WE work, not what they
+                         # paid for
+                         "memo_prefix": f"WO# {row['wo_number']} "
                                         f"| Inv# {row['doc_number']}"}, **intent}
 
     if not intent.get("payment_method_id"):

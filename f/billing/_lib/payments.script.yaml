@@ -4,4 +4,4 @@ description: Emits charge outcomes (captured/declined/uncertain),
   (orphan, succeeded) emit nothing.
 lock: '!inline f/billing/_lib/payments.script.lock'
 kind: script
-schema: null
+schema: {}
