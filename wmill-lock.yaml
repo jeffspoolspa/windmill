@@ -15,7 +15,7 @@ locks:
   f/billing/_lib/delivery: e00637fac324168534427e83080f2e126b695284f358fb845b82929c93d9a97e
   f/billing/_lib/events: d380ce657dbb7f985ae7d5e6a8adf3e0cbf07c6895b19eea91d42c57c230cc8f
   f/billing/_lib/invoices: 0e31c7e7f6186697e1eb9694999a4d710764e1540d52b46f54dbbb21069e58f9
-  f/billing/_lib/payment_methods: 44106faaa09907133c85c8df429c4b289f2eea3d54aca667d73c464b4631f133
+  f/billing/_lib/payment_methods: d10d7b6a8d59492dd0a5dd9794848ac66e51db69c914f0b33b8e290e67081b1b
   f/billing/_lib/payments: 0090a4d924b8707f4cb9678c26c34ad71cda757094d12cefb680fbd74c3b3abf
   f/billing/_lib/qbo: dc7f060fee765eca48dbc9dac82f7dc69f12b49ee31584f72d55f5876de3f388
   f/billing/_lib/wal: 0ccd3028dff92fe5dc3b2cd3d7c49eaf3c244c29344bc9e6b63ae1dd842cccf5

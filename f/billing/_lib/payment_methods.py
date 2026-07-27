@@ -122,6 +122,15 @@ def replace(conn, qbo_customer_id, methods):
     is_default is NOT written here. fn_maintain_default_pm is that column's
     sole author; writing QBO's flag would just be overwritten by it, and for
     a moment the row would claim a default we do not believe.
+
+    is_active = true below looks like it resurrects a card the office turned
+    off — it did, until trg_a_user_deactivation_wins. QBO does not know about
+    our deactivated_at, so it keeps returning the method as ACTIVE and every
+    refresh re-enabled it (Frank Turner, MC 9815: deactivated 2026-06-29,
+    charged 2026-07-27). The DB now forces is_active = false whenever
+    deactivated_at is set, so this write means "QBO still has it", not "we
+    will use it". Do not "fix" it here — a human's decision outranks QBO's,
+    and that rule belongs in one place.
     """
     execute(conn, """
         UPDATE billing.customer_payment_methods SET is_active = false
