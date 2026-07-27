@@ -265,28 +265,50 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
                     "charge_id": None, "payment_id": None, "receipt_sent": False,
                     "receipt_error": None, "error": pm.get("error") or "no PM on file",
                     "attempt_id": str(att["id"]), "resumed": None}
+        intent = {**intent, "payment_method_id": pm["method_id"],
+                  "cpm_id": pm["cpm_id"],
+                  "channel": "card" if pm["payment_type"] in ("credit_card", "card") else "ach"}
+
+    # SECOND, INDEPENDENT CHECK, at the money moment.
+    #
+    # Selection (resolve_payment_method, and the DB's routing function before
+    # it) filters on is_active. That is ONE signal, so when is_active was wrong
+    # every check downstream of it was wrong too — a wallet refresh re-enabled
+    # a card the office had turned off and both "checks" waved it through
+    # (Frank Turner, MC 9815, 2026-07-27).
+    #
+    # So this one reads deactivated_at — the human's decision — NOT the flag
+    # derived from it. Different column, different failure mode: a bug in the
+    # is_active invariant cannot take out both. It also runs whatever the
+    # caller passed, including a fully pre-resolved payment_method_id, and
+    # re-reads inside a FOR UPDATE so a disable racing the charge is
+    # serialized rather than lost.
+    # (# ponytail: the lock covers selection, not the external call — a
+    # disable after Intuit has the request can't be stopped from here.)
+    if conn is not None and intent.get("cpm_id"):
         try:
-            cur = conn.cursor()
-            cur.execute("SELECT is_active FROM billing.customer_payment_methods "
-                        "WHERE id = %s FOR UPDATE", (pm["cpm_id"],))
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT is_active, deactivated_at IS NOT NULL AS user_off "
+                        "FROM billing.customer_payment_methods "
+                        "WHERE id = %s FOR UPDATE", (intent["cpm_id"],))
             row = cur.fetchone()
             conn.commit(); cur.close()
-            if row and not row[0]:
+            if row and (row["user_off"] or not row["is_active"]):
+                why = ("deactivated by a user" if row["user_off"]
+                       else "payment method disabled")
                 att = create_attempt(conn, anchor, stage, intent.get("invoice_number"),
                                      "card", 0, dry_run,
                                      wo_number=intent.get("wo_number"),
                                      status="no_payment_method")
-                update_attempt(conn, att["id"],
-                               error_message="payment method disabled")
+                update_attempt(conn, att["id"], error_message=why)
                 return {"status": "no_payment_method", "amount": None, "balances": None,
                         "charge_id": None, "payment_id": None, "receipt_sent": False,
-                        "receipt_error": None, "error": "payment method disabled",
+                        "receipt_error": None, "error": why,
                         "attempt_id": str(att["id"]), "resumed": None}
         except Exception as e:
-            print(f"  (pm lock warning: {e})")
-        intent = {**intent, "payment_method_id": pm["method_id"],
-                  "cpm_id": pm["cpm_id"],
-                  "channel": "card" if pm["payment_type"] in ("credit_card", "card") else "ach"}
+            # a failure to VERIFY is not permission to charge
+            print(f"  (pm guard failed: {e})")
+            raise
 
     channel = "ach" if intent["channel"] == "ach" else "card"
 
