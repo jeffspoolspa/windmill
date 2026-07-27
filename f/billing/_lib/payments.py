@@ -285,12 +285,23 @@ def charge_and_record(conn, intent, access_token, realm_id, dry_run=False):
     # serialized rather than lost.
     # (# ponytail: the lock covers selection, not the external call — a
     # disable after Intuit has the request can't be stopped from here.)
-    if conn is not None and intent.get("cpm_id"):
+    # Keyed on EITHER id: process_maint_charges passes payment_method_id with
+    # cpm_id deliberately None when it thinks the row is not live, which would
+    # have skipped this guard entirely on the one path that most needs it. A
+    # token we have no row for is not ours to judge and passes; a token whose
+    # row says disabled does not.
+    if conn is not None and (intent.get("cpm_id") or intent.get("payment_method_id")):
         try:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute("SELECT is_active, deactivated_at IS NOT NULL AS user_off "
-                        "FROM billing.customer_payment_methods "
-                        "WHERE id = %s FOR UPDATE", (intent["cpm_id"],))
+            if intent.get("cpm_id"):
+                cur.execute("SELECT is_active, deactivated_at IS NOT NULL AS user_off "
+                            "FROM billing.customer_payment_methods "
+                            "WHERE id = %s FOR UPDATE", (intent["cpm_id"],))
+            else:
+                cur.execute("SELECT is_active, deactivated_at IS NOT NULL AS user_off "
+                            "FROM billing.customer_payment_methods "
+                            "WHERE qbo_payment_method_id = %s FOR UPDATE",
+                            (intent["payment_method_id"],))
             row = cur.fetchone()
             conn.commit(); cur.close()
             if row and (row["user_off"] or not row["is_active"]):
@@ -1115,10 +1126,17 @@ def _selfcheck():
         # 18. orphan with a cache-matched payment SELF-HEALS (leg-2 dedupe);
         #     unproven orphan still refuses
         class _LookupConn:
-            def __init__(self, row): self._row = row
-            def cursor(self): return self
-            def execute(self, q, p=None): pass
-            def fetchone(self): return self._row
+            # `q` decides the shape: the pm guard reads through a
+            # RealDictCursor and wants a dict; the orphan lookup wants the
+            # tuple it was constructed with
+            def __init__(self, row): self._row = row; self._pm = False
+            def cursor(self, cursor_factory=None): return self
+            def execute(self, q, p=None):
+                self._pm = "customer_payment_methods" in q
+            def fetchone(self):
+                return ({"is_active": True, "user_off": False} if self._pm
+                        else self._row)
+            def commit(self): pass
             def close(self): pass
         calls.clear(); state["updates"].clear()
         state["prior"] = {"id": "A0", "status": "payment_orphan", "charge_id": "chX",
