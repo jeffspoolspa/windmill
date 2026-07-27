@@ -3,4 +3,4 @@ summary: Invoice cache handler + WO link; terminal-close of open credit
 description: ''
 lock: '!inline f/service_billing/refresh_invoice.script.lock'
 kind: script
-schema: null
+schema: {}

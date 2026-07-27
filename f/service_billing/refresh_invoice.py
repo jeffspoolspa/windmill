@@ -383,13 +383,22 @@ def handle_voided(conn, qbo_invoice_id, qbo_inv=None, kind="voided"):
 
     # The fact, before the status string. billing.invoice_voided() folds this;
     # the WOs ride as participants so the link is readable from either side.
-    append_event(conn, "invoice", qbo_invoice_id, "invoice_voided",
-                 participants=[f"work_order:{w}" for w in linked_wos],
-                 payload={"kind": kind,
-                          "work_orders": linked_wos,
-                          "provenance": {"source": "external",
-                                         "discovered_via": "webhook",
-                                         "intent_ref": "handle_voided"}})
+    #
+    # Emit only on the TRANSITION. QBO sends one Void webhook, but this handler
+    # runs on every refresh of an already-voided invoice (a re-sync, a poll, a
+    # manual sync), and it used to append a fresh invoice_voided each time. The
+    # fold was unaffected — it reads the latest — but the history showed one
+    # void as three, which is the log lying about what happened.
+    cur.execute("SELECT billing.invoice_voided(%s) AS already", (qbo_invoice_id,))
+    if not cur.fetchone()["already"]:
+        append_event(conn, "invoice", qbo_invoice_id, "invoice_voided",
+                     participants=[f"work_order:{w}" for w in linked_wos],
+                     payload={"kind": kind,
+                              "work_orders": linked_wos,
+                              # observed, not caused — but do not claim a
+                              # webhook we cannot see from here
+                              "provenance": {"source": "external",
+                                             "intent_ref": "handle_voided"}})
 
     if qbo_inv:
         cur.execute("""
