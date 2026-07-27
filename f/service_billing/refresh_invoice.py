@@ -322,15 +322,10 @@ def link_to_work_order(conn, qbo_invoice_id, doc_number):
         return {"linked": False, "reason": "already linked or no matching billable WO",
                 "doc_number": doc_number}
 
-    for r in rows:
-        append_event(conn, "invoice", qbo_invoice_id, "invoice_linked",
-                     participants=[f"work_order:{r['wo_number']}"],
-                     payload={"doc_number": doc_number,
-                              "work_order": r["wo_number"],
-                              # None on a first link; the displaced invoice on a relink
-                              "previous_qbo_invoice_id": r["previous_id"],
-                              "provenance": {"source": "intent",
-                                             "intent_ref": "link_to_work_order"}})
+    # invoice_linked is NOT emitted here. trg_emit_invoice_linked on
+    # work_orders emits it as part of the UPDATE above, so it is ordered
+    # against trg_enqueue_service_preprocess by Postgres instead of landing
+    # after the queue event it causes. Emitting here too would double it.
     conn.commit()
 
     return {
