@@ -47,6 +47,14 @@ from supabase import create_client
 BASE_ID = "apppQeFQh1Mi6Mv3p"
 TABLE_ID = "tbltojdp1l9k4xmSN"
 AIRTABLE_URL = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}"
+
+# Richmond Hill + Savannah tickets route to the RH office's own base (their
+# MAINTENANCE FOLLOW UP table) instead of the main JPS Office base. Same PAT —
+# it is scoped to both bases.
+RH_BASE_ID = "apptPZFNNZqbKHCvA"
+RH_TABLE_ID = "tbliY3MGT3ORf9GbM"
+RH_AIRTABLE_URL = f"https://api.airtable.com/v0/{RH_BASE_ID}/{RH_TABLE_ID}"
+RH_BASE_OFFICES = {"Richmond Hill", "Savannah"}  # OFFICE_TO_AIRTABLE labels
 MAINT_DEPT = "757659e3-d73f-48c3-999f-6f071f1e3587"
 BRANCH_CODE = {"BWK": "Brunswick, GA", "CAM": "Saint Marys, GA", "RH": "Richmond Hill, GA"}
 
@@ -386,6 +394,49 @@ def _airtable_fields(sb, r, M):
     return fields
 
 
+def _airtable_fields_rh(sb, r, M):
+    # The RH base's MAINTENANCE FOLLOW UP table keeps the old Zoho-form column
+    # names. All media goes in IMAGE (Airtable copies attachments at ingest;
+    # the Video Link column would only hold a signed URL that dies in an hour).
+    created = r.get("created_at")
+    ts = (datetime.fromisoformat(created).astimezone(ZoneInfo("America/New_York"))
+          .strftime("%m/%d/%Y %I:%M %p") if created else "")
+    atts = []
+    for m in (r.get("media") or []):
+        u = _signed_url(sb, m["path"]) if m.get("path") else None
+        if u:
+            atts.append({"url": u})
+    fields = {
+        "Date": ts,
+        "TECHNICIAN": M["emp_name"].get(r.get("tech_employee_id"), r.get("source_tech_name") or ""),
+        "CUSTOMER": M["disp"].get(r.get("customer_id"), r.get("source_customer_name") or ""),
+        "ISSUE": r.get("issue"),
+        "DESCRIPTION OF ISSUE": r.get("description") or "",
+    }
+    phone = M.get("cust_phone", {}).get(r.get("customer_id"))
+    if phone:
+        fields["Phone Number"] = phone
+    if r.get("equipment_off") is not None:
+        fields["TURNED EQUIPMENT OFF?"] = "TRUE" if r["equipment_off"] else "FALSE"
+    if atts:
+        fields["IMAGE"] = atts
+    return fields
+
+
+def _push_target(sb, r, M):
+    """(url, fields) for one row — RH base for RH/Savannah customers."""
+    if M.get("cust_office", {}).get(r.get("customer_id")) in RH_BASE_OFFICES:
+        return RH_AIRTABLE_URL, _airtable_fields_rh(sb, r, M)
+    return AIRTABLE_URL, _airtable_fields(sb, r, M)
+
+
+def _statuses(v):
+    # Main table Status is multipleSelects (list); RH table is singleSelect (str).
+    if isinstance(v, list):
+        return set(v)
+    return {v} if v else set()
+
+
 def _push_pending_app_rows(sb, headers):
     # Real-time push of new app submissions to Airtable. Fired per-insert by the
     # (guarded) wake trigger and as a daily backstop. concurrent_limit=1 on this
@@ -411,8 +462,9 @@ def _push_pending_app_rows(sb, headers):
     for r in rows:
         att = (r.get("sync_attempts") or 0) + 1
         try:
-            resp = requests.post(AIRTABLE_URL, headers=headers,
-                                 json={"records": [{"fields": _airtable_fields(sb, r, M)}], "typecast": True},
+            url, fields = _push_target(sb, r, M)
+            resp = requests.post(url, headers=headers,
+                                 json={"records": [{"fields": fields}], "typecast": True},
                                  timeout=30)
             if resp.ok:
                 fu.update({"airtable_record_id": resp.json()["records"][0]["id"], "airtable_synced_at": "now()",
@@ -576,8 +628,9 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300,
             if not apply:
                 pushed += 1
                 continue
-            resp = requests.post(AIRTABLE_URL, headers=headers,
-                                 json={"records": [{"fields": _airtable_fields(sb, r, M)}], "typecast": True},
+            url, fields = _push_target(sb, r, M)
+            resp = requests.post(url, headers=headers,
+                                 json={"records": [{"fields": fields}], "typecast": True},
                                  timeout=30)
             if resp.ok:
                 rid = resp.json()["records"][0]["id"]
@@ -604,10 +657,15 @@ def main(mode: str = "dry_run", since: str = "2023-01-01", batch: int = 300,
         for r in open_rows:
             rec = by_id.get(r["airtable_record_id"])
             if not rec:
+                # Not in the main base — RH/Savannah tickets live in the RH base.
+                resp = requests.get(f"{RH_AIRTABLE_URL}/{r['airtable_record_id']}",
+                                    headers=headers, timeout=30)
+                rec = resp.json() if resp.ok else None
+            if not rec:
                 continue
             flds = rec.get("fields", {})
             upd = {}
-            if DONE_STATUSES & set(flds.get("Status") or []):
+            if DONE_STATUSES & _statuses(flds.get("Status")):
                 upd["status"] = "closed"
                 closed_n += 1
             ns = flds.get("Next Steps")
