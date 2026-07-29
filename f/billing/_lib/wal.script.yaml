@@ -1,7 +1,6 @@
 summary: Shared WAL over billing.processing_attempts + charge_attempted emission
   (ADR 010)
-description: create_attempt emits charge_attempted in the write-ahead
-  transaction (real intents only — no dry runs, no sibling stubs).
+description: 'latest_attempt excludes channel=email rows: sends are not charges.'
 lock: '!inline f/billing/_lib/wal.script.lock'
 kind: script
 schema: null

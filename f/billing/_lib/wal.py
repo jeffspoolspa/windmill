@@ -46,11 +46,26 @@ def dumps(obj):
 
 
 def latest_attempt(conn, qbo_invoice_id, stage):
-    """Most recent NON-dry-run attempt for this invoice at this stage."""
+    """Most recent NON-dry-run CHARGE attempt for this invoice at this stage.
+
+    channel='email' rows are excluded: they are sends, not charges. Until
+    delivery.send_and_record stopped calling create_attempt, a send booked a
+    row in this CHARGE write-ahead log — same invoice, same stage,
+    status='succeeded', charge_id NULL. charge_and_record reads this function
+    to decide "have we already done this?", so such a row answered yes for a
+    charge that never happened, and the invoice could never be charged again
+    without force_retry. 729 of them exist (Apr-Jul 2026, every one with
+    charge_id NULL); WO 5039608 / invoice 68300 is how it surfaced.
+
+    The send side is already fixed, so this stops no NEW rows — it stops the
+    existing ones from being read as charges. Excluding by channel rather than
+    deleting the rows keeps the delivery history intact.
+    """
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """SELECT * FROM billing.processing_attempts
            WHERE qbo_invoice_id = %s AND stage = %s AND dry_run = false
+             AND channel IS DISTINCT FROM 'email'
            ORDER BY attempted_at DESC LIMIT 1""",
         (qbo_invoice_id, stage))
     row = cur.fetchone(); cur.close()
@@ -200,6 +215,14 @@ def _selfcheck():
     ok("stage + status are data", params[3] == "maint" and params[4] == "pending")
     ok("idempotency key is a fresh uuid", len(params[5]) == 36)
     ok("returns the row", row["id"] == "a1")
+
+    # a send is not a charge: the lookup that answers "already charged?" must
+    # not read channel='email' rows (the 729 legacy sends booked in this WAL)
+    conn_la = _FakeConn(row={"id": "a2", "status": "succeeded"})
+    latest_attempt(conn_la, "inv9", "process")
+    sql_la, _ = conn_la.cur.executed[0]
+    ok("latest_attempt excludes sends", "channel IS DISTINCT FROM 'email'" in sql_la)
+    ok("latest_attempt still ignores dry runs", "dry_run = false" in sql_la)
 
     conn2 = _FakeConn()
     update_attempt(conn2, "a1", status="charge_succeeded", charge_id="ch_1")
