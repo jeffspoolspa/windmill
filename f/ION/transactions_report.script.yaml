@@ -1,10 +1,8 @@
-summary: ''
-description: ''
+summary: ION All Transactions report for a month (Tasks + Consumables types) ->
+  billing_audit.ion_task_transactions
+description: Pulls BOTH TransactionType=Tasks and =Consumables (chem invoices
+  are excluded from the all/task pulls), merges by transaction_id, replaces the
+  month.
 lock: '!inline f/ION/transactions_report.script.lock'
-has_on_behalf_of: false
 kind: script
-schema:
-  $schema: https://json-schema.org/draft/2020-12/schema
-  type: object
-  properties: {}
-  required: []
+schema: null
