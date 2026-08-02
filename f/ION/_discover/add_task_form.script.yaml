@@ -1,0 +1,7 @@
+summary: "DISCOVERY (read-only): find ION's create-a-task form + its field set"
+description: Reads the customer tab, harvests addTask-ish links, fetches each
+  candidate and reports the form shape. POSTs nothing.
+lock: '!inline f/ION/_discover/add_task_form.script.lock'
+kind: script
+schema: null
+tag: chromium
