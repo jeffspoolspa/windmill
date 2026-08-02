@@ -56,10 +56,12 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
 
   const days = eachDay(start_date, end_date)
   const visits: any[] = []
+  const logsByDay: Record<string, string[]> = {}
   const perDay: any[] = []
   for (const day of days) {
     const enr: any = await listDayLogs(day, 0, sess)
     const dayLogs = (enr.logs ?? [])
+    logsByDay[day] = dayLogs.map((l: any) => String(l.log_id))
     const det: any = await getLogDetail(dayLogs.map((l: any) => ({ log_id: l.log_id, calendar_id: l.calendar_id })), sess)
     const byLog: Record<string, any> = {}
     for (const d of det.details) byLog[d.log_id] = d
@@ -140,6 +142,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
     const unknownEvents = [...new Set(visits.filter((v) => !v.task_id).map((v) => v.event_id))]
 
     let insVisits = 0, insReadings = 0, insChecklist = 0, insConsumables = 0, skipped = 0
+    const retractedLogs: string[] = []
     await sql.begin(async (tx: any) => {
       for (const v of visits) {
         if (!v.ion_log_id || !v.scheduled_date) { skipped++; continue }
@@ -157,7 +160,7 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
             service_type=EXCLUDED.service_type, service_profile=EXCLUDED.service_profile, price_cents=EXCLUDED.price_cents, billing_method=EXCLUDED.billing_method,
             started_at=EXCLUDED.started_at, ended_at=EXCLUDED.ended_at, ion_calendar_id=EXCLUDED.ion_calendar_id,
             ion_submitted_by=EXCLUDED.ion_submitted_by, actual_tech_id=COALESCE(EXCLUDED.actual_tech_id, maintenance.visits.actual_tech_id),
-            notes=EXCLUDED.notes, failure_reason=EXCLUDED.failure_reason, updated_at=now()
+            notes=EXCLUDED.notes, failure_reason=EXCLUDED.failure_reason, ion_deleted_at=NULL, updated_at=now()
           RETURNING id`
         const vid = ins[0].id
         insVisits++
@@ -177,8 +180,26 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
           insConsumables++
         }
       }
+
+      // DELETION RECONCILIATION: a log that vanished from its day's grid was
+      // deleted in ION — a retracted fact. Mark it (billing reads exclude
+      // retracted visits); the upsert path above clears the mark if the log
+      // reappears or moved days. Without this, a redone entry double-bills
+      // its chemicals forever (Chesser 2026-07: deleted log 37431349 = the
+      // exact $24.93 over-bill).
+      for (const day of days) {
+        const iso = `${day.slice(6, 10)}-${day.slice(0, 2)}-${day.slice(3, 5)}`
+        const present = logsByDay[day] ?? []
+        const marked = await tx`UPDATE maintenance.visits
+          SET ion_deleted_at = now(), updated_at = now()
+          WHERE visit_date = ${iso} AND ion_log_id IS NOT NULL AND external_source = 'ion_log'
+            AND ion_deleted_at IS NULL
+            AND NOT (ion_log_id = ANY(${present}))
+          RETURNING ion_log_id`
+        if (marked.length) retractedLogs.push(...marked.map((r: any) => String(r.ion_log_id)))
+      }
     })
-    result = { dry_run: false, committed: true, ...summaryBase, resolved_to_task: resolved, tech_linked: techLinked, unlinked_visits: visits.filter((v) => !v.task_id).length, unknown_event_ids: unknownEvents.slice(0, 60), insVisits, insReadings, insChecklist, insConsumables, skipped }
+    result = { dry_run: false, committed: true, retracted_logs: retractedLogs, ...summaryBase, resolved_to_task: resolved, tech_linked: techLinked, unlinked_visits: visits.filter((v) => !v.task_id).length, unknown_event_ids: unknownEvents.slice(0, 60), insVisits, insReadings, insChecklist, insConsumables, skipped }
   } finally {
     await sql.end()
   }

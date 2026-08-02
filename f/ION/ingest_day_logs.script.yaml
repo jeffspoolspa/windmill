@@ -1,9 +1,7 @@
-summary: ''
-description: ''
+summary: Canonical log-based visit ingestion (per-day, LogID grain) with
+  deletion reconciliation
+description: Upserts visits by ion_log_id and marks visits whose log vanished
+  from the day grid as retracted (ion_deleted_at) — billing reads exclude them.
 lock: '!inline f/ION/ingest_day_logs.script.lock'
 kind: script
-schema:
-  $schema: https://json-schema.org/draft/2020-12/schema
-  type: object
-  properties: {}
-  required: []
+schema: null
