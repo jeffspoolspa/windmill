@@ -1,8 +1,9 @@
-summary: 'ION API WRITE-BACK (ADR 002): edit a task; dry_run-first (logs the
-  POST it would send, no submit)'
-description: ''
+summary: 'ION API (WRITE): edit one task. dry_run first; expect_days guards
+  against a stale picture.'
+description: 'Adds optional expect_days: the per-day tech map the caller
+  believes ION holds. On any disagreement the write is REFUSED rather than
+  corrupting a complete-week write.'
 lock: '!inline f/ION/api/update_task.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium
