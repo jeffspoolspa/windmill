@@ -1,0 +1,7 @@
+summary: 'READ-ONLY: ION per-day tech for many tasks (cache reconcile authority)'
+description: One session, many tasks. Returns ION perDayTech per ion_task_id.
+  Writes nothing.
+lock: '!inline f/ION/read_task_days.script.lock'
+kind: script
+schema: null
+tag: chromium
