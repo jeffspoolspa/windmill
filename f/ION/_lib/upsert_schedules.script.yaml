@@ -1,8 +1,8 @@
-summary: 'Schedule day/tech derivation (#59): reconcile task_schedules
-  day_of_week/tech/frequency from taskList rows (per-ion_task_id; dry_run
-  default)'
-description: ''
+summary: Schedule day/tech derivation. Retires days ION dropped (no longer gated
+  on full_reconcile).
+description: A day ION no longer serves is deactivated on every run.
+  Forward-only reconciliation left ghost slots active, which corrupt
+  complete-week write-back.
 lock: '!inline f/ION/_lib/upsert_schedules.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
