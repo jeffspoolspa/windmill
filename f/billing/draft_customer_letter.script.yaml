@@ -1,0 +1,6 @@
+summary: Draft the customer-facing letter for a flagged billing month
+description: Claude-drafted letter from billable items + visits + findings +
+  reviewer context; iterates via thread; upserts billing.customer_letters.
+lock: '!inline f/billing/draft_customer_letter.script.lock'
+kind: script
+schema: null
