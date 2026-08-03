@@ -1,0 +1,12 @@
+summary: QBO access token — the one refresher (rotating token saved atomically)
+description: The single QBO auth door. Refreshes AND saves the rotated refresh
+  token; serialized by concurrency key.
+lock: '!inline f/qbo/api/get_access_token.script.lock'
+concurrency_time_window_s: 0
+concurrent_limit: 1
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []
