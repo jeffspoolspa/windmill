@@ -1,8 +1,16 @@
 summary: ION All Transactions report for a month (Tasks + Consumables types) ->
   billing_audit.ion_task_transactions
-description: Pulls BOTH TransactionType=Tasks and =Consumables (chem invoices
-  are excluded from the all/task pulls), merges by transaction_id, replaces the
-  month.
+description: >-
+  Pulls BOTH TransactionType=Tasks and =Consumables (chem invoices are excluded
+  from the all/task pulls), merges by transaction_id, replaces the month.
+
+
+  TAG: chromium — this report drives a REAL browser navigation (ION's report
+  criteria live in the ColdFusion session and are only set by a form submit), so
+  it must land on a worker that has a browser. It was previously untagged, which
+  meant it ran on the default bun pool and worked only when it happened to be
+  scheduled somewhere with chromium.
 lock: '!inline f/ION/transactions_report.script.lock'
 kind: script
 schema: null
+tag: chromium
