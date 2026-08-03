@@ -1,8 +1,8 @@
-summary: Schedule day/tech derivation. Retires days ION dropped (no longer gated
-  on full_reconcile).
-description: A day ION no longer serves is deactivated on every run.
-  Forward-only reconciliation left ghost slots active, which corrupt
-  complete-week write-back.
+summary: Schedule day/tech derivation — retires days dropped from a task own roster
+description: 'A day absent from a task ION row is retired in every mode
+  (authoritative for that ion_task_id). Ungated 2026-08-02: focused mode
+  inserted without retiring, minting phantom slots from moving Next Service
+  dates.'
 lock: '!inline f/ION/_lib/upsert_schedules.script.lock'
 kind: script
 schema: null

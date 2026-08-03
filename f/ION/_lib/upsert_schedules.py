@@ -25,7 +25,10 @@ is (task_id, day_of_week, frequency, ion_task_id) WHERE active (relaxed
 ION tasks on the same weekday (e.g. POOL MAINTENANCE + QUALITY CONTROL) -- each
 ion_task_id gets its own slots. A single ION task still can't duplicate a
 (day, frequency). expired tasks are skipped (the active-tasks sync closes them).
-Focused mode does NOT deactivate existing dated slots; full_reconcile does.
+A day dropped from a task's OWN roster is retired in every mode (its absence
+is authoritative for that ion_task_id). full_reconcile additionally handles
+tasks absent from the whole report, which a focused run cannot conclude
+anything about.
 
 TECH: public.employees.ion_username (TEXT[]) entries equal the taskList
 "Assigned To" string, but the route prefix drifts ("MNT-C KF, KOREY" vs stored
@@ -208,30 +211,28 @@ def sync_schedules(rows, supabase_connection, dry_run=True, full_reconcile=False
                     )
                     stats["slots_deactivated"] += cur.rowcount
 
-                # A day ION no longer serves is a day we must stand down --
-                # ALWAYS, not only under full_reconcile.
+                # A day THIS ion_task no longer serves is retired. Absence of a
+                # DAY from a task's own row is authoritative (ION just gave us
+                # that task's current roster); absence of a TASK from the whole
+                # report is not (a focused run only covers some customers) --
+                # that distinction is what full_reconcile is really for, and
+                # conflating them is what let phantom slots accumulate.
                 #
-                # This used to be gated, so reconciliation ran forward only: we
-                # added days ION reported and never removed days it dropped, and
-                # a task that moved Tue->Thu->Tue accumulated the union. Those
-                # ghost slots were merely untidy while routing was read-only.
-                # They are dangerous now that routing writes the COMPLETE week
-                # back to ION: publishing from a picture containing a ghost
-                # re-adds the day and doubles a customer's service (found live
-                # on Roper, David -- weekly Tuesday here, Tue+Thu in our cache).
-                #
-                # Safe to do unconditionally: `desired` is this ION task's own
-                # active days and is guaranteed non-empty above, and the UPDATE
-                # is scoped to this ion_task_id, so it can only ever retire a
-                # day this same report just told us is gone.
+                # Ungated 2026-08-02: focused mode inserted a slot per desired
+                # day but never retired the previous one, so a Bi-Weekly task
+                # (whose day is derived from the MOVING "Next Service" date)
+                # gained a permanent slot every time a visit was rescheduled.
+                # Measured: 68 live slots across 66 tasks with zero visits on
+                # their weekday in 90 days -- e.g. FRAZIER, CINDY, a Wednesday
+                # biweekly pool, standing on Wed + Thu + Fri.
                 for s in own_active:
                     if s["dow"] is not None and s["dow"] not in desired:
                         cur.execute(
                             """UPDATE maintenance.task_schedules SET active=false, updated_at=now()
-                               WHERE ion_task_id=%s AND day_of_week=%s""",
+                               WHERE ion_task_id=%s AND day_of_week=%s AND active""",
                             (ion_task_id, s["dow"]),
                         )
-                        stats["slots_deactivated"] += cur.rowcount
+                        stats["slots_retired_offroster"] = stats.get("slots_retired_offroster", 0) + cur.rowcount
 
         if dry_run:
             conn.rollback()
