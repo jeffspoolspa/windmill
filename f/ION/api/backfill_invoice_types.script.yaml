@@ -1,6 +1,5 @@
 summary: Backfill tasks.ion_invoice_type for tasks billed in a month
-description: One cached ION session, one HTTP task-detail read per July-billed
-  task with NULL invoice type; idempotent.
+description: ''
 lock: '!inline f/ION/api/backfill_invoice_types.script.lock'
 kind: script
 schema: null

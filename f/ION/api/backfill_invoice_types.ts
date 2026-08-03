@@ -57,7 +57,7 @@ export async function main(
     for (const t of targets) {
       try {
         const { detail } = await getTaskDetail(session, t.ion_task_id, t.ion_cust_id ?? "")
-        const invoiceType = (detail?.invoiceType ?? "").trim()
+        const invoiceType = String(detail?.invoiceType?.text ?? "").trim()
         if (!invoiceType) { empty++; continue }
         const r = await sql`
           UPDATE maintenance.tasks SET ion_invoice_type = ${invoiceType}
