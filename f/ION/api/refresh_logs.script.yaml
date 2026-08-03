@@ -1,0 +1,31 @@
+summary: Targeted log refresh — re-read SPECIFIC logs by id and upsert them
+description: "The dispute-healing pull: prime once, one HTTP detail-fetch per
+  known log, same upsert path as ingest_day_logs (keyed on ion_log_id) so the
+  two can never disagree. Does NOT discover new logs — that is the day ingest's
+  job."
+lock: '!inline f/ION/api/refresh_logs.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    dry_run:
+      type: boolean
+      default: true
+    log_refs:
+      type: array
+      description: The logs to re-read. Empty is an ERROR, not a no-op.
+      items:
+        type: object
+        properties:
+          calendar_id:
+            type:
+              - string
+              - 'null'
+          log_id:
+            type: string
+        required:
+          - log_id
+  required:
+    - log_refs
+tag: chromium
