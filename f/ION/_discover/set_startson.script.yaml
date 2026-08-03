@@ -1,0 +1,6 @@
+summary: StartsOn writer mimicking the UI (proxy set + POST + read-back proof)
+description: Backdates require the _proxy.cfm session set the UI performs on change.
+lock: '!inline f/ION/_discover/set_startson.script.lock'
+kind: script
+schema: null
+tag: chromium
