@@ -1,0 +1,6 @@
+summary: 'READ-ONLY: dump the edit form save machinery around StartsOn'
+description: UI can backdate, our POST cannot — find what the browser sends that we drop.
+lock: '!inline f/ION/_discover/probe_startson.script.lock'
+kind: script
+schema: null
+tag: chromium
