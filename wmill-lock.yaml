@@ -135,6 +135,7 @@ locks:
   f/ION/_run/probe_task_price_fields: ef474a8cda261daa6f862f81d82a50f8540470501c33bd875233dd1c4fea912a
   f/ION/_run/recover_grid_tech: 85e30d54bd3faedafad6971f264aa8bff59d4ea8f74a027adc4281e51e3799b7
   f/ION/_run/who_are_orphan_customers: 03e9da33f22b9e952d2a3c89d9617ffc330dfec6e429765cacb92d71f3a75b74
+  f/ION/api/create_task: f41cbc7ba3c856d0455ff058aae5bc19352feae2f0ad706498b0f68d01a9d8cb
   f/ION/api/get_customer_tasks: 5f42381db02071b3753b534c2dac5464ba14be26de453219205dc374762e0fc1
   f/ION/api/get_log_detail: 91918327188b47ddfe253ae34fedbb7cf4a92d8a623fcceb370a9de3359a4c56
   f/ION/api/get_recurring_tasks: 5c802795062293a2b8f1fcb9c683b43e0efb99e51c49da6e2eb2aafe967e7b16
@@ -147,6 +148,7 @@ locks:
   f/ION/api/resolve_visit_tasks_via_log: 98586e3c58a1b2de9dcd8a9ac32675db3954713390064933509e98110098a62e
   f/ION/api/update_task: 0e0cad105eb3cacd0b3dda5b07ce70c4b8403b159b2c55711b2b64e1d2a624ea
   f/ION/api/upsert_task_schedule: 0a6ebf2e974baf171b2ccfe70bd569ff1c8859017a4f3a368c962967e4d5e106
+  f/ION/apply_task_schedules: 31d85316423a2a591619469323a94046de1dd1c14e55dc1c4fd6a76e3a53af4f
   f/ION/capture_nonactive_tasks__flow+__flow_hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
   f/ION/close_dropped_tasks: 027b1e618a08f33d68a3d0d2f000a2d7196a71c69077f2854251d87a18a0d689
   f/ION/consumables_usage__flow+__flow_hash: af33b575072a92ed3e03cde78283baf78fdfb4caed9fa21ba96b993410eb6da1

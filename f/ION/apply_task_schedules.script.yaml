@@ -1,0 +1,7 @@
+summary: ION write path
+description: import from session_cache only — the bun resolver mangles a file
+  importing both /f/X and /f/X_suffix
+lock: '!inline f/ION/apply_task_schedules.script.lock'
+kind: script
+schema: null
+tag: chromium
