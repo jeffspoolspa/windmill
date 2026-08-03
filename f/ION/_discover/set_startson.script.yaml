@@ -1,5 +1,5 @@
-summary: StartsOn writer mimicking the UI (proxy set + POST + read-back proof)
-description: Backdates require the _proxy.cfm session set the UI performs on change.
+summary: StartsOn writer v2 — full CF AJAX envelope per browser trace
+description: prime customerTabs, proxy set with _cf_clientid envelope, POST, read-back proof
 lock: '!inline f/ION/_discover/set_startson.script.lock'
 kind: script
 schema: null

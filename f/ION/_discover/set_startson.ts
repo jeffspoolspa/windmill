@@ -1,45 +1,46 @@
 //bun-extra-requirements:
 //node-html-parser@6.1.13
 //playwright@1.40.0
-// StartsOn writer that mimics the UI exactly: the date field carries a
-// ColdFusion AJAX bind that server-side SETS the date via _proxy.cfm on
-// change, BEFORE submit. A bare form POST is silently refused for backdated
-// values; the proxy set is the knob the browser has and headless replay lacked.
+// StartsOn writer, UI-faithful v2. Carter's browser trace showed the working
+// recipe our replay lacked: the proxy set carries the FULL ColdFusion AJAX
+// envelope (_cf_clientid + containerId + nodebug/nocache/rc) and fires from a
+// session primed through customerTabs. Read-first (skip if already right),
+// read-back after (the only proof that counts).
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
-import { getOrRefreshSession, ionFetchText } from "/f/ION/_lib/session_cache"
-import { ionFetch } from "/f/ION/_lib/session_cache"
+import { getOrRefreshSession, ionFetchText, ionFetch } from "/f/ION/_lib/session_cache"
 import { fetchTaskFormHtml, parseTaskForm } from "/f/ION/_lib/task_detail"
 
-export async function main(writes: { ionTaskId: string; date: string }[] = [], dry_run = true) {
+const clientId = () => Array.from({length:32},()=> "0123456789ABCDEF"[Math.floor(Math.random()*16)]).join("")
+
+export async function main(writes: { ionTaskId: string; ionCustId: string; date: string }[] = [], dry_run = true) {
   const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"),
     username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
   const session = await getOrRefreshSession(ion)
-  const out: { ionTaskId: string; before: string; wanted: string; after?: string; ok?: boolean; detail?: string }[] = []
+  const cid = clientId()
+  const out: Record<string, unknown>[] = []
+  let rc = 1
   for (const w of writes) {
     try {
+      // prime the customer context exactly as the UI does
+      await ionFetchText(session, `${session.ionOrigin}/customers/customerTabs.cfm?customerid=${w.ionCustId}`)
       const { fields } = parseTaskForm(await fetchTaskFormHtml(session, w.ionTaskId, ""))
       const before = fields["StartsOn"] ?? ""
-      if (dry_run) { out.push({ ionTaskId: w.ionTaskId, before, wanted: w.date, detail: "dry" }); continue }
-      // 1) the UI's bind: server-side set of the date for this form session
-      await ionFetchText(session, `${session.ionOrigin}/includes/_proxy.cfm?source=addtask&date=${encodeURIComponent(w.date)}&set=1`)
-      // 2) the ordinary form POST with the new date
-      const payload: Record<string, string> = { ...fields, StartsOn: w.date }
-      if (!payload["LinkUsed"]) payload["LinkUsed"] = "Save"
-      if (!payload["Submit"]) payload["Submit"] = "Submit"
-      const res = await ionFetch(session, `${session.ionOrigin}/tasks/addTask.cfm?EventID=${w.ionTaskId}&isIFrame=1`, {
+      if (before === w.date) { out.push({ id: w.ionTaskId, before, ok: true, detail: "already correct" }); continue }
+      if (dry_run) { out.push({ id: w.ionTaskId, before, wanted: w.date, detail: "dry" }); continue }
+      // the UI's bind: server-side date set, full CF AJAX envelope
+      await ionFetchText(session,
+        `${session.ionOrigin}/includes/_proxy.cfm?source=addtask&date=${encodeURIComponent(w.date)}&set=1&_cf_containerId=csttasks&_cf_nodebug=true&_cf_nocache=true&_cf_clientid=${cid}&_cf_rc=${rc++}`)
+      const payload: Record<string, string> = { ...fields, StartsOn: w.date, LinkUsed: fields["LinkUsed"] || "Save", Submit: fields["Submit"] || "Submit" }
+      await ionFetch(session, `${session.ionOrigin}/tasks/addTask.cfm?EventID=${w.ionTaskId}&isIFrame=1`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
           "X-Requested-With": "XMLHttpRequest", Referer: `${session.ionOrigin}/main.cfm`, Origin: session.ionOrigin },
         body: new URLSearchParams(payload).toString(),
       })
-      // 3) read back — the only proof that counts
       const { fields: f2 } = parseTaskForm(await fetchTaskFormHtml(session, w.ionTaskId, ""))
-      const after = f2["StartsOn"] ?? ""
-      out.push({ ionTaskId: w.ionTaskId, before, wanted: w.date, after, ok: after === w.date, detail: `post ${res.status}` })
-    } catch (err) {
-      out.push({ ionTaskId: w.ionTaskId, before: "?", wanted: w.date, ok: false, detail: String(err).slice(0, 150) })
-    }
+      out.push({ id: w.ionTaskId, before, wanted: w.date, after: f2["StartsOn"] ?? "", ok: (f2["StartsOn"] ?? "") === w.date })
+    } catch (err) { out.push({ id: w.ionTaskId, ok: false, detail: String(err).slice(0,150) }) }
   }
-  return { dry_run, results: out, fixed: out.filter(o => o.ok).length }
+  return { dry_run, fixed: out.filter(o => o.ok).length, total: writes.length, results: out }
 }
