@@ -8,7 +8,14 @@ import * as wmill from "windmill-client"
 import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
 import { parse } from "node-html-parser"
 
-// ION "All Transactions" report (TransactionType=Tasks) for a month.
+// ION "All Transactions" report for a month.
+//
+// transaction_type (default "Tasks", preserving the original behaviour):
+// "Tasks" returns only task transactions. A customer on SEPARATE CONSUMABLES
+// has their chemicals invoiced on their OWN document, which a Tasks-only pull
+// never returns — so a billing reconcile against it shows us "over" by
+// exactly the chemicals, forever. Pass "" to leave ION's own default (all
+// types) and get both.
 //
 // WHY A BROWSER (verified empirically 2026-07-01): /reports/_xls/allTransactions.cfm reads its
 // criteria from the ColdFusion SESSION, and that session state is only created/updated by a REAL
@@ -34,76 +41,55 @@ function bounds(month: string) {
 }
 const toIsoDate = (mdy: string) => { const m = String(mdy).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m ? `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}` : null }
 
-export async function main(month: string, dry_run: boolean = true, load: boolean = false) {
+export async function main(month: string, dry_run: boolean = true, load: boolean = false, transaction_type: string = "Tasks") {
   const b = bounds(month)
   const ion = { loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"), username: await wmill.getVariable("f/ION/USERNAME"), password: await wmill.getVariable("f/ION/PASSWORD") }
   const s: any = await getOrRefreshSession(ion)
   const o = s.ionOrigin
 
-  // TWO pulls: separate-consumables chem invoices live under their OWN
-  // TransactionType ("Consumables") — even ION's "all" excludes them
-  // (verified 2026-08-02: 767-row all-pull had zero Consumables Invoice rows;
-  // the type-filtered pull had the three). Same window, same parser — the
-  // rows carry "Task <id>" in Additional Info like task invoices.
   const browser = await chromium.launch({ executablePath: "/usr/bin/chromium", args: ['--no-sandbox', '--single-process', '--no-zygote', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] })
   let xls = ""
-  let consXls = ""
   try {
     const context = await browser.newContext({ userAgent: "Mozilla/5.0" })
     await context.addCookies((s.cookies || []).map((c: any) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path || "/", secure: !!c.secure, httpOnly: !!c.httpOnly })))
     const page = await context.newPage()
-    const pull = async (typeMatch: string): Promise<string> => {
-      await page.goto(`${o}/reports/transactionRpt.cfm`, { waitUntil: "domcontentloaded" })
-      const picked = await page.evaluate((a: any) => {
-        const g = (id: string) => document.getElementById(id) as any
-        if (g("rptStart")) g("rptStart").value = a.start
-        if (g("rptEnd")) g("rptEnd").value = a.end
-        const tt = document.querySelector('select[name="TransactionType"]') as any
-        let chosen = null
-        if (tt) {
-          for (const opt of tt.options) {
-            if (new RegExp(a.typeMatch, "i").test(opt.text) || new RegExp(a.typeMatch, "i").test(opt.value)) { tt.value = opt.value; chosen = opt.value; break }
-          }
-        }
-        const wf = document.querySelector('input[name="WorkFrom"]') as any; if (wf) wf.value = a.us_start
-        const wt = document.querySelector('input[name="WorkTo"]') as any; if (wt) wt.value = a.us_end
-        return chosen
-      }, { start: b.start, end: b.end, us_start: b.us_start, us_end: b.us_end, typeMatch })
-      if (!picked) throw new Error(`TransactionType option matching /${typeMatch}/i not found`)
-      await Promise.all([page.waitForLoadState("networkidle").catch(() => {}), page.evaluate(() => (document.getElementById("rpt") as any).submit())])
-      await page.waitForTimeout(1000)
-      const r: any = await page.evaluate(async (u: string) => { const x = await fetch(u, { credentials: "include" }); return { status: x.status, body: await x.text() } }, `${o}/reports/_xls/allTransactions.cfm`)
-      if (r.status !== 200) throw new Error(`XLS fetch (${typeMatch}) failed: status ${r.status}`)
-      return r.body
-    }
-    xls = await pull("^Tasks?$")
-    consXls = await pull("consumab")
+    await page.goto(`${o}/reports/transactionRpt.cfm`, { waitUntil: "domcontentloaded" })
+    await page.evaluate((a: any) => {
+      const g = (id: string) => document.getElementById(id) as any
+      if (g("rptStart")) g("rptStart").value = a.start
+      if (g("rptEnd")) g("rptEnd").value = a.end
+      // Empty = leave ION's default (all types), which is what a billing
+      // reconcile needs: separate-consumables invoices are not "Tasks".
+      const tt = document.querySelector('select[name="TransactionType"]') as any
+      if (tt && a.transaction_type) tt.value = a.transaction_type
+      const wf = document.querySelector('input[name="WorkFrom"]') as any; if (wf) wf.value = a.us_start
+      const wt = document.querySelector('input[name="WorkTo"]') as any; if (wt) wt.value = a.us_end
+    }, { start: b.start, end: b.end, us_start: b.us_start, us_end: b.us_end, transaction_type })
+    await Promise.all([page.waitForLoadState("networkidle").catch(() => {}), page.evaluate(() => (document.getElementById("rpt") as any).submit())])
+    await page.waitForTimeout(1000)
+    const r: any = await page.evaluate(async (u: string) => { const x = await fetch(u, { credentials: "include" }); return { status: x.status, body: await x.text() } }, `${o}/reports/_xls/allTransactions.cfm`)
+    if (r.status !== 200) throw new Error(`XLS fetch failed: status ${r.status}`)
+    xls = r.body
   } finally { await browser.close() }
 
-  const parseXls = (body: string): any[] => {
-    const table = parse(body).querySelector("table")
-    const rows = table ? table.querySelectorAll("tr").map((tr: any) => tr.querySelectorAll("td,th").map((c: any) => c.text.trim().replace(/\s+/g, " "))) : []
-    const hi = rows.findIndex((r: string[]) => r.some((c) => /^Transaction ID$/i.test(c)))
-    if (hi < 0) throw new Error("header row not found")
-    const head = rows[hi]
-    const col = (name: string) => head.findIndex((c: string) => c.toLowerCase() === name.toLowerCase())
-    const ci = { tid: col("Transaction ID"), date: col("Transaction Date"), svc: col("Service Name"), amt: col("Amount"), status: col("Status"), cust: col("Customer"), info: col("Additional Info") }
-    const out: any[] = []
-    for (let i = hi + 1; i < rows.length; i++) {
-      const r = rows[i]; if (!r.some((c) => c)) continue
-      const task = (r[ci.info] || "").match(/Task\s+(\d+)/)?.[1]; if (!task) continue
-      const amtRaw = (r[ci.amt] || "").replace(/[^0-9.\-]/g, ""); if (amtRaw === "") continue
-      out.push({ transaction_id: r[ci.tid] || null, ion_task_id: task, amt_cents: Math.round(parseFloat(amtRaw) * 100),
-        customer: r[ci.cust] || null, service_name: r[ci.svc] || null, status: r[ci.status] || null, transaction_date: toIsoDate(r[ci.date] || "") })
-    }
-    return out
+  const table = parse(xls).querySelector("table")
+  const rows = table ? table.querySelectorAll("tr").map((tr: any) => tr.querySelectorAll("td,th").map((c: any) => c.text.trim().replace(/\s+/g, " "))) : []
+  const hi = rows.findIndex((r: string[]) => r.some((c) => /^Transaction ID$/i.test(c)))
+  if (hi < 0) throw new Error("header row not found")
+  const head = rows[hi]
+  const col = (name: string) => head.findIndex((c: string) => c.toLowerCase() === name.toLowerCase())
+  const ci = { tid: col("Transaction ID"), date: col("Transaction Date"), svc: col("Service Name"), amt: col("Amount"), status: col("Status"), cust: col("Customer"), info: col("Additional Info") }
+
+  const recs: any[] = []
+  for (let i = hi + 1; i < rows.length; i++) {
+    const r = rows[i]; if (!r.some((c) => c)) continue
+    const task = (r[ci.info] || "").match(/Task\s+(\d+)/)?.[1]; if (!task) continue
+    const amtRaw = (r[ci.amt] || "").replace(/[^0-9.\-]/g, ""); if (amtRaw === "") continue
+    recs.push({ transaction_id: r[ci.tid] || null, ion_task_id: task, amt_cents: Math.round(parseFloat(amtRaw) * 100),
+      customer: r[ci.cust] || null, service_name: r[ci.svc] || null, status: r[ci.status] || null, transaction_date: toIsoDate(r[ci.date] || "") })
   }
-  const taskRecs = parseXls(xls)
-  // sanity applies to the TASK pull; a consumables pull of 0-3 rows is normal
-  if (taskRecs.length < 10) throw new Error(`suspiciously few rows (${taskRecs.length}) -- report criteria likely not applied; not loading`)
-  const consRecs = parseXls(consXls)
-  const seenTid = new Set(taskRecs.map((r) => r.transaction_id))
-  const recs = [...taskRecs, ...consRecs.filter((r) => !seenTid.has(r.transaction_id))]
+  // sanity: a real month should never parse to a handful of rows -- tiny result = criteria didn't take
+  if (recs.length < 10) throw new Error(`suspiciously few rows (${recs.length}) -- report criteria likely not applied; not loading`)
 
   let loaded = 0
   let ionStamped = 0
@@ -130,7 +116,7 @@ export async function main(month: string, dry_run: boolean = true, load: boolean
       await sql`select billing_audit.project_maint_processing_status(${b.monthDate})`
     } finally { await sql.end().catch(() => {}) }
   }
-  return { month, consumable_invoice_rows: consRecs.length, parsed_rows: recs.length, distinct_tasks: new Set(recs.map((r) => r.ion_task_id)).size,
+  return { month, parsed_rows: recs.length, distinct_tasks: new Set(recs.map((r) => r.ion_task_id)).size,
     total_amt_usd: Math.round(recs.reduce((n, r) => n + r.amt_cents, 0)) / 100, loaded: (!dry_run && load) ? loaded : "skipped",
     ion_stamped: (!dry_run && load) ? ionStamped : "skipped", sample: recs.slice(0, 3) }
 }

@@ -12,5 +12,12 @@ description: >-
   scheduled somewhere with chromium.
 lock: '!inline f/ION/transactions_report.script.lock'
 kind: script
-schema: null
+schema:
+  properties:
+    transaction_type:
+      type: string
+      description: ION report filter. "Tasks" = task transactions only; "" = ION's
+        default (all types), which a billing reconcile needs so
+        separate-consumables invoices are included.
+      default: Tasks
 tag: chromium
