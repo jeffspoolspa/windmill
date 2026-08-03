@@ -1,0 +1,8 @@
+summary: 'Mint/refresh ION session keys (ADR 012: the ONE remaining ION Windmill
+  dependency)'
+description: Login needs chromium; everything after is plain HTTP the app-side
+  Ion class does itself.
+lock: '!inline f/ION/api/get_session.script.lock'
+kind: script
+schema: null
+tag: chromium
