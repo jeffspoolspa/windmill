@@ -1,6 +1,5 @@
-summary: 'READ-ONLY: ION per-day tech for many tasks (cache reconcile authority)'
-description: One session, many tasks. Returns ION perDayTech per ion_task_id.
-  Writes nothing.
+summary: 'READ-ONLY: per-day tech + ServiceRepeat + StartsOn for many tasks'
+description: Cadence travels with the days — dropping it caused a wrong-path write.
 lock: '!inline f/ION/read_task_days.script.lock'
 kind: script
 schema: null

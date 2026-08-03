@@ -26,19 +26,27 @@ export async function main(ionTaskIds: string[] = []) {
   }
   const session = await getOrRefreshSession(ion)
 
+  // ServiceRepeat and StartsOn travel with the days: cadence decides which
+  // write path a task takes, and dropping it here is how a wrong-path write
+  // happened once already. fieldCount distinguishes a failed render (0) from
+  // a real answer.
   const days: Record<string, { dow: number; techId: string; techName: string }[]> = {}
+  const meta: Record<string, { serviceRepeat: string; serviceRepeatText: string; startsOn: string; assignedTo: string; fieldCount: number }> = {}
   const failed: Record<string, string> = {}
   for (const id of ionTaskIds) {
     try {
-      const { detail } = parseTaskForm(await fetchTaskFormHtml(session, id, ""))
-      days[id] = detail.perDayTech.map((d) => ({
-        dow: d.dow,
-        techId: d.techId,
-        techName: d.techName,
-      }))
+      const { detail, fields } = parseTaskForm(await fetchTaskFormHtml(session, id, ""))
+      days[id] = detail.perDayTech.map((d) => ({ dow: d.dow, techId: d.techId, techName: d.techName }))
+      meta[id] = {
+        serviceRepeat: detail.serviceRepeat.value,
+        serviceRepeatText: detail.serviceRepeat.text,
+        startsOn: detail.startsOn,
+        assignedTo: fields["AssignedTo"] ?? "",
+        fieldCount: Object.keys(fields).length,
+      }
     } catch (err) {
       failed[id] = err instanceof Error ? err.message : String(err)
     }
   }
-  return { read: Object.keys(days).length, failed_count: Object.keys(failed).length, days, failed }
+  return { read: Object.keys(days).length, failed_count: Object.keys(failed).length, days, meta, failed }
 }
