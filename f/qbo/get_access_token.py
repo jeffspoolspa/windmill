@@ -1,49 +1,48 @@
-import requests
 import wmill
 from datetime import datetime, timezone, timedelta
 
-RESOURCE_PATH = "u/carter/quickbooks_api"
+# Token provider for the card vault's `capture` edge function.
+#
+# This script used to perform the OAuth refresh ITSELF, against the shared
+# u/carter/quickbooks_api resource. That made it a SECOND refresher of a token
+# that ROTATES: QBO issues a new refresh token on every exchange and invalidates
+# the old one, so two independent refreshers race and one of them ends up
+# holding a dead token — taking down every QBO integration, not just the vault.
+# ADR 012 says there is exactly one door. It is f/qbo/api/get_access_token, and
+# that script carries concurrent_limit=1 so rotations are serialized.
+#
+# So this is now a CACHE in front of that one door, not a second door:
+#   - serve the cached access token while it is comfortably valid, and
+#   - on a miss, delegate the refresh (and the rotated-token save) downstream.
+#
+# The cache is what keeps the burst of captures from a bulk card-collection send
+# from triggering a rotation per capture; the ADR 012 door is what guarantees
+# that when a rotation does happen, only one script performs it.
+
+ONE_DOOR = "f/qbo/api/get_access_token"
+SKEW = timedelta(minutes=5)
 
 
 def main():
-    """Return a currently-valid QBO access token + realm_id for the card vault.
-
-    Caches the access token in this script's state and only performs an OAuth
-    refresh (which rotates the shared refresh token) when the cached token is
-    within 5 minutes of expiry. This keeps refresh-token rotations rare.
-    """
-    resource = wmill.get_resource(RESOURCE_PATH)
-    realm_id = resource["realm_id"]
-
-    # 1. Serve the cached access token if it is still comfortably valid.
     state = wmill.get_state() or {}
     now = datetime.now(timezone.utc)
+
     cached = state.get("access_token")
+    realm_id = state.get("realm_id")
     expires_at = state.get("expires_at")
-    if cached and expires_at:
-        if datetime.fromisoformat(expires_at) - now > timedelta(minutes=5):
+    if cached and realm_id and expires_at:
+        if datetime.fromisoformat(expires_at) - now > SKEW:
             return {"access_token": cached, "realm_id": realm_id}
 
-    # 2. Refresh. QBO rotates the refresh token — the new one MUST be saved.
-    #    (Block replicated from the proven f/qbo/sync_customer_to_qbo.)
-    response = requests.post(
-        "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
-        headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
-        data={"grant_type": "refresh_token", "refresh_token": resource["refresh_token"]},
-        auth=(resource["client_id"], resource["client_secret"]),
-    )
-    if not response.ok:
-        raise Exception(f"Token refresh failed: {response.status_code} - {response.text}")
+    # Miss. The one door refreshes AND saves the rotated refresh token.
+    result = wmill.run_script_sync(ONE_DOOR, args={})
+    access_token = result["access_token"]
+    realm_id = result["realm_id"]
+    expires_in = int(result.get("expires_in") or 3600)
 
-    tokens = response.json()
-    access_token = tokens["access_token"]
-    resource["refresh_token"] = tokens["refresh_token"]
-    wmill.set_resource(RESOURCE_PATH, resource)
-
-    # 3. Cache the new access token until just before its expiry.
-    expires_in = int(tokens.get("expires_in", 3600))
     wmill.set_state({
         "access_token": access_token,
+        "realm_id": realm_id,
         "expires_at": (now + timedelta(seconds=expires_in)).isoformat(),
     })
 

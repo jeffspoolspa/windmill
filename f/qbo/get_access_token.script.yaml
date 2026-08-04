@@ -1,13 +1,12 @@
-summary: Return a current QBO access token + realm_id (cached;
-  refresh-on-expiry) for the card vault
-description: Token provider for the isolated card-vault Supabase project's
-  capture function. Returns {access_token, realm_id}. Caches the access token in
-  script state and only performs an OAuth refresh (which rotates the shared
-  u/carter/quickbooks_api refresh token) when the cached token is within 5 min
-  of expiry — minimizing refresh-token rotation. Refresh+save block replicated
-  verbatim from f/qbo/sync_customer_to_qbo. SET CONCURRENCY LIMIT = 1 on this
-  script (Windmill UI) to serialize refreshes.
+summary: QBO access token for the card vault — CACHE in front of the ADR 012 one
+  door (no longer refreshes)
+description: Serves a cached QBO access token to the card vault capture
+  function. On a cache miss it DELEGATES the refresh to
+  f/qbo/api/get_access_token (ADR 012, concurrent_limit=1), which performs the
+  rotation and saves the rotated refresh token. Previously this script refreshed
+  u/carter/quickbooks_api itself, making it a second independent refresher of a
+  rotating token — the failure mode that burns the token and kills every QBO
+  integration.
 lock: '!inline f/qbo/get_access_token.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
