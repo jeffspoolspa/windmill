@@ -35,7 +35,10 @@ def main():
             return {"access_token": cached, "realm_id": realm_id}
 
     # Miss. The one door refreshes AND saves the rotated refresh token.
-    result = wmill.run_script_sync(ONE_DOOR, args={})
+    # run_script_by_path, NOT run_script_sync: the latter takes a script HASH as
+    # its first argument, so passing a path builds a /jobs/run/h/<path> URL and
+    # 404s. (Same trap is live in f/comms/quote_followup_cadence.)
+    result = wmill.run_script_by_path(ONE_DOOR, args={})
     access_token = result["access_token"]
     realm_id = result["realm_id"]
     expires_in = int(result.get("expires_in") or 3600)
