@@ -1,0 +1,8 @@
+summary: 'Wake relay: POST the app invoice-machine drain route'
+description: Statement-level wake target for billing.invoice_queue. Drains until
+  empty via the app; concurrency-limited to one running drain.
+lock: '!inline f/billing/wake_invoice_drainer.script.lock'
+concurrency_time_window_s: 300
+concurrent_limit: 1
+kind: script
+schema: null
