@@ -119,7 +119,7 @@ locks:
   f/ION/_lib/relink_visits: f78f44452699e69a0be9f2c26729b355e96dc36dc93bf39b8994e791a968e09e
   f/ION/_lib/resolve_visit_targets: c6b1baf8f644f765e8bbd3f447fb7cd21ce908851a4c0a342bf946c567553e65
   f/ION/_lib/schedule_target_custids: 75348fb36a03b552defb359bfa880df1cccb08faff7a5a81d76c66c36dd0ecc3
-  f/ION/_lib/session: 9fecd04fe468aa663388a15af0bd17f410a2ac69c99b9edb83a99f5481aad4fc
+  f/ION/_lib/session: 2169f6e7ebd7f724023024835935978f45b2f24fb108c19a192add00064d16c0
   f/ION/_lib/split_collapsed_tasks: f7a5e1c98142747dd02493264751c5d92ae4467bc79c6b06ef72790027503258
   f/ION/_lib/taskless_visits: 084e068ae4af550d7207ca44e7f843608db92bbff1f5cd1f1fc57a666b225dfd
   f/ION/_lib/upsert: ccba53a89b19bee932d265bc0217aa3b5546eda0d89008c1e51910c54b57b3bf
@@ -189,7 +189,7 @@ locks:
   f/ION/route_sequence_probe: a7321b6504e44ed710819578f6392e4336a333cfb6111f9c316664ad3d2be184
   f/ION/route_sequence_push: a049273621605bff8f7f14cf27046bf90194b5c24567b5fac4b2582f22190e6e
   f/ION/schedule_slots__flow+__flow_hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
-  f/ION/session_keepalive: 1cd189e7bef9aac0ab3d0798d5bb6b4a2b58fbf499ca36bd3a7afdb212eeed0a
+  f/ION/session_keepalive: e3e204e5591b1d34c99aec67e9cdc4f7999d93b46962c67a7c5dfe11e5fc3887
   f/ION/test_orphan_task_detail: 94eeeafb67711f464ebcbb01c15aaba115fba72be666522b80439485a1ce9c86
   f/ION/transactions_report: 11a87b8e9dc5b184903cdff2a569e57427acea35739cfd3ac1efcd86d4b57469
   f/ION/visits__flow+__flow_hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a

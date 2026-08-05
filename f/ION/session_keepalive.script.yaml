@@ -4,13 +4,5 @@ description: GETs an ION page with the cached cookies to reset ION's inactivity
   chromium. Runs on the DEFAULT worker (pure HTTP). Pairs with an external login
   minter.
 lock: '!inline f/ION/session_keepalive.script.lock'
-has_on_behalf_of: false
 kind: script
-schema:
-  $schema: https://json-schema.org/draft/2020-12/schema
-  type: object
-  properties:
-    extend_minutes:
-      type: integer
-      default: 120
-  required: []
+schema: null

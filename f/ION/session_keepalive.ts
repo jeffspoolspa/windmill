@@ -90,7 +90,10 @@ export async function main(extend_minutes = 120) {
       redirect: "manual",
     })
     const body = await resp.text()
-    const alive = resp.status === 200 && body.length > 20000 && !/txtPassword/i.test(body.slice(0, 4000))
+    // Same test as looksLikeLoginPage in f/ION/_lib/session -- inlined on purpose:
+    // this script runs on the DEFAULT worker and importing that lib would drag in
+    // playwright. Keep the two in sync if ION renames the login field again.
+    const alive = resp.status === 200 && body.length > 20000 && !/IPCLogin/i.test(body.slice(0, 4000))
 
     if (alive) {
       s.expiresAt = Date.now() + extend_minutes * 60 * 1000

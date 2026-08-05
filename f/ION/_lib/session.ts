@@ -6,8 +6,17 @@ import { chromium } from "playwright@1.40.0"
 export type IonResource = {
   username: string
   password: string
-  loginUrl: string
+  /**
+   * @deprecated Ignored since 2026-08. ION retired the Fluidra portal hop, so
+   * login is a single ColdFusion form on ionpoolcare.com itself. Callers still
+   * pass `$var:f/ION/LOGIN_URL`, which still points at the dead Fluidra page —
+   * ION_LOGIN_URL below wins so no caller has to be re-deployed in lockstep.
+   */
+  loginUrl?: string
 }
+
+// The whole login: one form, one POST. No portal, no nav click, no redirect.
+const ION_LOGIN_URL = "https://ionpoolcare.com/security/login.cfm"
 
 export interface IonCookie {
   name: string
@@ -74,22 +83,25 @@ export async function loginToIon(ion: IonResource): Promise<IonSession> {
       const m = req.url().match(/_cf_clientid=([A-F0-9]{32})/i)
       if (m) cfClientId = m[1]
     })
-    await page.goto(ion.loginUrl, { timeout: 30000 }) // default goto has no cap -> bound it
-    await page.locator("#txtUserName").fill(ion.username)
-    await page.locator("#txtPassword").fill(ion.password)
-    await page.locator('button:has-text("Log In")').click()
-    await page.waitForLoadState("networkidle", { timeout: 30000 })
-    await page
-      .locator('button[data-bs-target="#navbarToggleContent"]')
-      .click({ timeout: 5000 })
-    await page.waitForTimeout(1000)
-    await page.locator("text=ION POOL CARE").click({ timeout: 5000 })
+    await page.goto(ION_LOGIN_URL, { timeout: 30000 }) // default goto has no cap -> bound it
+    await page.locator("#IPCLogin").fill(ion.username)
+    await page.locator("#IPCPassword").fill(ion.password)
+    await page.locator("#Submitted").click() // <input type=submit>, not a <button>
     await page.waitForLoadState("networkidle", { timeout: 45000 })
+    // main.cfm is what fires the ux_*.cfm AJAX carrying _cf_clientid, so go there
+    // explicitly rather than trusting wherever the login POST happens to land.
     const ionOrigin = new URL(page.url()).origin
+    await page.goto(`${ionOrigin}/main.cfm`, { timeout: 30000 })
+    await page.waitForLoadState("networkidle", { timeout: 45000 })
+    // Single-stage login means a bad password ALSO leaves us on ionpoolcare.com,
+    // so the origin alone no longer proves anything: ION bounces an unauthed
+    // /main.cfm back to the login form. Assert the form is gone, or we'd cache
+    // an anonymous session and every downstream fetch would 302 to login.
     if (!ionOrigin.includes("ionpoolcare.com")) {
-      throw new Error(
-        `Stage 2 redirect did not land on ionpoolcare.com: ${page.url()}`,
-      )
+      throw new Error(`ION login did not land on ionpoolcare.com: ${page.url()}`)
+    }
+    if ((await page.locator("#IPCLogin").count()) > 0) {
+      throw new Error(`ION login rejected — still on the login form: ${page.url()}`)
     }
     const rawCookies = await context.cookies()
     const cookies: IonCookie[] = rawCookies.map((c: any) => ({
@@ -140,7 +152,7 @@ export async function ionFetch(
   const res = await fetch(url, { ...init, headers, redirect: "manual" })
   if (res.status >= 300 && res.status < 400) {
     const loc = res.headers.get("location") ?? ""
-    if (loc.includes("fluidra") || loc.toLowerCase().includes("login")) {
+    if (loc.toLowerCase().includes("login")) { // ION bounces unauthed -> /security/login.cfm
       throw new IonSessionExpiredError(url, loc)
     }
   }
@@ -173,12 +185,21 @@ export class IonSessionExpiredError extends Error {
   }
 }
 
+// The one place that knows what ION's login page looks like. #IPCLogin is the
+// username field on /security/login.cfm and appears nowhere else, so it is the
+// whole test -- do NOT also sniff for "password", which authenticated pages
+// carry in their change-password menu and which false-positives every session
+// as dead. (Pre-2026-08 this looked for txtUserName, the retired Fluidra form.)
+export function looksLikeLoginPage(body: string): boolean {
+  return /IPCLogin/i.test(body)
+}
+
 export function isSessionFresh(session: IonSession, marginMs = 60000): boolean {
   return Date.now() < session.expiresAt - marginMs
 }
 
 export async function main(ion: IonResource) {
-  console.log("Logging in via two-stage Fluidra -> ION redirect...")
+  console.log("Logging in via the ION login form...")
   const session = await loginToIon(ion)
   console.log(
     `  captured ${session.cookies.length} cookie(s); cfClientId: ${
@@ -195,10 +216,8 @@ export async function main(ion: IonResource) {
   const res = await ionFetch(session, smokeUrl)
   const body = await res.text()
   const lower = body.toLowerCase()
-  const looksLikeLogin =
-    lower.includes("txtusername") || lower.includes("password")
   const looksAuthenticated =
-    !looksLikeLogin &&
+    !looksLikeLoginPage(body) &&
     (lower.includes("menuitem0") ||
       lower.includes("ion pool care") ||
       lower.includes("coldfusionnavigate"))
