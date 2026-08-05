@@ -270,6 +270,7 @@ locks:
   u/carter/get_transfers: bff88f4a8955f7044d5d86e9112d54fe046b3c7ccdb2516378b7a6b881e2919b
   u/carter/get_vendor_credits: bb3858bd504cbabc9b054ed305401f0d91c586f887f17c135a78b6c8a4c2d42b
   u/carter/gusto_timeoff_probe: 30809482cbf1497e1d7a6c426cc3960773e9f78dad416a25a9d9df7824b07ddb
+  u/carter/ion_lease_probe: c62cca489dff6f25da1bc7420a84a4efd4b1e4e3910bc05cc8675c8ea123a520
   u/carter/ion_task_recon: 21e47147d7406fd6df1d502905d0ac87e7bf2a6239a5dd34e92e1541c2b18f27
   u/carter/ion_task_recon_2: 65c96a6ff6256ae0d54f140ce29d5b91a3b09adfda39f83d1727520ad69c71af
   u/carter/ion_task_recon_3: 11b0eb3d05f52685a7459357837fe9e424737760dbf86ae8488d5d72cc7db021

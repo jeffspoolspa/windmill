@@ -1,0 +1,5 @@
+summary: 'probe: ION lease from a Windmill worker'
+description: ''
+lock: '!inline u/carter/ion_lease_probe.script.lock'
+kind: script
+schema: null
