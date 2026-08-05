@@ -38,23 +38,19 @@ BACKSTOP_TTL_INTERVAL = "1 day"
 
 
 def refresh_qbo_token():
-    """Get a current QBO access token. Does NOT refresh here.
-
-    This used to POST to Intuit's token endpoint directly, and every QBO script
-    carried its own copy of that. They fire on the same schedule boundaries —
-    115 pairs of refreshes began within ONE SECOND of each other over three days
-    (04:00, 20:00, 00:30 clusters), some 0.01s apart. QBO's refresh token
-    rotates, so simultaneous refreshes race for it. Nothing had broken only
-    because Intuit tolerates the previous token for a window, which is not
-    behaviour we control or should depend on.
-
-    f/qbo/get_access_token caches the access token and delegates any real
-    refresh to f/qbo/api/get_access_token (ADR 012, concurrent_limit=1), so a
-    rotation is both rare and serialized. Return shape is unchanged, so callers
-    need no edit.
-    """
-    tok = wmill.run_script_by_path("f/qbo/get_access_token", args={})
-    return tok["access_token"], tok["realm_id"]
+    resource = wmill.get_resource(QBO_RESOURCE)
+    resp = requests.post(
+        "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+        headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+        data={"grant_type": "refresh_token", "refresh_token": resource["refresh_token"]},
+        auth=(resource["client_id"], resource["client_secret"]), timeout=30,
+    )
+    if not resp.ok:
+        raise Exception(f"QBO token refresh failed: {resp.status_code} - {resp.text}")
+    tokens = resp.json()
+    resource["refresh_token"] = tokens["refresh_token"]
+    wmill.set_resource(QBO_RESOURCE, resource)
+    return tokens["access_token"]
 
 
 def get_db_conn():
