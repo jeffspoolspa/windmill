@@ -53,8 +53,13 @@ def refresh_qbo_token():
     rotation is both rare and serialized. Return shape is unchanged, so callers
     need no edit.
     """
-    tok = wmill.run_script_by_path("f/qbo/get_access_token", args={})
-    return tok["access_token"], tok["realm_id"]
+    # NOTE the arity: THIS script's caller does `access_token = refresh_qbo_token()`,
+    # so it must return the token ALONE. Returning (token, realm) here made the
+    # caller stringify a tuple into the Authorization header and QBO answered 401
+    # AuthenticationFailed — which looked exactly like an expired token and sent
+    # me chasing token lifetimes for an hour. Other scripts DO unpack two values;
+    # match whatever the original returned, per script.
+    return wmill.run_script_by_path("f/qbo/get_access_token", args={})["access_token"]
 
 
 def get_db_conn():

@@ -1,7 +1,6 @@
 summary: Refresh cached QBO payment methods (token via the ADR 012 one door)
-description: refresh_qbo_token delegates to f/qbo/get_access_token (10-minute
-  age-based cache in front of f/qbo/api/get_access_token, concurrent_limit=1)
-  instead of POSTing to Intuit itself.
+description: refresh_qbo_token delegates to f/qbo/get_access_token. Returns the
+  token ALONE — this caller does not unpack a tuple.
 lock: '!inline f/service_billing/pull_customer_payment_methods.script.lock'
 kind: script
 schema: null
