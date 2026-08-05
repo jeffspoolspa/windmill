@@ -1,0 +1,7 @@
+summary: Explainer letter HTML -> Letter PDF bytes (chromium pool)
+description: 'Renders the high-bill explainer to PDF for download and the QBO
+  attach path. Input: html (full document). Output: {pdf_b64, bytes}.'
+lock: '!inline f/billing/render_explainer_pdf.script.lock'
+kind: script
+schema: null
+tag: chromium
