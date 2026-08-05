@@ -1,0 +1,9 @@
+summary: Stamp "card on file — Visa ending 6057" on a QBO customer Notes field
+description: 'Non-destructive: removes only the line it owns (starts with [card
+  on file]) and re-appends a fresh one, preserving every other line the office
+  typed. SyncToken CAS with Stale Object retry. commit defaults FALSE so a bare
+  run is a dry run. Token from f/qbo/api/get_access_token (ADR 012 one door),
+  NOT the billing lib refresher.'
+lock: '!inline f/qbo/note_card_on_file.script.lock'
+kind: script
+schema: null
