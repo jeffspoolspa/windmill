@@ -1,0 +1,5 @@
+summary: 'TEMP read-only diagnostic: wrapper vs door token'
+description: ''
+lock: '!inline f/qbo/_diag_token_probe.script.lock'
+kind: script
+schema: null
