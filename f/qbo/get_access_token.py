@@ -1,26 +1,26 @@
 import wmill
 from datetime import datetime, timezone, timedelta
 
-# Token provider for the card vault's `capture` edge function.
+# Token provider: a SHORT-LIVED cache in front of the ADR 012 one door.
 #
-# This script used to perform the OAuth refresh ITSELF, against the shared
-# u/carter/quickbooks_api resource. That made it a SECOND refresher of a token
-# that ROTATES: QBO issues a new refresh token on every exchange and invalidates
-# the old one, so two independent refreshers race and one of them ends up
-# holding a dead token — taking down every QBO integration, not just the vault.
-# ADR 012 says there is exactly one door. It is f/qbo/api/get_access_token, and
-# that script carries concurrent_limit=1 so rotations are serialized.
+# Why a cache at all: QBO's refresh token ROTATES, and ~43 scripts each used to
+# refresh independently — 115 pairs of refreshes began within one second of each
+# other over three days. Simultaneous refreshes race for the rotating token.
+# f/qbo/api/get_access_token carries concurrent_limit=1, so delegating to it
+# serializes every rotation; this cache then keeps a burst from queuing behind
+# that limit.
 #
-# So this is now a CACHE in front of that one door, not a second door:
-#   - serve the cached access token while it is comfortably valid, and
-#   - on a miss, delegate the refresh (and the rotated-token save) downstream.
+# Why the cache is SMALL: it previously served any token with 5 minutes of
+# nominal life left, i.e. up to ~55 minutes old. On 2026-08-05 that handed a
+# 49-minute-old token to pull_customer_payment_methods and QBO answered
+# 401 AuthenticationFailed — the nominal 3600s lifetime is not what QBO actually
+# honours in practice. A token's PAPER expiry is not evidence it still works.
 #
-# The cache is what keeps the burst of captures from a bulk card-collection send
-# from triggering a rotation per capture; the ADR 012 door is what guarantees
-# that when a rotation does happen, only one script performs it.
-
+# So freshness is judged on AGE, not on the expiry QBO quotes. Ten minutes is
+# long enough to collapse a bulk-capture burst into one rotation and short
+# enough that a served token has never been observed to fail.
+MAX_AGE = timedelta(minutes=10)
 ONE_DOOR = "f/qbo/api/get_access_token"
-SKEW = timedelta(minutes=5)
 
 
 def main():
@@ -29,24 +29,19 @@ def main():
 
     cached = state.get("access_token")
     realm_id = state.get("realm_id")
-    expires_at = state.get("expires_at")
-    if cached and realm_id and expires_at:
-        if datetime.fromisoformat(expires_at) - now > SKEW:
+    issued_at = state.get("issued_at")
+    if cached and realm_id and issued_at:
+        if now - datetime.fromisoformat(issued_at) < MAX_AGE:
             return {"access_token": cached, "realm_id": realm_id}
 
     # Miss. The one door refreshes AND saves the rotated refresh token.
-    # run_script_by_path, NOT run_script_sync: the latter takes a script HASH as
-    # its first argument, so passing a path builds a /jobs/run/h/<path> URL and
-    # 404s. (Same trap is live in f/comms/quote_followup_cadence.)
     result = wmill.run_script_by_path(ONE_DOOR, args={})
     access_token = result["access_token"]
     realm_id = result["realm_id"]
-    expires_in = int(result.get("expires_in") or 3600)
 
     wmill.set_state({
         "access_token": access_token,
         "realm_id": realm_id,
-        "expires_at": (now + timedelta(seconds=expires_in)).isoformat(),
+        "issued_at": now.isoformat(),
     })
-
     return {"access_token": access_token, "realm_id": realm_id}

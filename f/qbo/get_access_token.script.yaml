@@ -1,12 +1,9 @@
-summary: QBO access token for the card vault — CACHE in front of the ADR 012 one
-  door (no longer refreshes)
-description: Serves a cached QBO access token to the card vault capture
-  function. On a cache miss it DELEGATES the refresh to
-  f/qbo/api/get_access_token (ADR 012, concurrent_limit=1), which performs the
-  rotation and saves the rotated refresh token. Previously this script refreshed
-  u/carter/quickbooks_api itself, making it a second independent refresher of a
-  rotating token — the failure mode that burns the token and kills every QBO
-  integration.
+summary: QBO access token — 10-minute cache in front of the ADR 012 one door
+description: Freshness judged on AGE, not on QBO's quoted expiry. A
+  49-minute-old token with 10 minutes of nominal life left returned 401
+  AuthenticationFailed on 2026-08-05; the paper expiry is not evidence the token
+  still works. Delegates every real refresh to f/qbo/api/get_access_token
+  (concurrent_limit=1).
 lock: '!inline f/qbo/get_access_token.script.lock'
 kind: script
 schema: null
