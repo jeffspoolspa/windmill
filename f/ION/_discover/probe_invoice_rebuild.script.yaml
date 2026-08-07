@@ -1,7 +1,0 @@
-summary: 'DISCOVERY read-only: find the rebuild-invoices endpoint on the
-  receivables surfaces'
-description: ''
-lock: '!inline f/ION/_discover/probe_invoice_rebuild.script.lock'
-kind: script
-schema: null
-tag: chromium
