@@ -34,6 +34,9 @@ function sweep(html: string) {
       .filter((l) => /\.cfm/.test(l) && /(post|submit|ajax|href|action|location)/i.test(l))
       .map((l) => l.trim().slice(0, 260)).slice(0, 25),
     cfms: [...new Set([...html.matchAll(/([A-Za-z0-9_\/.-]+\.cfm)/g)].map((m) => m[1]))].slice(0, 40),
+    anchors: [...html.matchAll(/<a\b[^>]{0,300}>[^<]{0,80}/gi)].map((m) => m[0].replace(/\s+/g, " ").slice(0, 340)).slice(0, 30),
+    buttons: [...html.matchAll(/<(?:input|button)\b[^>]{0,300}/gi)].map((m) => m[0].replace(/\s+/g, " ").slice(0, 300)).slice(0, 30),
+    confirm_ctx: [...html.matchAll(/confirm\(/g)].map((m) => html.slice(Math.max(0, m.index! - 80), m.index! + 400).replace(/\s+/g, " ")).slice(0, 8),
   }
 }
 
