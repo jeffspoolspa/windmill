@@ -98,6 +98,7 @@ locks:
   f/ION/_discover/probe_invoice_rebuild: 32335d552a5c72130bf625abc5b5163e288a1c61380f6d52de71be2ce6a673b2
   f/ION/_discover/probe_log_images_e2e: a4acddf0c3654e650f23524882bfa0ad5dbb1aabda42b0b86a47757fe319133b
   f/ION/_discover/probe_log_photos: 6ae77dae2c564685b9697e62a944156713581acb6f8031a5d0d451a0052d2beb
+  f/ION/_discover/probe_menu_rebuild: 425c9c29d5cf66724f42a3172eef9f7f31b75a7ee461c4bf7cd9005e4c050abf
   f/ION/_discover/probe_recurring_tasks: 5b88ad0bcc8ead436d0e05eb5116ca7dcbfbc89c4ba20f032d2601dd0d8f6839
   f/ION/_discover/probe_startson: dcf65d95368e014cff96f8962d0d4946c58ecde57d0bbd8d74877ecb7877ba6d
   f/ION/_discover/pw_install_probe: 51ad0677b8cb01bf5abb904faecb2167ca303c930ca7636d027e8d0fe839c6b8

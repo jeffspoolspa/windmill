@@ -1,0 +1,6 @@
+summary: read-only menu sweep for rebuild wiring
+description: ''
+lock: '!inline f/ION/_discover/probe_menu_rebuild.script.lock'
+kind: script
+schema: null
+tag: chromium
