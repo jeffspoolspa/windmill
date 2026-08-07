@@ -51,7 +51,7 @@ function tsLocal(isoDate: string | null, t: string | null): string | null {
   return `${isoDate} ${pad(h)}:${pad(+m[2])}:00`
 }
 
-export async function main(start_date: string, end_date: string, dry_run: boolean = true, sess: any = null, sb: any = null) {
+export async function main(start_date: string, end_date: string, dry_run: boolean = true, sess: any = null, sb: any = null, only_log_id: string | null = null) {
   const res: any = (!dry_run) ? (sb ?? await wmill.getResource("u/carter/supabase")) : null
 
   const days = eachDay(start_date, end_date)
@@ -62,11 +62,16 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
     const enr: any = await listDayLogs(day, 0, sess)
     const dayLogs = (enr.logs ?? [])
     logsByDay[day] = dayLogs.map((l: any) => String(l.log_id))
-    const det: any = await getLogDetail(dayLogs.map((l: any) => ({ log_id: l.log_id, calendar_id: l.calendar_id })), sess)
+    // only_log_id: targeted single-visit refresh — detail-fetch and upsert
+    // ONE log. logsByDay above stays the FULL day list on purpose: the
+    // retraction pass compares presence against it, and a filtered list
+    // would mark every other visit that day as deleted.
+    const wanted = only_log_id ? dayLogs.filter((l: any) => String(l.log_id) === String(only_log_id)) : dayLogs
+    const det: any = await getLogDetail(wanted.map((l: any) => ({ log_id: l.log_id, calendar_id: l.calendar_id })), sess)
     const byLog: Record<string, any> = {}
     for (const d of det.details) byLog[d.log_id] = d
     let built = 0, noEvent = 0, notPerformed = 0
-    for (const l of dayLogs) {
+    for (const l of wanted) {
       const d = byLog[l.log_id] || {}
       if (!d.event_id) { noEvent++; continue }
       if (!d.time_in) { notPerformed++; continue }
