@@ -1,5 +1,0 @@
-summary: 'TEMP: journal dispatch probe (delete me)'
-description: ''
-lock: '!inline f/billing/_probe_journal_dispatch.script.lock'
-kind: script
-schema: null
