@@ -1,7 +1,6 @@
-summary: charge_and_record + apply_credits with ADR 010 emissions
-description: Emits charge outcomes (captured/declined/uncertain),
-  payment_recorded + payment_applied echoes, receipt_sent. Derived conditions
-  (orphan, succeeded) emit nothing.
+summary: Shared charge/credit primitives (ADR 009/010) — journal-first dispatch
+description: Prior-outcome dispatch reads billing.charges (the journal); WAL is
+  working state.
 lock: '!inline f/billing/_lib/payments.script.lock'
 kind: script
-schema: {}
+schema: null
