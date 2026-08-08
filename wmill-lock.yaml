@@ -146,6 +146,7 @@ locks:
   f/ION/_run/who_are_orphan_customers: 03e9da33f22b9e952d2a3c89d9617ffc330dfec6e429765cacb92d71f3a75b74
   f/ION/api/backfill_invoice_types: 4cf631d06fb66e2076ac5a40eb797a096e4e29d6d9ad3ed9afc100efe1090120
   f/ION/api/create_task: f41cbc7ba3c856d0455ff058aae5bc19352feae2f0ad706498b0f68d01a9d8cb
+  f/ION/api/event_summary: a35336763b04dae2ed19eabd4c25150a24fbb8952037d29a3dd39055c9115b33
   f/ION/api/get_customer_tasks: 5f42381db02071b3753b534c2dac5464ba14be26de453219205dc374762e0fc1
   f/ION/api/get_log_detail: 91918327188b47ddfe253ae34fedbb7cf4a92d8a623fcceb370a9de3359a4c56
   f/ION/api/get_recurring_tasks: 5c802795062293a2b8f1fcb9c683b43e0efb99e51c49da6e2eb2aafe967e7b16

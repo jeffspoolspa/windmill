@@ -1,0 +1,6 @@
+summary: 'ION API: Technician Event Summary over a window — the ScheduleSweep
+  transport (tier-0 detection)'
+description: ''
+lock: '!inline f/ION/api/event_summary.script.lock'
+kind: script
+schema: null
