@@ -1,7 +1,5 @@
-summary: 'Schedule-sync step 1: ION customer ids to pull taskList for
-  (dayless-only default, or all active)'
+summary: target custids for schedule sync (dayless OR active-task-zero-active-slots)
 description: ''
 lock: '!inline f/ION/_lib/schedule_target_custids.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
