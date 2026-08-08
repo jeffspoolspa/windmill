@@ -12,18 +12,17 @@ export async function main() {
     password: await wmill.getVariable("f/ION/PASSWORD"),
   }
   const s = await getOrRefreshSession(ion)
-  const html = await ionFetchText(s, `${s.ionOrigin}/reports/Schedule.cfm`)
-  // the Update button's real mechanism lives in the page JS — capture every
-  // url-ish string and every function wired to buttons/selects
-  const urls = [...html.matchAll(/["']([^"']*\.cfm[^"']*)["']/g)].map((m) => m[1])
-  const onclicks = [...html.matchAll(/onclick="([^"]{0,160})"/gi)].map((m) => m[1])
-  const cfajax = [...html.matchAll(/ColdFusion\.\w+\([^)]{0,200}\)/g)].map((m) => m[0])
-  const scripts = [...html.matchAll(/<script[^>]*>([\s\S]{0,1200}?)<\/script>/gi)]
-    .map((m) => m[1].trim()).filter((t) => t && /rptStart|EventSummary|navigate|submit/i.test(t))
+  const o = s.ionOrigin
+  const url = `${o}/reports/serviceEvents.cfm?` + new URLSearchParams({
+    office: "", tech: "", serviceType: "", Start: "2026-08-08", end: "2026-09-05", set: "1",
+  }).toString()
+  const body = await ionFetchText(s, url)
+  const dates = [...new Set([...body.matchAll(/\d{2}\/\d{2}\/\d{4}/g)].map((m) => m[0]))].sort()
   return {
-    urls: [...new Set(urls)].slice(0, 25),
-    onclicks: onclicks.slice(0, 10),
-    cfajax: cfajax.slice(0, 10),
-    scripts: scripts.slice(0, 4),
+    length: body.length,
+    distinctDates: dates.length,
+    firstDate: dates[0] ?? null, lastDate: dates[dates.length - 1] ?? null,
+    head: body.slice(0, 250).replace(/\s+/g, " "),
+    hasCfClientId: Boolean((s as any).cfClientId),
   }
 }

@@ -1,4 +1,4 @@
-summary: 'TEMP: picker submit sniff v3 (delete me)'
+summary: 'TEMP: serviceEvents direct probe v4 (delete me)'
 description: ''
 lock: '!inline f/ION/_discover/probe_event_summary.script.lock'
 kind: script
