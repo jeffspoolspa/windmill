@@ -152,6 +152,7 @@ locks:
   f/ION/api/get_recurring_tasks: 5c802795062293a2b8f1fcb9c683b43e0efb99e51c49da6e2eb2aafe967e7b16
   f/ION/api/get_session: d92c7c46df7de4acadc407d53842ca15a32208d40757a13c3e458c22c2fc9170
   f/ION/api/get_task_detail: f802c02a0c54cd975c3942f6df9c86826ed29b3eaa41fa53050b42baa1879ba1
+  f/ION/api/get_task_forms_batch: f0bde765db6a494c66c87348b590ee6da3778df42aeb7c8e5d97aec37cec2323
   f/ION/api/list_customer_tasks: e9fa842a58e2a71c12b1d03322f14fda4b1c9fa6920495fa9c718bc399f242d1
   f/ION/api/list_day_logs: 3651551a74996e6d3f9788b9fc0d0298d449657b6e5d738bba57fb167d212e49
   f/ION/api/list_recurring_tasks: f126db187bfa092b795d74b9bfa2bc5517ad67af77b5d83771751ea225dbee72
