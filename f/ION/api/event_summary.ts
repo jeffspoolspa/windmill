@@ -18,7 +18,7 @@
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
-import { getOrRefreshSession, ionFetchText } from "/f/ION/_lib/session_cache"
+import { getOrRefreshSession, ionFetch, ionFetchText } from "/f/ION/_lib/session_cache"
 import { parse } from "node-html-parser@6.1.13"
 
 export async function main(start: string = "", end: string = "") {
@@ -32,10 +32,18 @@ export async function main(start: string = "", end: string = "") {
   const rptStart = start || new Date().toISOString().slice(0, 10)
   const rptEnd = end || new Date(Date.now() + 28 * 86_400_000).toISOString().slice(0, 10)
 
-  // prime the report window (server-side state), then pull the extract
-  await ionFetchText(s, `${o}/reports/Schedule.cfm?` + new URLSearchParams({
+  // prime the report window (server-side state) — the picker FORM POSTS to
+  // itself (action="/reports/Schedule.cfm"); a GET with query params does
+  // not take (probed: extract stayed on the default today-window)
+  const primeBody = new URLSearchParams({
     rptOffice: "", rptTech: "", rptServiceType: "", rptStart, rptEnd, set: "1",
-  }).toString())
+  }).toString()
+  const primed = await ionFetch(s, `${o}/reports/Schedule.cfm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: primeBody,
+  })
+  if (!primed.ok) throw new Error(`Schedule.cfm prime -> HTTP ${primed.status}`)
   const body = await ionFetchText(s, `${o}/reports/_xls/EventSummary.cfm`)
 
   const root = parse(body)
