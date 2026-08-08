@@ -131,7 +131,7 @@ locks:
   f/ION/_lib/upsert: ccba53a89b19bee932d265bc0217aa3b5546eda0d89008c1e51910c54b57b3bf
   f/ION/_lib/upsert_nonactive_tasks: f4d8389159ecf913c9cb949b2fa08d7d458a4c01291000c2b1279163b7460593
   f/ION/_lib/upsert_schedules: 4d7a3b728b63f05c3a7232144d400d6ac24999eab568059d5d5f3f215954cb6c
-  f/ION/_lib/upsert_tasks: 842d85236c8c439548c2ee329dbbd3e29177f7610789dda79902fec0d43a0ce1
+  f/ION/_lib/upsert_tasks: ea70d812e80b439052c744211750479933d4a9189a9f88d74ae099a9f399157e
   f/ION/_run/adhoc: 8255237899bc9bb05fdc27ec515ecf37517aa055c93655daae5df5fc1149a72b
   f/ION/_run/backfill_outage_gap: 1c46fd071a507fb2593d34e6c1f8f1c15ecc6db3b0d7a22a1ef07503bedb623e
   f/ION/_run/backfill_visits_year: 0ef6bdae97cdc570565d537557691b490baffb06e9e6b82e29e75e2c1d4cca25

@@ -371,10 +371,18 @@ def sync_recurring_tasks(tasks, supabase_connection, dry_run=True, source="ion")
                     # Slots for this ion_task_id are ROUTING ONLY (day/tech/frequency +
                     # active/ends). Financial terms live on the task. frequency set only
                     # when currently NULL (don't clobber biweekly_a/_b).
+                    #
+                    # active: this writer knows the TASK is alive, not WHICH DAYS are.
+                    # It may stand slots down (task expired) but must never set
+                    # active=true on a day-slot — that resurrects days ION dropped
+                    # and flip-wars against upsert_schedules' stand-down (found live
+                    # 2026-08-08: Deen/Defibaugh/Rodriguez/Granstaff each toggled
+                    # daily Jul 17-25, then stuck with a ghost second day). Day-level
+                    # activation belongs to upsert_schedules (taskList truth) alone.
                     cur.execute(
                         """UPDATE maintenance.task_schedules
                            SET frequency = COALESCE(frequency, %s),
-                               active=%s,
+                               active = CASE WHEN %s THEN active ELSE false END,
                                ends_on=%s,
                                external_source=%s,
                                updated_at=now()
