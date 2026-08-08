@@ -35,14 +35,13 @@ export async function main(start: string = "", end: string = "") {
   // prime the report window (server-side state) — the picker FORM POSTS to
   // itself (action="/reports/Schedule.cfm"); a GET with query params does
   // not take (probed: extract stayed on the default today-window)
-  const primeBody = new URLSearchParams({
+  // the CF-AJAX prime — the exact pattern serviceLogs.cfm answers to
+  const primeUrl = `${o}/reports/Schedule.cfm?` + new URLSearchParams({
     rptOffice: "", rptTech: "", rptServiceType: "", rptStart, rptEnd, set: "1",
+    _cf_containerId: "rptDetail", _cf_nodebug: "true", _cf_nocache: "true",
+    _cf_clientid: (s as any).cfClientId ?? "", _cf_rc: "1",
   }).toString()
-  const primed = await ionFetch(s, `${o}/reports/Schedule.cfm`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: primeBody,
-  })
+  const primed = await ionFetch(s, primeUrl)
   if (!primed.ok) throw new Error(`Schedule.cfm prime -> HTTP ${primed.status}`)
   const body = await ionFetchText(s, `${o}/reports/_xls/EventSummary.cfm`)
 
