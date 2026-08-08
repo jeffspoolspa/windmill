@@ -16,6 +16,16 @@ import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
 import { getTaskDetail } from "/f/ION/_lib/task_detail"
 
 export async function main(ionTaskId: string | number, ionCustId: string | number = "") {
+  // LEARNED 2026-08-08 (Deen, task 5764017): addTask.cfm returns HTTP 500
+  // when the customer context is not primed first — the form only renders
+  // from within a customer page. A bare EventID fetch is NOT a valid read;
+  // refusing here with the reason beats every future caller rediscovering
+  // a mystery 500. (get_customer_tasks resolves the ionCustId cheaply.)
+  if (!String(ionCustId).trim()) {
+    throw new Error(
+      "ionCustId is required: ION's addTask.cfm 500s without customer-context priming. " +
+      "Resolve it via f/ION/api/get_customer_tasks or the customers mirror.")
+  }
   const ion = {
     loginUrl: await wmill.getVariable("f/ION/LOGIN_URL"),
     username: await wmill.getVariable("f/ION/USERNAME"),
