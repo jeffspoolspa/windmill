@@ -2,17 +2,14 @@
 //node-html-parser@6.1.13
 //playwright@1.40.0
 
-// TEMP PROBE (delete after): does the Event Summary report tolerate a plain
-// session fetch (like CompletedLogDetail) or demand the browser dance (like
-// transactions)? Also: discover the reports index links + the extract's
-// column header row, so the ScheduleSweep parser is built against real
-// bytes, not guesses. Read-only.
+// TEMP PROBE v2: EventSummary extract answers plain fetch (25KB, 19 cols).
+// Capture: the real header row + a sample row + the Schedule.cfm picker's
+// form fields (window/office/tech params). Read-only.
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
-// session_cache RE-EXPORTS the fetch helpers (the documented prefix-collision
-// fix): one import module, warm session, chromium only if stale.
 import { getOrRefreshSession, ionFetchText } from "/f/ION/_lib/session_cache"
+import { parse } from "node-html-parser@6.1.13"
 
 export async function main() {
   const ion = {
@@ -24,39 +21,31 @@ export async function main() {
   const o = s.ionOrigin
   const out: Record<string, unknown> = {}
 
-  // 1. reports index: what report pages exist?
-  for (const idx of ["/reports/", "/reports/index.cfm", "/reports/reports.cfm"]) {
-    try {
-      const html = await ionFetchText(s, `${o}${idx}`)
-      const links = [...html.matchAll(/href="([^"]+\.cfm[^"]*)"[^>]*>([^<]{0,60})/gi)]
-        .map((m) => `${m[1]} :: ${m[2].trim()}`)
-        .filter((l) => /event|task|schedul|summar/i.test(l))
-      if (links.length) { out[`index ${idx}`] = links.slice(0, 20); break }
-      out[`index ${idx}`] = `no matching links (len ${html.length})`
-    } catch (e) { out[`index ${idx}`] = String(e).slice(0, 120) }
-  }
+  // picker: what does Schedule.cfm's form post?
+  try {
+    const html = await ionFetchText(s, `${o}/reports/Schedule.cfm`)
+    const root = parse(html)
+    out["picker_fields"] = root.querySelectorAll("input, select").slice(0, 30).map((el) => ({
+      tag: el.tagName, name: el.getAttribute("name"), type: el.getAttribute("type"),
+      value: (el.getAttribute("value") ?? "").slice(0, 30),
+    })).filter((f) => f.name)
+    out["picker_form_action"] = root.querySelectorAll("form").map((f) => f.getAttribute("action"))
+  } catch (e) { out["picker"] = String(e).slice(0, 150) }
 
-  // 2. candidate pickers + extracts, plain fetch
-  const start = new Date().toISOString().slice(0, 10)
-  const end = new Date(Date.now() + 28 * 86_400_000).toISOString().slice(0, 10)
-  const pickers = ["eventSummary.cfm", "eventsRpt.cfm", "eventRpt.cfm", "scheduleRpt.cfm", "taskRpt.cfm", "activeTasks.cfm"]
-  for (const p of pickers) {
-    try {
-      const url = `${o}/reports/${p}?` + new URLSearchParams({
-        office: "", tech: "", Start: start, end, set: "1",
-        _cf_containerId: "rptDetail", _cf_nodebug: "true", _cf_nocache: "true",
-        _cf_clientid: s.cfClientId ?? "", _cf_rc: "1",
-      }).toString()
-      const html = await ionFetchText(s, url)
-      out[`picker ${p}`] = `${html.length}b :: ${html.slice(0, 120).replace(/\s+/g, " ")}`
-    } catch (e) { out[`picker ${p}`] = String(e).slice(0, 80) }
-  }
-  const extracts = ["EventSummary.cfm", "EventDetail.cfm", "ScheduledEvents.cfm", "ActiveTasks.cfm", "TaskList.cfm"]
-  for (const x of extracts) {
-    try {
-      const body = await ionFetchText(s, `${o}/reports/_xls/${x}`)
-      out[`xls ${x}`] = `${body.length}b :: ${body.slice(0, 300).replace(/\s+/g, " ")}`
-    } catch (e) { out[`xls ${x}`] = String(e).slice(0, 80) }
+  // extract: header row + one data row + row count
+  const body = await ionFetchText(s, `${o}/reports/_xls/EventSummary.cfm`)
+  const root = parse(body)
+  const rows = root.querySelectorAll("tr")
+  out["row_count"] = rows.length
+  const texts = (tr: any) => tr.querySelectorAll("td, th").map((c: any) => c.text.trim().replace(/\s+/g, " "))
+  const headerIdx = rows.findIndex((r) => texts(r).some((t: string) => /customer|tech|date|day/i.test(t)) && texts(r).length > 5)
+  out["header_row_index"] = headerIdx
+  if (headerIdx >= 0) {
+    out["headers"] = texts(rows[headerIdx])
+    out["sample_row_1"] = headerIdx + 1 < rows.length ? texts(rows[headerIdx + 1]) : null
+    out["sample_row_2"] = headerIdx + 2 < rows.length ? texts(rows[headerIdx + 2]) : null
+  } else {
+    out["first_rows"] = rows.slice(0, 6).map(texts)
   }
   return out
 }
