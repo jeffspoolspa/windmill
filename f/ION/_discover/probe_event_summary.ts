@@ -10,10 +10,9 @@
 
 import "playwright@1.40.0"
 import * as wmill from "windmill-client"
-// ONE session module only — importing session AND session_cache in one file
-// trips the bun prefix-collision bundle failure (documented; do not "fix" by
-// re-adding the cache import here).
-import { loginToIon, ionFetchText } from "/f/ION/_lib/session"
+// session_cache RE-EXPORTS the fetch helpers (the documented prefix-collision
+// fix): one import module, warm session, chromium only if stale.
+import { getOrRefreshSession, ionFetchText } from "/f/ION/_lib/session_cache"
 
 export async function main() {
   const ion = {
@@ -21,7 +20,7 @@ export async function main() {
     username: await wmill.getVariable("f/ION/USERNAME"),
     password: await wmill.getVariable("f/ION/PASSWORD"),
   }
-  const s = await loginToIon(ion)
+  const s = await getOrRefreshSession(ion)
   const o = s.ionOrigin
   const out: Record<string, unknown> = {}
 
