@@ -1,0 +1,5 @@
+summary: 'read-only: find the EndsOn confirm mechanics in form JS'
+description: ''
+lock: '!inline f/ION/_discover/probe_endson_confirm.script.lock'
+kind: script
+schema: null
