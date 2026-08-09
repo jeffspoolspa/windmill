@@ -1,4 +1,4 @@
-summary: task form read/parse + updateTask + createTask (echo parses new_event_id)
+summary: browser-faithful edit POST (no XHR header, form-page referer, 3000-char echo)
 description: ''
 lock: '!inline f/ION/_lib/task_detail.script.lock'
 kind: script

@@ -166,18 +166,22 @@ export async function updateTask(
       changed, field_count: Object.keys(newFields).length, payload_preview: newFields,
     }
   }
-  const res = await ionFetch(session, `${session.ionOrigin}/tasks/addTask.cfm?EventID=${ionTaskId}&isIFrame=1`, {
+  // BROWSER-FAITHFUL save: a real form submit is a plain document POST —
+  // no X-Requested-With — and the Referer is the form page itself. The
+  // first live boundary test (2026-08-08) showed the XHR-flavored POST
+  // answered 200 with a page shell and saved NOTHING.
+  const formUrl = `${session.ionOrigin}/tasks/addTask.cfm?EventID=${ionTaskId}&isIFrame=1`
+  const res = await ionFetch(session, formUrl, {
     method: "POST",
     headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      "X-Requested-With": "XMLHttpRequest",
-      "Referer": `${session.ionOrigin}/main.cfm`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Referer": formUrl,
       "Origin": session.ionOrigin,
     },
     body: new URLSearchParams(newFields).toString(),
   })
   const txt = await res.text()
-  return { dry_run: false, committed: res.ok, status: res.status, ionTaskId: String(ionTaskId), changed, response_preview: txt.slice(0, 400) }
+  return { dry_run: false, committed: res.ok, status: res.status, ionTaskId: String(ionTaskId), changed, response_preview: txt.slice(0, 3000) }
 }
 
 /**
