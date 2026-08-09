@@ -1,0 +1,6 @@
+summary: browser-driven EndsOn save on the throwaway task; records the UI's
+  exact request
+description: ''
+lock: '!inline f/ION/_discover/probe_ui_save.script.lock'
+kind: script
+schema: null
