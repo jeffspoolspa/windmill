@@ -167,7 +167,7 @@ locks:
   f/ION/api/update_task: 0e0cad105eb3cacd0b3dda5b07ce70c4b8403b159b2c55711b2b64e1d2a624ea
   f/ION/api/upsert_task_schedule: 75c91ef9a35a667ba4065b15086fd025f833d02509ff43d852fe3040f3193529
   f/ION/api/write_task: 5b2de34214690fc0f36d9ccc57450083f7272bcce629897dc65ba41a1a0e62e0
-  f/ION/api/write_tasks_batch: baf92f94aa93846b2d6c008261ffeb3e3e710b03bc2a2d2203367526e38ce304
+  f/ION/api/write_tasks_batch: 34f644cb7a5485b53acb4354faf9fdd71b5a641101a0e4465e405d4cd039ddbb
   f/ION/apply_task_schedules: 31d85316423a2a591619469323a94046de1dd1c14e55dc1c4fd6a76e3a53af4f
   f/ION/capture_nonactive_tasks__flow+__flow_hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
   f/ION/close_dropped_tasks: d88abe42cb780e290cea7d54ac4d8a869c1cc1998b9630636df08f636e7d3513
