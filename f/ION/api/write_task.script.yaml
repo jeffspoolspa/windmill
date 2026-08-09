@@ -1,4 +1,4 @@
-summary: 'outbound task write surface: update|create, dry-run default'
+summary: 'outbound write surface (rebundled: echo parser)'
 description: ''
 lock: '!inline f/ION/api/write_task.script.lock'
 kind: script
