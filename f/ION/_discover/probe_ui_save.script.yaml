@@ -4,3 +4,4 @@ description: ''
 lock: '!inline f/ION/_discover/probe_ui_save.script.lock'
 kind: script
 schema: null
+tag: chromium
