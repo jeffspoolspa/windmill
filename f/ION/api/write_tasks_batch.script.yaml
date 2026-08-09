@@ -3,3 +3,4 @@ description: ''
 lock: '!inline f/ION/api/write_tasks_batch.script.lock'
 kind: script
 schema: null
+tag: chromium

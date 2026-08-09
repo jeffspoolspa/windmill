@@ -131,7 +131,7 @@ locks:
   f/ION/_lib/schedule_target_custids: 0688ea7c042eb816d3db2154ee8c003e997d6599df00fd2ed24f49495602b2c1
   f/ION/_lib/session: 2169f6e7ebd7f724023024835935978f45b2f24fb108c19a192add00064d16c0
   f/ION/_lib/split_collapsed_tasks: f7a5e1c98142747dd02493264751c5d92ae4467bc79c6b06ef72790027503258
-  f/ION/_lib/task_detail: 1886bcb67d831f3694791bb9dc5883ab27c9f06858db7405f5fcb0fb114ea536
+  f/ION/_lib/task_detail: b79d47ce0d0755185db73b1ca9a47cc164999aba9e8ded2d927925acc7267dc8
   f/ION/_lib/taskless_visits: 084e068ae4af550d7207ca44e7f843608db92bbff1f5cd1f1fc57a666b225dfd
   f/ION/_lib/upsert: ccba53a89b19bee932d265bc0217aa3b5546eda0d89008c1e51910c54b57b3bf
   f/ION/_lib/upsert_nonactive_tasks: f4d8389159ecf913c9cb949b2fa08d7d458a4c01291000c2b1279163b7460593
@@ -167,8 +167,8 @@ locks:
   f/ION/api/resolve_visit_tasks_via_log: 98586e3c58a1b2de9dcd8a9ac32675db3954713390064933509e98110098a62e
   f/ION/api/update_task: 0e0cad105eb3cacd0b3dda5b07ce70c4b8403b159b2c55711b2b64e1d2a624ea
   f/ION/api/upsert_task_schedule: 75c91ef9a35a667ba4065b15086fd025f833d02509ff43d852fe3040f3193529
-  f/ION/api/write_task: 54da1e7a312632b116f97236fa13650d574821b4f00d53f9cd2d509e0c36a51d
-  f/ION/api/write_tasks_batch: 34f644cb7a5485b53acb4354faf9fdd71b5a641101a0e4465e405d4cd039ddbb
+  f/ION/api/write_task: 321d8cee35fd9107b91db59d31139a71e8a9101d4b994d223c0a98baa359b29e
+  f/ION/api/write_tasks_batch: 81f9554bf50c2d6140392045be0645d5a7567587ded0b91c3d1084feffcd4873
   f/ION/apply_task_schedules: 31d85316423a2a591619469323a94046de1dd1c14e55dc1c4fd6a76e3a53af4f
   f/ION/capture_nonactive_tasks__flow+__flow_hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
   f/ION/close_dropped_tasks: d88abe42cb780e290cea7d54ac4d8a869c1cc1998b9630636df08f636e7d3513

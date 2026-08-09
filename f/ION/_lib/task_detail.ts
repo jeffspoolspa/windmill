@@ -25,6 +25,8 @@ import "playwright@1.40.0"
 import { ionFetch, ionFetchText, type IonSession } from "/f/ION/_lib/session"
 import { parse } from "node-html-parser@6.1.13"
 
+import { getCustomerTasks, type CustomerTask } from "/f/ION/_lib/customer_tasks"
+
 const DOW_FIELDS = ["day1", "day2", "day3", "day4", "day5", "day6", "day7"] // index 0=Sun .. 6=Sat
 const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 const norm = (s: string) => (s || "").replace(/\s+/g, " ").trim()
@@ -144,6 +146,18 @@ export async function getTaskDetail(session: IonSession, ionTaskId: string | num
  * returns the exact payload it WOULD POST -- without submitting. dry_run=false
  * actually POSTs (single write path; the next sync reflects the change back).
  */
+
+/** ION date equality at value grain (08/09/2026 == 8/9/2026). Empty/Perpetual pair up. */
+function sameIonDate(a: string, b: string): boolean {
+  const norm = (x: string) => {
+    const t = (x ?? "").trim()
+    if (!t || /perpetual/i.test(t)) return ""
+    const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+    return m ? `${Number(m[1])}/${Number(m[2])}/${m[3]}` : t
+  }
+  return norm(a) === norm(b)
+}
+
 export async function updateTask(
   session: IonSession,
   ionTaskId: string | number,
@@ -181,7 +195,36 @@ export async function updateTask(
     body: new URLSearchParams(newFields).toString(),
   })
   const txt = await res.text()
-  return { dry_run: false, committed: res.ok, status: res.status, ionTaskId: String(ionTaskId), changed, response_preview: txt.slice(0, 3000) }
+  // READ-BACK VERIFICATION (RULED 2026-08-09): the response is ION's
+  // CLAIM; its state is the confirmation. Re-read the form and compare
+  // every field we set. EndsOn is write-only on the form — verify it via
+  // the task list's Expires column (a task absent from the active list
+  // has ended, which also confirms).
+  let verified: { field: string; want: string; got: string | null; ok: boolean }[] = []
+  try {
+    const back = res.ok ? parseTaskForm(await fetchTaskFormHtml(session, ionTaskId, ionCustId)) : null
+    let list: CustomerTask[] | null = null
+    for (const [k, want] of Object.entries(changes)) {
+      if (k === "EndsOn") {
+        if (!list && ionCustId) list = await getCustomerTasks(session, ionCustId)
+        const row = (list ?? []).find((t) => String(t.ionTaskId) === String(ionTaskId))
+        const got = row ? (row.taskExpires ?? "Perpetual") : "(not on active list)"
+        verified.push({ field: k, want, got, ok: row ? sameIonDate(row.taskExpires ?? "", want) : true })
+      } else {
+        const got = back?.fields[k] ?? null
+        verified.push({ field: k, want, got, ok: got === want })
+      }
+    }
+  } catch (e) {
+    verified = Object.keys(changes).map((k) => ({
+      field: k, want: changes[k], got: `(verify read failed: ${String(e).slice(0, 80)})`, ok: false,
+    }))
+  }
+  const allOk = verified.every((v) => v.ok)
+  return {
+    dry_run: false, committed: res.ok && allOk, status: res.status,
+    ionTaskId: String(ionTaskId), changed, verified, response_preview: txt.slice(0, 3000),
+  }
 }
 
 /**
@@ -216,6 +259,12 @@ export async function createTask(
       field_count: Object.keys(newFields).length, payload_preview: newFields,
     }
   }
+  // THE LIST SANDWICH (RULED 2026-08-09): ION's create response is a
+  // boilerplate page that names the task NOWHERE (proven from the live
+  // ledger echo). The customer's task list before and after is ION's own
+  // state: the new id is the set difference — exact, or the op did not
+  // commit. Two births = a concurrent create, refused loudly.
+  const before = await getCustomerTasks(session, ionCustId)
   const res = await ionFetch(session, `${session.ionOrigin}/tasks/addTask.cfm?isIFrame=1`, {
     method: "POST",
     headers: {
@@ -227,15 +276,22 @@ export async function createTask(
     body: new URLSearchParams(newFields).toString(),
   })
   const txt = await res.text()
-  // THE ECHO: the response (or its redirect) names the new task id. Try
-  // the shapes we can anticipate; keep a generous preview either way so
-  // the first live run teaches us the real one (echo over prediction).
+  const after = await getCustomerTasks(session, ionCustId)
+  const had = new Set(before.map((t) => String(t.ionTaskId)))
+  const born = after.filter((t) => !had.has(String(t.ionTaskId)))
+  // forensics only: does the response/redirect ever name the id?
   const idMatch = txt.match(/EventID["'\s]*[=:]["'\s]*(\d{5,})/i)
     ?? txt.match(/addTask\.cfm\?EventID=(\d{5,})/i)
     ?? txt.match(/taskid["'\s]*[=:]["'\s]*(\d{5,})/i)
   return {
-    dry_run: false, committed: res.ok, status: res.status, ionCustId: String(ionCustId),
-    new_event_id: idMatch ? idMatch[1] : null,
+    dry_run: false,
+    committed: res.ok && born.length === 1,
+    status: res.status, ionCustId: String(ionCustId),
+    new_task_id: born.length === 1 ? String(born[0].ionTaskId) : null,
+    born_row: born.length === 1 ? born[0] : null,
+    ambiguous_births: born.length > 1 ? born.map((t) => String(t.ionTaskId)) : undefined,
+    response_named_id: idMatch ? idMatch[1] : null,
+    final_url: res.url ?? null,
     response_preview: txt.slice(0, 1200),
   }
 }
