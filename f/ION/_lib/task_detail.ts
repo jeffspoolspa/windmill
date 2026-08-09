@@ -152,8 +152,11 @@ function sameIonDate(a: string, b: string): boolean {
   const norm = (x: string) => {
     const t = (x ?? "").trim()
     if (!t || /perpetual/i.test(t)) return ""
-    const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
-    return m ? `${Number(m[1])}/${Number(m[2])}/${m[3]}` : t
+    const mdy = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+    if (mdy) return `${Number(mdy[1])}/${Number(mdy[2])}/${mdy[3]}`
+    const iso = t.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+    if (iso) return `${Number(iso[2])}/${Number(iso[3])}/${iso[1]}`
+    return t
   }
   return norm(a) === norm(b)
 }
@@ -212,7 +215,7 @@ export async function updateTask(
         verified.push({ field: k, want, got, ok: row ? sameIonDate(row.taskExpires ?? "", want) : true })
       } else {
         const got = back?.fields[k] ?? null
-        verified.push({ field: k, want, got, ok: got === want })
+        verified.push({ field: k, want, got, ok: got === want || sameIonDate(got ?? "", want) })
       }
     }
   } catch (e) {

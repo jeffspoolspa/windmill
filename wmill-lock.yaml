@@ -131,7 +131,7 @@ locks:
   f/ION/_lib/schedule_target_custids: 0688ea7c042eb816d3db2154ee8c003e997d6599df00fd2ed24f49495602b2c1
   f/ION/_lib/session: 2169f6e7ebd7f724023024835935978f45b2f24fb108c19a192add00064d16c0
   f/ION/_lib/split_collapsed_tasks: f7a5e1c98142747dd02493264751c5d92ae4467bc79c6b06ef72790027503258
-  f/ION/_lib/task_detail: b79d47ce0d0755185db73b1ca9a47cc164999aba9e8ded2d927925acc7267dc8
+  f/ION/_lib/task_detail: 6842e66252003aa60a32717a2f8326a55cda1f5ebd21a002338e244c307dc9d7
   f/ION/_lib/taskless_visits: 084e068ae4af550d7207ca44e7f843608db92bbff1f5cd1f1fc57a666b225dfd
   f/ION/_lib/upsert: ccba53a89b19bee932d265bc0217aa3b5546eda0d89008c1e51910c54b57b3bf
   f/ION/_lib/upsert_nonactive_tasks: f4d8389159ecf913c9cb949b2fa08d7d458a4c01291000c2b1279163b7460593
