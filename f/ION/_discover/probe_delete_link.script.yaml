@@ -1,0 +1,5 @@
+summary: 'read-only: the task list Delete link mechanics'
+description: ''
+lock: '!inline f/ION/_discover/probe_delete_link.script.lock'
+kind: script
+schema: null

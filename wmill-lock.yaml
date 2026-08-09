@@ -96,6 +96,7 @@ locks:
   f/ION/_discover/probe_customerlogdetails: 1470e43f09e2f714a19f58ba26ed461d7079a5344a00fa123030d1926ed994db
   f/ION/_discover/probe_customerlogs: a29500499390cb4607f61429f632a96e8a7852c03c1b208e5fe8ee90b8aa5294
   f/ION/_discover/probe_daygrid_photos: 5022be6defaf815537400bf87c21b1b1016d3cd143cf7a0fb9638dce2913baa2
+  f/ION/_discover/probe_delete_link: 753b003e9f3c2d74854c59081c6f3a351bcc217bafb51681733fbd6c5bea2622
   f/ION/_discover/probe_endson_confirm: b34443f3dc5d615fb584f59b510e96e7bd02eec8e70f747d4064955d5735c4cd
   f/ION/_discover/probe_event_summary: 8fa53c175f601e6abd239580039652b67fba56fa0b3f6d9bddf41792318b02a4
   f/ION/_discover/probe_file_mgmt: 48fbbaf3b121182193227cf2e7e1b0a6fdeece9dfb595313428ca6d5c005d18e
