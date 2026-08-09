@@ -1,0 +1,5 @@
+summary: 'outbound task write surface: update|create, dry-run default'
+description: ''
+lock: '!inline f/ION/api/write_task.script.lock'
+kind: script
+schema: null
