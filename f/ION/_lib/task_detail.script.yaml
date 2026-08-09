@@ -1,4 +1,4 @@
-summary: browser-faithful edit POST (no XHR header, form-page referer, 3000-char echo)
+summary: task form read/parse + update/create/DELETE
 description: ''
 lock: '!inline f/ION/_lib/task_detail.script.lock'
 kind: script

@@ -240,9 +240,38 @@ export async function createTask(
   }
 }
 
+/**
+ * DELETE a task — the task list's own mechanic (captured live 2026-08-09):
+ * GET /tasks/tasklist.cfm?DeleteTaskID=<id> with the customer primed; the
+ * UI confirm is client-side only. ION refuses deletion once a service log
+ * exists, so this is inherently safe on never-served tasks. dry_run=true
+ * (default) returns the URL it WOULD hit.
+ */
+export async function deleteTask(
+  session: IonSession,
+  ionTaskId: string | number,
+  ionCustId: string | number,
+  dry_run = true,
+) {
+  const url = `${session.ionOrigin}/tasks/tasklist.cfm?DeleteTaskID=${ionTaskId}`
+  if (dry_run) {
+    return { dry_run: true, committed: false, ionTaskId: String(ionTaskId), would_get: url }
+  }
+  if (ionCustId) await ionFetchText(session, `${session.ionOrigin}/customers/customerTabs.cfm?customerid=${ionCustId}`)
+  const res = await ionFetch(session, url, { headers: { Referer: `${session.ionOrigin}/main.cfm` } })
+  const txt = await res.text()
+  // the echo: the returned task list should no longer contain the id
+  const stillListed = txt.includes(`DeleteTaskID=${ionTaskId}`) || txt.includes(`EventID=${ionTaskId}`)
+  return {
+    dry_run: false, committed: res.ok && !stillListed, status: res.status,
+    ionTaskId: String(ionTaskId), still_listed: stillListed,
+    response_preview: txt.slice(0, 400),
+  }
+}
+
 export function main() {
   return {
     library: "f/ION/_lib/task_detail",
-    exports: ["fetchTaskFormHtml", "parseTaskForm", "getTaskDetail", "updateTask", "createTask"],
+    exports: ["fetchTaskFormHtml", "parseTaskForm", "getTaskDetail", "updateTask", "createTask", "deleteTask"],
   }
 }
