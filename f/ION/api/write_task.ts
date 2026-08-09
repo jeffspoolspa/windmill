@@ -13,13 +13,13 @@
 
 import "playwright@1.40.0"
 import { getOrRefreshSession } from "/f/ION/_lib/session_cache"
-import { updateTask, createTask } from "/f/ION/_lib/task_detail"
+import { updateTask, createTask, deleteTask } from "/f/ION/_lib/task_detail"
 
 type Resource = { ion: object }
 
 export async function main(
   ion: Resource["ion"],
-  op: "update" | "create",
+  op: "update" | "create" | "delete",
   ionCustId: string,
   ionTaskId: string = "",
   changes: Record<string, string> = {},
@@ -30,6 +30,10 @@ export async function main(
   if (op === "update") {
     if (!ionTaskId) throw new Error("update requires ionTaskId")
     return updateTask(session, ionTaskId, ionCustId, changes, dry_run)
+  }
+  if (op === "delete") {
+    if (!ionTaskId) throw new Error("delete requires ionTaskId")
+    return deleteTask(session, ionTaskId, ionCustId, dry_run)
   }
   return createTask(session, ionCustId, { ...fields, ...changes }, dry_run)
 }
