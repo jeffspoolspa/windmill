@@ -223,7 +223,17 @@ export async function createTask(
     body: new URLSearchParams(newFields).toString(),
   })
   const txt = await res.text()
-  return { dry_run: false, committed: res.ok, status: res.status, ionCustId: String(ionCustId), response_preview: txt.slice(0, 400) }
+  // THE ECHO: the response (or its redirect) names the new task id. Try
+  // the shapes we can anticipate; keep a generous preview either way so
+  // the first live run teaches us the real one (echo over prediction).
+  const idMatch = txt.match(/EventID["'\s]*[=:]["'\s]*(\d{5,})/i)
+    ?? txt.match(/addTask\.cfm\?EventID=(\d{5,})/i)
+    ?? txt.match(/taskid["'\s]*[=:]["'\s]*(\d{5,})/i)
+  return {
+    dry_run: false, committed: res.ok, status: res.status, ionCustId: String(ionCustId),
+    new_event_id: idMatch ? idMatch[1] : null,
+    response_preview: txt.slice(0, 1200),
+  }
 }
 
 export function main() {

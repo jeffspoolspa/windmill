@@ -1,4 +1,4 @@
-summary: task form read/parse + updateTask + createTask (dry-run default)
+summary: task form read/parse + updateTask + createTask (echo parses new_event_id)
 description: ''
 lock: '!inline f/ION/_lib/task_detail.script.lock'
 kind: script
