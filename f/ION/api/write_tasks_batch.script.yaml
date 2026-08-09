@@ -1,0 +1,5 @@
+summary: 'batch task write executor: one session, ops as data, dry-run default'
+description: ''
+lock: '!inline f/ION/api/write_tasks_batch.script.lock'
+kind: script
+schema: null
