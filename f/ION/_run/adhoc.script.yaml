@@ -3,7 +3,6 @@ summary: 'Permanent ad-hoc ION runner. Override main() body for one-off ION
   (ALTMAN, WINDING RIVER, ZEH).'
 description: ''
 lock: '!inline f/ION/_run/adhoc.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium

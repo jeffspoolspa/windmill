@@ -2,7 +2,6 @@ summary: 'ION API (bulk): per-customer tasks for many customers -> flat schedule
   rows (sequential; session-context-safe)'
 description: ''
 lock: '!inline f/ION/api/list_customer_tasks.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium

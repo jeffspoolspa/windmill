@@ -2,7 +2,6 @@ summary: Validate get_task_detail resolves orphan/expired tasks -> customerId +
   cadence (ADR-006 recovery)
 description: ''
 lock: '!inline f/ION/test_orphan_task_detail.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium

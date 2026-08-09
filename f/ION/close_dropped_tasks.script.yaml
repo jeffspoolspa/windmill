@@ -3,7 +3,6 @@ summary: Close "dropped" tasks (active in DB but absent from ION's active
   Committing, batched, advisory-locked. dry_run default.
 description: ''
 lock: '!inline f/ION/close_dropped_tasks.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
 tag: chromium
