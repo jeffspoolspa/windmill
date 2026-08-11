@@ -265,9 +265,9 @@ def score_visit(ev, verdicts):
     return score, grade, round(chem_e), round(svc_e), round(doc_e), items, criticals
 
 
-def main(p_start: str = "2026-06-01", p_end: str = "2026-06-30",
+def main(p_start: str = "2026-07-01", p_end: str = "2026-08-31",
          dry_run: bool = False, max_visits: int = 0, skip_llm: bool = False,
-         only_visit_ids: list = None):
+         only_visit_ids: list = None):  # ponytail: temp backfill range; switch to dynamic current-month after
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"),
                        wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
     akey = wmill.get_variable("f/service_billing/ANTHROPIC_API_KEY")
