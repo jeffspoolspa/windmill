@@ -78,9 +78,14 @@ def main(csv_text: str):
         for r in block[1:]:
             if not (r and r[0] and r[0][:2].isdigit() and "/" in r[0][:5]):
                 continue
-            try:
-                day = datetime.strptime(r[0].strip(), "%m/%d/%Y").date()
-            except ValueError:
+            day = None
+            for fmt in ("%m/%d/%y", "%m/%d/%Y"):
+                try:
+                    day = datetime.strptime(r[0].strip(), fmt).date()
+                    break
+                except ValueError:
+                    pass
+            if day is None:
                 continue
             total = fnum(val(r, "Total hours"))
             reg = fnum(val(r, "Regular hours"))
