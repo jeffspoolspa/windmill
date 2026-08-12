@@ -265,9 +265,17 @@ def score_visit(ev, verdicts):
     return score, grade, round(chem_e), round(svc_e), round(doc_e), items, criticals
 
 
-def main(p_start: str = "2026-07-01", p_end: str = "2026-08-31",
+def main(p_start: str = "", p_end: str = "",
          dry_run: bool = False, max_visits: int = 0, skip_llm: bool = False,
-         only_visit_ids: list = None):  # ponytail: temp backfill range; switch to dynamic current-month after
+         only_visit_ids: list = None):
+    # Defaults = current month to date (ET) so the nightly cron needs no args.
+    # Upsert on (visit_id, rubric_version) keeps re-runs idempotent; only
+    # exception+note visits hit the LLM, so a nightly pass is pennies.
+    if not p_start:
+        from datetime import datetime, timedelta, timezone
+        today = datetime.now(timezone(timedelta(hours=-4))).date()
+        p_start = str(today.replace(day=1))
+        p_end = str(today)
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"),
                        wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
     akey = wmill.get_variable("f/service_billing/ANTHROPIC_API_KEY")
