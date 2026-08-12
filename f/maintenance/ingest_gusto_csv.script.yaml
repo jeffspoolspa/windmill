@@ -1,0 +1,15 @@
+summary: ''
+description: ''
+lock: '!inline f/maintenance/ingest_gusto_csv.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    csv_text:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - csv_text
