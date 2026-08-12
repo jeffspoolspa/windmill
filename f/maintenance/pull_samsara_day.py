@@ -31,7 +31,7 @@ def sget(tok, path, params, tries=4):
     return r
 
 
-def main(p_start: str = "2026-07-01", p_end: str = "2026-08-10"):  # ponytail: temp backfill defaults; revert to "" after
+def main(p_start: str = "", p_end: str = ""):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"),
                        wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
