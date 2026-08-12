@@ -48,11 +48,20 @@ def main(p_start: str = "", p_end: str = ""):
     for p in payrolls:
         puuid = p.get("payroll_uuid") or p.get("uuid")
         pp = p.get("pay_period", {})
-        d = gget(f"{API}/v1/companies/{company_id}/payrolls/{puuid}", h)
-        if d.status_code != 200:
-            print(f"payroll {puuid}: {d.status_code}")
-            continue
-        for c in d.json().get("employee_compensations", []):
+        # employee_compensations paginates (default 25/page, X-Total-Count header)
+        comps, page = [], 1
+        while True:
+            d = gget(f"{API}/v1/companies/{company_id}/payrolls/{puuid}", h,
+                     {"per": 100, "page": page})
+            if d.status_code != 200:
+                print(f"payroll {puuid} p{page}: {d.status_code}")
+                break
+            batch = d.json().get("employee_compensations", [])
+            comps.extend(batch)
+            if len(comps) >= int(d.headers.get("X-Total-Count", len(comps))) or not batch:
+                break
+            page += 1
+        for c in comps:
             eid = emp.get(c.get("employee_uuid"))
             if eid is None:
                 unmatched.add(c.get("employee_uuid"))
