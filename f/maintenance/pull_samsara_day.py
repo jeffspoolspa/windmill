@@ -73,7 +73,7 @@ def main(p_start: str = "2026-07-01", p_end: str = "2026-08-10"):  # ponytail: t
         d += timedelta(days=1)
 
     for i in range(0, len(rows), 200):
-        sb.table("samsara_driver_day", schema="maintenance") \
+        sb.schema("maintenance").table("samsara_driver_day") \
           .upsert(rows[i:i + 200]).execute()
     return {"days": (end - start).days + 1, "rows": len(rows),
             "unmatched_drivers": sorted(unmatched)}
