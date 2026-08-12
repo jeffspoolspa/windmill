@@ -1,0 +1,19 @@
+summary: ''
+description: ''
+lock: '!inline f/maintenance/pull_samsara_day.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    p_end:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+    p_start:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+  required: []
