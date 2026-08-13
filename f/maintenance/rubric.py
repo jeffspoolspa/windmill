@@ -20,7 +20,15 @@ W_CHECK, W_PHOTOS = 5, 15
 # slow-drift readings light
 W_READ = {"fc": 15, "ph": 15, "ta": 5, "cya": 5, "psi": 10, "salt": 10}
 PSI_HIGH = 25
+PSI_LOW = 5    # under 5 = gauge/pump problem — needs a note (backwash can't fix low)
 SALT_RANGE = (2700, 3400)
+
+# Service types where the cleaning checklist doesn't apply (spas, fountains,
+# splash features, chem checks) even though the tasks appear on the form —
+# readings + photos only, normalization handles the rest. (Carter 2026-08-13:
+# kiddie/baby pools, lazy rivers, zero-depth entries stay full-checklist.)
+NO_CHECKLIST_RE = re.compile(r"spa|hot ?tub|fountain|splash|sprayground|chem ?check",
+                             re.IGNORECASE)
 
 FILTER_TASKS = {"Backwashed Filter", "Cleaned Cartridges", "Cleaned Filter"}
 VAC_TASKS = {"Vacuum Pool", "Vacuum Through System"}
@@ -32,7 +40,7 @@ CHEM = [("fc", "Free Chlorine", ("fc_low",)),
         ("ph", "pH", ("ph_high", "ph_low")),
         ("ta", "Total Alkalinity", ("ta_low", "ta_high")),
         ("cya", "Cyanuric Acid", ("cya_low", "cya_high")),
-        ("psi", "Filter PSI", ("psi_high",)),
+        ("psi", "Filter PSI", ("psi_high", "psi_low")),
         ("salt", "Salinity", ("salt_range",))]
 CHEM_LABEL = {"fc": "Free Chlorine", "ph": "pH", "ta": "Total Alkalinity",
               "cya": "CYA", "psi": "Filter PSI", "salt": "Salinity"}
@@ -54,6 +62,7 @@ EXC_DESC = {
     "cya_low": ("Cyanuric Acid", "below 30 — needs stabilizer"),
     "cya_high": ("Cyanuric Acid", "above 80 — needs dilution / note"),
     "psi_high": ("Filter PSI", f"at or above {PSI_HIGH} — needs backwash / filter clean"),
+    "psi_low": ("Filter PSI", f"under {PSI_LOW} — gauge or pump problem, needs a note"),
     "salt_range": ("Salinity", "out of range — needs salt"),
 }
 
@@ -140,14 +149,20 @@ def evaluate(v):
         exc.append(("cya_high", False))
     if psi is not None and psi >= PSI_HIGH:
         exc.append(("psi_high", any(tasks.get(t) for t in FILTER_TASKS)))
+    if psi is not None and psi < PSI_LOW:
+        exc.append(("psi_low", False))   # only a note can save a too-low PSI
     if v["is_salt"] and sal is not None and not (SALT_RANGE[0] <= sal <= SALT_RANGE[1]):
         exc.append(("salt_range", "salt" in kinds))
 
-    misses = [t for t in ("Emptied Skimmer Baskets", "Emptied Pump Baskets", "Skim/Net Surface")
-              if t in tasks and not tasks[t]]
-    vb = [t for t in ("Vacuum Pool", "Brushed Pool") if t in tasks]
-    if vb and not any(tasks[t] for t in vb):
-        misses.append("Vacuum/Brush")
+    no_checklist = bool(NO_CHECKLIST_RE.search(v.get("service_type") or ""))
+    if no_checklist:
+        misses = []
+    else:
+        misses = [t for t in ("Emptied Skimmer Baskets", "Emptied Pump Baskets", "Skim/Net Surface")
+                  if t in tasks and not tasks[t]]
+        vb = [t for t in ("Vacuum Pool", "Brushed Pool") if t in tasks]
+        if vb and not any(tasks[t] for t in vb):
+            misses.append("Vacuum/Brush")
 
     green = bool((tasks.get("Visible Algae") or tasks.get("Cloudy Water"))
                  and "shock" not in kinds and not note)
@@ -158,7 +173,7 @@ def evaluate(v):
             "kinds": sorted(kinds), "note": note, "missing": missing, "form": form,
             "is_salt": v["is_salt"], "tasks": tasks, "exceptions": exc,
             "misses": misses, "photos": v["photo_count"], "green": green,
-            "sold_names": sold_names}
+            "sold_names": sold_names, "no_checklist": no_checklist}
 
 
 def judge_items(ev):
@@ -202,8 +217,11 @@ def score_visit(ev, verdicts):
                 f, why = 1.0, "in range"
             elif key == "psi":
                 f = 1.0 if (exc_by_key[hit] or yes(hit)) else 0.0
-                why = ("high — backwashed" if exc_by_key[hit] else
-                       "high — explained" if f else "high — no backwash, no note")
+                if hit == "psi_low":
+                    why = "under 5 — explained" if f else "under 5 — not addressed"
+                else:
+                    why = ("high — backwashed" if exc_by_key[hit] else
+                           "high — explained" if f else "high — no backwash, no note")
             else:
                 if yes(hit):
                     f, why = 1.0, "off — addressed in note"
@@ -215,6 +233,8 @@ def score_visit(ev, verdicts):
         items.append({"k": CHEM_LABEL[key], "w": w, "f": f, "why": why})
 
     for key, miss_name, tnames in SERVICE:
+        if ev.get("no_checklist"):
+            break   # spas / fountains / chem checks: readings + photos only
         if not any(t in ev["tasks"] for t in tnames):
             continue
         applicable += W_CHECK
@@ -274,7 +294,22 @@ def demo():
     assert by["Photos"] == 0.5 and not crit
     # chem 15+0+2.5+5+10=32.5 + svc 5+5+0+5=15 + photos 7.5 = 55 / 85 = 64.7 F
     assert (score, grade) == (64.7, "F"), (score, grade)
-    print("rubric v3 self-check OK:", score, grade)
+
+    # spa: checklist not applicable; PSI 2 (under 5) unexplained -> zero
+    v2 = dict(v, service_type="POOL MAINTENANCE 45 SPA")
+    v2["readings"] = [{"n": "Free Chlorine", "v": "3"}, {"n": "pH", "v": "7.4"},
+                      {"n": "FILTER PSI BEFORE", "v": "2"}]
+    v2["form_fields"] = ["Free Chlorine", "pH", "FILTER PSI BEFORE"]
+    ev2 = evaluate(v2)
+    assert ev2["no_checklist"] and ev2["misses"] == []
+    assert ("psi_low", False) in ev2["exceptions"]
+    s2, g2, *_r2, items2, crit2 = score_visit(ev2, {})
+    by2 = {i["k"]: i for i in items2}
+    assert "Vacuum / brush" not in by2 and "Skim / net" not in by2
+    assert by2["Filter PSI"]["f"] == 0.0 and by2["Filter PSI"]["why"] == "under 5 — not addressed"
+    # chem 15+15+0 = 30 + photos 7.5 = 37.5 / 55 applicable = 68.2 F
+    assert (s2, g2) == (68.2, "F"), (s2, g2)
+    print("rubric v3 self-check OK:", score, grade, "| spa/psi-low:", s2, g2)
 
 
 if __name__ == "__main__":
