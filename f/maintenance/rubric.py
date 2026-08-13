@@ -15,7 +15,10 @@
 import re
 
 RUBRIC = "v3"
-W_READ, W_CHECK, W_PHOTOS = 10, 5, 15
+W_CHECK, W_PHOTOS = 5, 15
+# per-reading weights (Carter 2026-08-13): sanitizer/comfort readings heavy,
+# slow-drift readings light
+W_READ = {"fc": 15, "ph": 15, "ta": 5, "cya": 5, "psi": 10, "salt": 10}
 PSI_HIGH = 25
 SALT_RANGE = (2700, 3400)
 
@@ -187,7 +190,8 @@ def score_visit(ev, verdicts):
             appl = form_lbl in ev["form"]
         if not appl:
             continue
-        applicable += W_READ
+        w = W_READ[key]
+        applicable += w
         miss_lbl = "Filter PSI" if key == "psi" else ("Salinity" if key == "salt" else form_lbl)
         if miss_lbl in ev["missing"]:
             f = 1.0 if yes("missing:" + miss_lbl) else 0.0
@@ -207,8 +211,8 @@ def score_visit(ev, verdicts):
                     f, why = 0.5, "off — treated, but not noted"
                 else:
                     f, why = 0.0, "off — not addressed"
-        earned += W_READ * f; chem_e += W_READ * f
-        items.append({"k": CHEM_LABEL[key], "w": W_READ, "f": f, "why": why})
+        earned += w * f; chem_e += w * f
+        items.append({"k": CHEM_LABEL[key], "w": w, "f": f, "why": why})
 
     for key, miss_name, tnames in SERVICE:
         if not any(t in ev["tasks"] for t in tnames):
@@ -268,8 +272,8 @@ def demo():
     assert by["Filter PSI"] == 1.0           # 30 >= 25 but backwashed -> full, no note needed
     assert by["Vacuum / brush"] == 1.0 and by["Pump baskets"] == 0.0
     assert by["Photos"] == 0.5 and not crit
-    # chem 10+0+5+10+10=35 + svc 5+5+0+5=15 + photos 7.5 = 57.5 / 85 = 67.6 F
-    assert (score, grade) == (67.6, "F"), (score, grade)
+    # chem 15+0+2.5+5+10=32.5 + svc 5+5+0+5=15 + photos 7.5 = 55 / 85 = 64.7 F
+    assert (score, grade) == (64.7, "F"), (score, grade)
     print("rubric v3 self-check OK:", score, grade)
 
 
