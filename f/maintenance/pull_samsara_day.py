@@ -13,6 +13,15 @@ TZ = "-04:00"  # ET offset used for day boundaries; drift to -05:00 in winter is
                # a one-hour edge on day boundaries — fine for daily rollups.
 API = "https://api.samsara.com"
 
+# Techs with no Samsara driver-app trips, credited from their truck's vehicle
+# report instead (drive_ms = engineRunTime - engineIdleTime). Carter 2026-08-13:
+# Ernie <- truck #61 (any day it moved), Tavin <- truck #76 (his visit days only).
+# gusto_uuid: (samsara_vehicle_id, 'all' | 'visit_days')
+VEHICLE_FALLBACK = {
+    "d0f3af0b-b3f0-4059-bc65-4fa407b36b34": ("281474985776147", "all"),         # Ernie <- #61
+    "e58f80ad-84df-4e3c-9eba-3db15c5764cd": ("281474985776159", "visit_days"),  # Tavin <- #76
+}
+
 
 def day_bounds_ms(d: date):
     start = datetime.fromisoformat(f"{d}T00:00:00{TZ}")
@@ -72,8 +81,43 @@ def main(p_start: str = "", p_end: str = ""):
             time.sleep(0.2)
         d += timedelta(days=1)
 
+    # vehicle-based fallback for techs without driver-app trips
+    fb_rows = 0
+    for guuid, (veh_id, mode) in VEHICLE_FALLBACK.items():
+        eid = emp.get(guuid)
+        if eid is None:
+            continue
+        allowed = None
+        if mode == "visit_days":
+            res = sb.schema("maintenance").table("visits") \
+                    .select("visit_date").eq("actual_tech_id", eid) \
+                    .gte("visit_date", str(start)).lte("visit_date", str(end)).execute().data
+            allowed = {r["visit_date"] for r in res}
+        d = start
+        while d <= end:
+            if allowed is not None and str(d) not in allowed:
+                d += timedelta(days=1)
+                continue
+            r = sget(tok, "/fleet/reports/vehicles/fuel-energy",
+                     {"startDate": f"{d}T00:00:00{TZ}", "endDate": f"{d}T23:59:59{TZ}",
+                      "vehicleIds": veh_id})
+            if r.status_code == 200:
+                for rep in r.json().get("data", {}).get("vehicleReports", []):
+                    run = rep.get("engineRunTimeDurationMs") or 0
+                    idle = rep.get("engineIdleTimeDurationMs") or 0
+                    if run:
+                        sb.schema("maintenance").table("samsara_driver_day").upsert([{
+                            "employee_id": eid, "day": str(d),
+                            "drive_ms": max(run - idle, 0), "idle_ms": idle,
+                            "samsara_driver_id": f"veh:{veh_id}",
+                            "updated_at": datetime.now(timezone.utc).isoformat()}]).execute()
+                        fb_rows += 1
+            time.sleep(0.15)
+            d += timedelta(days=1)
+
     for i in range(0, len(rows), 200):
         sb.schema("maintenance").table("samsara_driver_day") \
           .upsert(rows[i:i + 200]).execute()
     return {"days": (end - start).days + 1, "rows": len(rows),
+            "vehicle_fallback_rows": fb_rows,
             "unmatched_drivers": sorted(unmatched)}
