@@ -14,6 +14,7 @@ from supabase import create_client
 
 SUFFIX_RE = re.compile(r"[\s,]+(jr|sr|ii|iii|iv|v)\.?$", re.IGNORECASE)
 HOLIDAYS_2026 = {"2026-01-01", "2026-05-25", "2026-07-04",
+                 "2026-07-06",  # July 4th observed (7/4 fell on a Saturday)
                  "2026-09-07", "2026-11-26", "2026-12-25"}
 
 
