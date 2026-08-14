@@ -1,7 +1,8 @@
 summary: record_cc_payment
 description: Record an already-settled Intuit merchant card transaction as a QBO
-  Payment on a given customer, carrying its CCTransId. process_payment=true is
-  REQUIRED or QBO drops the CCTransId. Defaults to dry_run.
+  Payment on a customer, carrying its CCTransId. process_payment=true is
+  REQUIRED or QBO drops the CCTransId. replace_payment_id deletes the
+  wrong-customer payment under the same lock. Defaults to dry_run.
 lock: '!inline f/service_billing/record_cc_payment.script.lock'
 concurrency_key: qbo_writer
 concurrency_time_window_s: 10

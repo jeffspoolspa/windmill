@@ -75,6 +75,7 @@ def main(
     memo: str = None,
     invoices: list[dict] = None,        # [{"id": "123", "amount_applied": 100.0}]
     process_payment: bool = False,      # REQUIRED for QBO to keep CCTransId
+    replace_payment_id: str = None,     # delete this Payment first, same lock
     dry_run: bool = True,
 ) -> dict:
     """Recreate a settled merchant CC payment on a customer, keeping CCTransId.
@@ -141,6 +142,32 @@ def main(
     base = f"https://quickbooks.api.intuit.com/v3/company/{realm_id}"
     headers = _qbo(access_token)
 
+    # Replace-in-place. A misapplied payment is repaired by delete + recreate
+    # (QBO cannot move a Payment between customers), and both halves belong
+    # under one qbo_writer lock: run them as separate jobs and there is a window
+    # where the money is recorded twice, or not at all. Deleting first also
+    # clears the duplicate guard below when the replacement matches on
+    # customer + date + amount, which is the usual case.
+    deleted = None
+    if replace_payment_id:
+        old = requests.get(f"{base}/payment/{replace_payment_id}",
+                           headers=headers, timeout=60)
+        if old.ok:
+            sync_token = (old.json().get("Payment") or {}).get("SyncToken")
+            gone = requests.post(
+                f"{base}/payment", headers=headers, timeout=60,
+                params={"operation": "delete"},
+                json={"Id": str(replace_payment_id), "SyncToken": sync_token})
+            if not gone.ok:
+                raise Exception(f"Delete of {replace_payment_id} failed: "
+                                f"{gone.status_code} - {gone.text}")
+            deleted = replace_payment_id
+        elif old.status_code in (400, 404):
+            deleted = f"{replace_payment_id} (already gone)"
+        else:
+            raise Exception(f"Read of {replace_payment_id} failed: "
+                            f"{old.status_code} - {old.text}")
+
     # Duplicate guard. QBO cannot filter on CCTransId, so match the natural key
     # a re-run would collide on: same customer, same date, same amount. Without
     # this, running twice records $2,500 against one $1,250 settlement.
@@ -167,6 +194,7 @@ def main(
                .get("CreditChargeResponse") or {}).get("CCTransId")
     return {
         "success": True,
+        "deleted_payment_id": deleted,
         "payment_id": created.get("Id"),
         "customer_name": (created.get("CustomerRef") or {}).get("name"),
         "total": float(created.get("TotalAmt") or 0),
