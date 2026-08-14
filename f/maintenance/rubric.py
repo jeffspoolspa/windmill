@@ -54,7 +54,7 @@ SERVICE_LABEL = {"vacbrush": "Vacuum / brush", "skimmer": "Skimmer baskets",
                  "pump": "Pump baskets", "skimnet": "Skim / net"}
 
 EXC_DESC = {
-    "fc_low": ("Free Chlorine", "below 1 — needs shock / liquid chlorine (tabs don't count)"),
+    "fc_low": ("Free Chlorine", "below 2 — needs shock / liquid chlorine (tabs don't count)"),
     "ph_high": ("pH", "above 7.8 — needs acid"),
     "ph_low": ("pH", "below 7.2 — needs soda ash / bicarb"),
     "ta_low": ("Total Alkalinity", "below 60 — needs bicarb"),
@@ -133,7 +133,7 @@ def evaluate(v):
         missing.append("Salinity")
 
     exc = []  # (key, product_used)
-    if fc is not None and fc < 1:
+    if fc is not None and fc < 2:   # points bar: 2+ in range (critical stays < 1)
         exc.append(("fc_low", "shock" in kinds))
     if ph is not None and ph > 7.8:
         exc.append(("ph_high", "acid" in kinds))
@@ -254,8 +254,9 @@ def score_visit(ev, verdicts):
     score = round(earned / applicable * 100, 1) if applicable else 0.0
 
     criticals = []
-    fc_hit = exc_by_key.get("fc_low")
-    if fc_hit is not None and not (fc_hit or yes("fc_low")):
+    fc_val = ev["reads"].get("Free Chlorine")
+    if ("fc_low" in exc_by_key and fc_val is not None and fc_val < 1
+            and not (exc_by_key["fc_low"] or yes("fc_low"))):
         criticals.append("No sanitizer — free chlorine below 1, untreated")
     if ev["green"]:
         criticals.append("Unsafe water (algae/cloudy) untreated, no note")
