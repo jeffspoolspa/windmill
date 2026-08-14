@@ -32,10 +32,21 @@
 #   f/billing/_lib/qbo.record_qbo_payment is a library call that stamps today's
 #   date and requires invoice lines.
 #
-#   ProcessPayment is deliberately NOT sent. The charge already settled at
-#   Intuit; we are recording its response, not asking QBO to run a card. The
-#   payload carries no card number or token, so QBO has nothing to charge — but
-#   omitting the flag removes any doubt about a second charge.
+#   ProcessPayment is the load-bearing flag, learned the hard way on Payment
+#   71804 (2026-08-14): sent WITHOUT it, QBO stored the payment, normalized
+#   ProcessPayment to false, and silently DROPPED the whole CreditChargeResponse
+#   block — no CCTransId, no AuthCode, no merchant linkage. Every payment our
+#   own pipeline writes carries CreditChargeInfo.ProcessPayment = true alongside
+#   CreditChargeResponse (see 71769 / 71768 / 71760), and those all persist their
+#   CCTransId. The flag is what makes QBO honour a supplied response.
+#
+#   It does not cause a second charge: the payload carries no card number, token
+#   or CardEntityRef, so QBO has nothing to charge, and f/billing/_lib/qbo
+#   .record_qbo_payment has sent exactly this shape on every live autopay for
+#   months — the charge always happened first at Intuit and QBO recorded the
+#   supplied response rather than running one. It still defaults to False here,
+#   because "probably cannot charge" is not a default worth taking on someone
+#   else's card.
 
 import requests
 import wmill
@@ -63,6 +74,7 @@ def main(
     txn_authorization_time: str = None,
     memo: str = None,
     invoices: list[dict] = None,        # [{"id": "123", "amount_applied": 100.0}]
+    process_payment: bool = False,      # REQUIRED for QBO to keep CCTransId
     dry_run: bool = True,
 ) -> dict:
     """Recreate a settled merchant CC payment on a customer, keeping CCTransId.
@@ -77,16 +89,21 @@ def main(
 
     amount = round(float(amount), 2)
 
+    charge_info = {"Amount": amount}
+    if process_payment:
+        charge_info["ProcessPayment"] = True
+
     payment = {
         "CustomerRef": {"value": str(customer_id)},
         "TotalAmt": amount,
         "TxnDate": txn_date,
         "PaymentMethodRef": {"value": str(payment_method_id)},
         "CreditCardPayment": {
+            "CreditChargeInfo": charge_info,
             "CreditChargeResponse": {
                 "Status": "Completed",
                 "CCTransId": cc_trans_id,
-            }
+            },
         },
         "TxnSource": "IntuitPayment",
     }
@@ -102,11 +119,8 @@ def main(
         payment["CreditCardPayment"]["CreditChargeResponse"]["TxnAuthorizationTime"] = \
             txn_authorization_time
     if cc_expiry_year and cc_expiry_month:
-        payment["CreditCardPayment"]["CreditChargeInfo"] = {
-            "Amount": amount,
-            "CcExpiryYear": int(cc_expiry_year),
-            "CcExpiryMonth": int(cc_expiry_month),
-        }
+        charge_info["CcExpiryYear"] = int(cc_expiry_year)
+        charge_info["CcExpiryMonth"] = int(cc_expiry_month)
     if invoices:
         payment["Line"] = [
             {"Amount": round(float(inv["amount_applied"]), 2),
@@ -116,7 +130,11 @@ def main(
 
     if dry_run:
         return {"dry_run": True, "would_post": payment,
-                "note": "re-run with dry_run=false to create this payment"}
+                "note": "re-run with dry_run=false to create this payment",
+                "warning": (None if process_payment else
+                            "process_payment is false — QBO will drop "
+                            "CreditChargeResponse and the payment will carry NO "
+                            "CCTransId (observed on Payment 71804)")}
 
     token = wmill.run_script_by_path(TOKEN_PROVIDER, args={})
     access_token, realm_id = token["access_token"], token["realm_id"]
