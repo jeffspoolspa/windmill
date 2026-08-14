@@ -1,8 +1,0 @@
-summary: _probe_read_payment
-description: 'TEMP read-only: GET a QBO entity raw payload.'
-lock: '!inline f/service_billing/_probe_read_payment.script.lock'
-concurrency_key: qbo_api
-concurrency_time_window_s: 10
-concurrent_limit: 1
-kind: script
-schema: null
