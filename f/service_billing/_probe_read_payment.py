@@ -26,14 +26,15 @@ import wmill
 TOKEN_PROVIDER = "f/qbo/get_access_token"
 
 
-def main(qbo_payment_id: str) -> dict:
+def main(qbo_payment_id: str, entity: str = "payment") -> dict:
     token = wmill.run_script_by_path(TOKEN_PROVIDER, args={})
     access_token, realm_id = token["access_token"], token["realm_id"]
     resp = requests.get(
-        f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/payment/{qbo_payment_id}",
+        f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/{entity}/{qbo_payment_id}",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
         timeout=60,
     )
     if not resp.ok:
         raise Exception(f"Read failed: {resp.status_code} - {resp.text}")
-    return resp.json().get("Payment", {})
+    body = resp.json()
+    return body.get(entity.capitalize()) or body
