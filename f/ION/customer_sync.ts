@@ -63,7 +63,7 @@ const HEADER_MAP: [string, string[]][] = [
   ["site_contact",  ["Site Contact"]],
   ["contact_phone", ["Site Phone", "Contact Phone"]],
   ["technician",    ["Technician"]],
-  ["route_name",    ["Route"]],
+  ["route_name",    ["Route Name", "Route"]],
   ["customer_type", ["Customer Type"]],
 ]
 
