@@ -1,0 +1,7 @@
+summary: 'Shared ION report transport: picker -> its download link -> data fetch
+  -> grid, plus the row[3]-headers table convention and strict column mapping. A
+  sync script supplies only paths, patterns, params, and its HEADER_MAP.'
+description: ''
+lock: '!inline f/ION/_lib/report.script.lock'
+kind: script
+schema: null

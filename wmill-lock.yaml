@@ -131,6 +131,7 @@ locks:
   f/ION/_lib/notify_api: ddec800bec7d5d7eb6937db023cbdc46f238bd9beb07154f0621090da2f0d734
   f/ION/_lib/parser: 7edcdc89aa58fb5403da1599df85b8c4b0daaa4b2b40028d729ca1e9dcef1bd4
   f/ION/_lib/relink_visits: f78f44452699e69a0be9f2c26729b355e96dc36dc93bf39b8994e791a968e09e
+  f/ION/_lib/report: 78c8330d0991aec338793ad4f75647e6c74a50b202c11537e0647d0492091030
   f/ION/_lib/resolve_visit_targets: c6b1baf8f644f765e8bbd3f447fb7cd21ce908851a4c0a342bf946c567553e65
   f/ION/_lib/schedule_target_custids: 0688ea7c042eb816d3db2154ee8c003e997d6599df00fd2ed24f49495602b2c1
   f/ION/_lib/session: 2169f6e7ebd7f724023024835935978f45b2f24fb108c19a192add00064d16c0
