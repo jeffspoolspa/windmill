@@ -1,37 +1,31 @@
-//bun-extra-requirements:
-//playwright@1.48.0
-//chromium-bidi@0.8.0
-
-// The one shared ION login. Import THIS, not _lib/session (legacy name — its
-// path substring-collides with _lib/session_cache in Windmill's bundler and
-// corrupts any file importing both). Every batch job logs in fresh: ION keeps
-// its cursor server-side, so a session shared across concurrent jobs reads
-// the wrong customer with no error to show for it.
-//
-// The requirements header pins playwright@1.48.0 + chromium-bidi@0.8.0 while
-// the import says 1.40.0 — that odd-looking combo is the one the workers'
-// bun build actually resolves; every working ION script uses it. Change all
-// three together or none.
-
-import { chromium } from "playwright@1.40.0"
+// The one shared ION login — BROWSERLESS. ION's login is a ColdFusion form:
+// three fields, no CSRF token, no SSO hop (the Fluidra portal hop retired
+// 2026-08; chromium in these scripts was a fossil of it). Recipe ported from
+// the .NET adapter (src/Ion/IonSession.cs), verified against the live site:
+//   - POST /security/login.cfm answers 302 when it ACCEPTS and 200 when it
+//     REFUSES — ColdFusion re-renders the form on failure, a successful HTTP
+//     response describing a failed login. Never auto-follow redirects.
+//   - An EXPIRED session answers 200 with a body that is nothing but a
+//     security/logout.cfm redirect stub — status codes lie here too.
+//   - A THROTTLED login does not answer at all; it hangs. Bound every call
+//     and never retry a refused login in a loop — that turns a throttle
+//     into an outage.
+// Fresh session per job: ION keeps its cursor server-side, so a session
+// shared across concurrent jobs reads the wrong customer with no error.
 
 export type IonCredentials = {
   username: string
   password: string
 }
 
-// The whole login: one form, one POST, on ionpoolcare.com itself.
-const ION_LOGIN_URL = "https://ionpoolcare.com/security/login.cfm"
+const ION_ORIGIN = "https://ionpoolcare.com"
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+const DEFAULT_INACTIVITY_MS = 15 * 60 * 1000
 
 export interface IonCookie {
   name: string
   value: string
-  domain: string
-  path: string
-  expires?: number
-  httpOnly?: boolean
-  secure?: boolean
-  sameSite?: "Strict" | "Lax" | "None"
 }
 
 export interface IonSession {
@@ -42,93 +36,70 @@ export interface IonSession {
   expiresAt: number
 }
 
-const DEFAULT_INACTIVITY_MS = 15 * 60 * 1000
+function absorbCookies(res: Response, jar: Map<string, string>): void {
+  const set = (res.headers as any).getSetCookie?.() as string[] | undefined
+  const all = set ?? (res.headers.get("set-cookie") ? [res.headers.get("set-cookie") as string] : [])
+  for (const line of all) {
+    const pair = line.split(";")[0]
+    const eq = pair.indexOf("=")
+    if (eq > 0) jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim())
+  }
+}
 
-const CHROMIUM_LAUNCH_ARGS = [
-  "--no-sandbox",
-  "--single-process",
-  "--no-zygote",
-  "--disable-setuid-sandbox",
-  "--disable-dev-shm-usage",
-  "--disable-gpu",
-]
-
-const BROWSER_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-
-// Prefer playwright 1.40's OWN chromium build (pinned by the worker group's
-// init script) — the 2026-07-06 incident: unpinned distro chromium jumped to
-// 150, which SIGTRAPs on render under nsjail, killing every ION login.
-// chromium-1091 matches playwright@1.40.0; bump BOTH together or never.
-const BUNDLED_CHROMIUM =
-  "/usr/lib/ms-playwright/chromium-1091/chrome-linux/chrome"
-
-function chromiumExecutable(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const fs = require("fs")
-    if (fs.existsSync(BUNDLED_CHROMIUM)) return BUNDLED_CHROMIUM
-  } catch { /* fall through */ }
-  return "/usr/bin/chromium"
+function jarHeader(jar: Map<string, string>): string {
+  return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join("; ")
 }
 
 export async function loginToIon(ion: IonCredentials): Promise<IonSession> {
-  const browser = await chromium.launch({
-    executablePath: chromiumExecutable(),
-    args: CHROMIUM_LAUNCH_ARGS,
-    timeout: 60000, // else a stuck launch hangs the whole job unbounded
+  const jar = new Map<string, string>()
+
+  const login = await fetch(`${ION_ORIGIN}/security/login.cfm`, {
+    method: "POST",
+    body: new URLSearchParams({
+      IPCLogin: ion.username,
+      IPCPassword: ion.password,
+      Submitted: "Log In",
+    }),
+    redirect: "manual",
+    headers: { "User-Agent": BROWSER_USER_AGENT, Accept: "text/html, */*" },
+    signal: AbortSignal.timeout(45000), // a throttled login hangs, not errors
   })
-  try {
-    const context = await browser.newContext({ userAgent: BROWSER_USER_AGENT })
-    const page = await context.newPage()
-    let cfClientId: string | undefined
-    page.on("request", (req: any) => {
-      if (cfClientId) return
-      const m = req.url().match(/_cf_clientid=([A-F0-9]{32})/i)
-      if (m) cfClientId = m[1]
-    })
-    await page.goto(ION_LOGIN_URL, { timeout: 30000 })
-    await page.locator("#IPCLogin").fill(ion.username)
-    await page.locator("#IPCPassword").fill(ion.password)
-    await page.locator("#Submitted").click() // <input type=submit>, not a <button>
-    await page.waitForLoadState("networkidle", { timeout: 45000 })
-    // main.cfm fires the ux_*.cfm AJAX carrying _cf_clientid — go there
-    // explicitly rather than trusting where the login POST lands.
-    const ionOrigin = new URL(page.url()).origin
-    await page.goto(`${ionOrigin}/main.cfm`, { timeout: 30000 })
-    await page.waitForLoadState("networkidle", { timeout: 45000 })
-    // Single-form login means a bad password ALSO lands on ionpoolcare.com,
-    // so assert the login form is GONE — else we'd hand back an anonymous
-    // session and every downstream fetch would 302 to login.
-    if (!ionOrigin.includes("ionpoolcare.com")) {
-      throw new Error(`ION login did not land on ionpoolcare.com: ${page.url()}`)
-    }
-    if ((await page.locator("#IPCLogin").count()) > 0) {
-      throw new Error(`ION login rejected — still on the login form: ${page.url()}`)
-    }
-    const rawCookies = await context.cookies()
-    const cookies: IonCookie[] = rawCookies.map((c: any) => ({
-      name: c.name, value: c.value, domain: c.domain, path: c.path,
-      expires: c.expires, httpOnly: c.httpOnly, secure: c.secure, sameSite: c.sameSite,
-    }))
-    const now = Date.now()
-    return { cookies, cfClientId, ionOrigin, capturedAt: now, expiresAt: now + DEFAULT_INACTIVITY_MS }
-  } finally {
-    await browser.close()
+  absorbCookies(login, jar)
+  if (login.status !== 302) {
+    const body = await login.text()
+    throw new Error(
+      `ION login refused: HTTP ${login.status}` +
+      (looksLikeLoginPage(body) ? " (form re-rendered — bad credentials?)" : ""))
+  }
+
+  // main.cfm renders the CF AJAX bootstrap; _cf_clientid is in its markup.
+  const main = await fetch(`${ION_ORIGIN}/main.cfm`, {
+    redirect: "manual",
+    headers: { Cookie: jarHeader(jar), "User-Agent": BROWSER_USER_AGENT, Accept: "text/html, */*" },
+    signal: AbortSignal.timeout(45000),
+  })
+  absorbCookies(main, jar)
+  if (main.status >= 300 && main.status < 400) {
+    throw new Error(`ION bounced /main.cfm to ${main.headers.get("location")} — session not established`)
+  }
+  const body = await main.text()
+  if (looksLikeLoginPage(body)) {
+    throw new Error("ION login did not stick — /main.cfm served the login form")
+  }
+  const cfClientId = body.match(/_cf_clientid=([A-F0-9]{32})/i)?.[1]
+
+  const now = Date.now()
+  return {
+    cookies: [...jar.entries()].map(([name, value]) => ({ name, value })),
+    cfClientId,
+    ionOrigin: ION_ORIGIN,
+    capturedAt: now,
+    expiresAt: now + DEFAULT_INACTIVITY_MS,
   }
 }
 
 export function cookieHeader(session: IonSession): string {
-  return session.cookies
-    .filter((c) => isCookieRelevantTo(c, session.ionOrigin))
-    .map((c) => `${c.name}=${c.value}`)
-    .join("; ")
-}
-
-function isCookieRelevantTo(cookie: IonCookie, origin: string): boolean {
-  const host = new URL(origin).hostname
-  const cookieDomain = cookie.domain.replace(/^\./, "")
-  return host === cookieDomain || host.endsWith("." + cookieDomain)
+  return session.cookies.map((c) => `${c.name}=${c.value}`).join("; ")
 }
 
 export async function ionFetch(
@@ -140,10 +111,15 @@ export async function ionFetch(
   headers.set("Cookie", cookieHeader(session))
   if (!headers.has("User-Agent")) headers.set("User-Agent", BROWSER_USER_AGENT)
   if (!headers.has("Accept")) headers.set("Accept", "text/html, */*")
-  const res = await fetch(url, { ...init, headers, redirect: "manual" })
+  const res = await fetch(url, {
+    ...init,
+    headers,
+    redirect: "manual",
+    signal: init?.signal ?? AbortSignal.timeout(120000),
+  })
   if (res.status >= 300 && res.status < 400) {
     const loc = res.headers.get("location") ?? ""
-    if (loc.toLowerCase().includes("login")) { // ION bounces unauthed -> /security/login.cfm
+    if (loc.toLowerCase().includes("login")) {
       throw new IonSessionExpiredError(url, loc)
     }
   }
@@ -161,7 +137,13 @@ export async function ionFetchText(
     const preview = (await res.text()).slice(0, 300)
     throw new Error(`ionFetch ${url} -> HTTP ${res.status}: ${preview}`)
   }
-  return res.text()
+  const body = await res.text()
+  // ION's expired-session tell: a 200 whose body is only a logout redirect
+  // stub. Trusting the status code here parses the stub as the page.
+  if (body.length < 2000 && /security\/logout\.cfm/i.test(body)) {
+    throw new IonSessionExpiredError(url, "security/logout.cfm stub body")
+  }
+  return body
 }
 
 export class IonSessionExpiredError extends Error {
@@ -169,7 +151,7 @@ export class IonSessionExpiredError extends Error {
     public readonly url: string,
     public readonly redirectedTo: string,
   ) {
-    super(`ION session expired: ${url} redirected to ${redirectedTo}`)
+    super(`ION session expired: ${url} -> ${redirectedTo}`)
     this.name = "IonSessionExpiredError"
   }
 }
@@ -190,9 +172,8 @@ export async function main(ion: IonCredentials) {
   const session = await loginToIon(ion)
   const res = await ionFetch(session, `${session.ionOrigin}/main.cfm`)
   const body = await res.text()
-  const ok = res.ok && !looksLikeLoginPage(body)
   return {
-    ok,
+    ok: res.ok && !looksLikeLoginPage(body),
     cookieCount: session.cookies.length,
     cfClientIdCaptured: Boolean(session.cfClientId),
     ionOrigin: session.ionOrigin,

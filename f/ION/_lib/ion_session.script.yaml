@@ -1,9 +1,8 @@
-summary: THE shared ION login + authed-fetch lib (single-form login; Fluidra hop
-  retired 2026-08). Fresh session per job — never share sessions across jobs
-  (server-side cursor). Renamed from _lib/session so it can never
-  substring-collide with session_cache in the bundler.
+summary: THE shared ION login + authed-fetch lib — BROWSERLESS. Three-field form
+  POST (302=accepted, 200=refused), cookie jar, _cf_clientid regexed from
+  main.cfm. No playwright, no chromium worker, no deps. Ported from the .NET
+  adapter's live-verified recipe.
 description: ''
 lock: '!inline f/ION/_lib/ion_session.script.lock'
 kind: script
 schema: null
-tag: chromium
