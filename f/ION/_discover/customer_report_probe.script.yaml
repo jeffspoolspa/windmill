@@ -1,5 +1,5 @@
-summary: "DISCOVERY v7 (read-only, browserless): list the Customer Reports
-  picker's actual hrefs with their link text."
+summary: 'DISCOVERY v8 (read-only, browserless): AllCustomers grid geometry —
+  row-length histogram, header row, first data rows.'
 description: ''
 lock: '!inline f/ION/_discover/customer_report_probe.script.lock'
 kind: script
