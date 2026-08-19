@@ -1,6 +1,5 @@
-summary: 'DISCOVERY (read-only, browserless): what shape is CustomerRpt.cfm —
-  picker with links, form, or direct data? Tries the picker, the _xls direct
-  endpoint, and the reports menu.'
+summary: "DISCOVERY v2 (read-only, browserless): dump CustomerRpt.cfm's form
+  controls, then POST it with empty filters and report what comes back."
 description: ''
 lock: '!inline f/ION/_discover/customer_report_probe.script.lock'
 kind: script
