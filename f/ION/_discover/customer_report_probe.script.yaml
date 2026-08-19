@@ -1,5 +1,6 @@
-summary: "DISCOVERY v2 (read-only, browserless): dump CustomerRpt.cfm's form
-  controls, then POST it with empty filters and report what comes back."
+summary: "DISCOVERY v3 (read-only, browserless): CustomerRpt form tail + POST
+  with '0' filter values + GET-with-params variant; find where the report data
+  actually renders."
 description: ''
 lock: '!inline f/ION/_discover/customer_report_probe.script.lock'
 kind: script
