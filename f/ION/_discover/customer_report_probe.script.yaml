@@ -1,6 +1,6 @@
-summary: "DISCOVERY v3 (read-only, browserless): CustomerRpt form tail + POST
-  with '0' filter values + GET-with-params variant; find where the report data
-  actually renders."
+summary: 'DISCOVERY v4 (read-only, browserless): is customerlist.cfm with empty
+  search the full base? What columns per row? Plus CustomerRpt with fabricated
+  _cf_clientid.'
 description: ''
 lock: '!inline f/ION/_discover/customer_report_probe.script.lock'
 kind: script
