@@ -1,0 +1,8 @@
+summary: 'ION all-customers report -> upsert ion.customers (keyed ion_cust_id).
+  Flat two-timestamp model: checked_at = every comparison, updated_at = only
+  real changes. Missing = stale checked_at. Browserless fresh login per run.
+  dry_run default.'
+description: ''
+lock: '!inline f/ION/customer_sync.script.lock'
+kind: script
+schema: null
