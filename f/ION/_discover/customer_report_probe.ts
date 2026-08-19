@@ -1,6 +1,5 @@
-// Probe v5: (a) every .cfm string anywhere in the picker (the rptDetail div
-// is BOUND to some detail url in inline JS); (b) does maxrows/startrow lift
-// customerlist's 500-row cap; (c) a raw slice around one customer row.
+// Probe v6: the picker's bind target is /reports/customers.cfm — hit it with
+// all-filters-off in a few param spellings and see which returns the base.
 
 import * as wmill from "windmill-client"
 import { loginToIon, ionFetchText } from "/f/ION/_lib/ion_session"
@@ -12,36 +11,26 @@ export async function main() {
   })
   const out: any = {}
 
-  // (a) the picker's every .cfm mention + context around each rptDetail
-  const picker = await ionFetchText(session,
-    `${session.ionOrigin}/reports/CustomerRpt.cfm?_cf_containerId=rptDetail&_cf_nodebug=true&_cf_nocache=true&_cf_rc=1`)
-  out.all_cfm_strings = [...new Set(
-    [...picker.matchAll(/["']([^"']{0,120}\.cfm[^"']{0,120})["']/g)].map(m => m[1])
-  )].slice(0, 30)
-  out.rptDetail_contexts = [...picker.matchAll(/rptDetail/g)]
-    .map(m => picker.slice(Math.max(0, m.index! - 150), m.index! + 200).replace(/\s+/g, " "))
-    .slice(0, 8)
-
-  // (b) cap-lifting attempts on customerlist
-  const base = `${session.ionOrigin}/customers/customerlist.cfm?officeid=0&techid=0&routeid=0&search=&reset=1`
-  const count = (b: string) => new Set([...b.matchAll(/customerTabs\.cfm\?customerid=(\d+)/g)].map(m => m[1])).size
-  for (const [label, extra] of [
-    ["maxrows", "&maxrows=20000"],
-    ["startrow", "&startrow=501"],
-    ["start_limit", "&start=500&limit=500"],
-  ] as [string, string][]) {
+  const variants: [string, string][] = [
+    ["typeID", "office=0&zone=0&tech=0&Start=&End=&typeID=0&set=1"],
+    ["type",   "office=0&zone=0&tech=0&Start=&End=&type=0&set=1"],
+    ["minimal","office=0&zone=0&tech=0&set=1"],
+  ]
+  for (const [label, qs] of variants) {
     try {
-      const b = await ionFetchText(session, base + extra)
-      out[`list_${label}`] = { uniqueIds: count(b), len: b.length }
+      const body = await ionFetchText(session, `${session.ionOrigin}/reports/customers.cfm?${qs}`)
+      const trs = [...body.matchAll(/<tr[\s>][\s\S]*?<\/tr>/gi)]
+      out[label] = {
+        len: body.length,
+        trCount: trs.length,
+        firstRows: trs.slice(0, 4).map(r =>
+          r[0].replace(/<[^>]+>/g, "|").replace(/\s+/g, " ").slice(0, 300)),
+        custIdMentions: (body.match(/customerid=/gi) || []).length,
+      }
+      if (trs.length > 100) break // found it — stop probing
     } catch (e: any) {
-      out[`list_${label}`] = { error: String(e?.message ?? e).slice(0, 200) }
+      out[label] = { error: String(e?.message ?? e).slice(0, 250) }
     }
   }
-
-  // (c) raw slice around the first row of the plain list
-  const plain = await ionFetchText(session, base)
-  const i = plain.indexOf("customerTabs.cfm?customerid=")
-  out.row_slice = i >= 0 ? plain.slice(Math.max(0, i - 500), i + 1500).replace(/\s+/g, " ") : null
-
   return out
 }

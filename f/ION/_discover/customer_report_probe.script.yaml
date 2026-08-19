@@ -1,6 +1,5 @@
-summary: "DISCOVERY v5 (read-only, browserless): find the rptDetail bind URL in
-  CustomerRpt's inline JS; test customerlist maxrows/startrow cap-lifting; grab
-  a raw row slice."
+summary: 'DISCOVERY v6 (read-only, browserless): hit /reports/customers.cfm (the
+  rptDetail bind target) with param variants; report row counts + header row.'
 description: ''
 lock: '!inline f/ION/_discover/customer_report_probe.script.lock'
 kind: script
