@@ -1,5 +1,5 @@
-summary: 'DISCOVERY v6 (read-only, browserless): hit /reports/customers.cfm (the
-  rptDetail bind target) with param variants; report row counts + header row.'
+summary: "DISCOVERY v7 (read-only, browserless): list the Customer Reports
+  picker's actual hrefs with their link text."
 description: ''
 lock: '!inline f/ION/_discover/customer_report_probe.script.lock'
 kind: script
