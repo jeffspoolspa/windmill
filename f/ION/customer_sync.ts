@@ -6,6 +6,11 @@
 // ion_cust_id. Pure transport + dump: no business logic. Matching and linking
 // live in the .NET application; api_notify tells it fresh data landed.
 //
+// The customer report picker is /reports/customers.cfm (CustomerRpt.cfm is
+// only the FILTER FORM; its rptDetail div is URL-bound to customers.cfm).
+// The data link is /reports/_xls/AllCustomers.cfm — active & inactive, the
+// same source the June 17 load used.
+//
 // Two timestamps, written by what the words mean:
 //   checked_at — every comparison against ION touches it, sweep or individual.
 //   updated_at — only when the comparison found the data actually changed.
@@ -64,10 +69,9 @@ export async function main(dry_run = true, api_notify = false) {
   })
 
   const { dataUrl, grid } = await fetchReportGrid(session, {
-    pickerPath: "/reports/CustomerRpt.cfm",
-    linkPattern: /_xls\/.*\.cfm|Customer.*\.cfm/i,
-    excludePattern: /CustomerRpt\.cfm$/i,
-    params: { Office: "", Technician: "", Route: "", Status: "" },
+    pickerPath: "/reports/customers.cfm",
+    linkPattern: /_xls\/AllCustomers\.cfm/i,
+    params: { office: "0", zone: "0", tech: "0", Start: "", End: "", typeID: "0", set: "1" },
   })
   console.log(`data url: ${dataUrl.slice(0, 140)}`)
 
