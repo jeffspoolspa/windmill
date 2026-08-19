@@ -84,7 +84,7 @@ locks:
   f/ION/_discover/chromium_smoke: 974acf1e186069f86871e57205018f863d10c55e5bfab06cda8da2309b62469f
   f/ION/_discover/chromium_smoke2: 7e16937e0da75a13ab8c76d9d2ef9a4e077501128b0a493ef8679c594560c74e
   f/ION/_discover/chromium120_render: 9c428e0d3c49bfd52d74ee9ceb0ca183378b93e81339414be673291847ccb4a8
-  f/ION/_discover/customer_report_probe: 53c75a9716145afd367175d02afb0ae65072e107e745b4785ed5cf72182aa8a0
+  f/ION/_discover/customer_report_probe: 292e032744460385c1e57367274de06d0e78ab71941c948b755a6a616105fe3e
   f/ION/_discover/diagnose_unresolved: 970bb7726625741c55c612dec8cd516913db45a0eb0cc8c030580914a3b3b920
   f/ION/_discover/disk_probe: 0ed7839420b177fd78601fdb1e52cb2847b787cc67a9a14cb165da522f0d6096
   f/ION/_discover/emit_session: a08dec0ba886265a31d7e33d0b5bef9a67da1425f09c9c4716a668a14c61204c

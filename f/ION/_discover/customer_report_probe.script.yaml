@@ -1,6 +1,6 @@
-summary: 'DISCOVERY v4 (read-only, browserless): is customerlist.cfm with empty
-  search the full base? What columns per row? Plus CustomerRpt with fabricated
-  _cf_clientid.'
+summary: "DISCOVERY v5 (read-only, browserless): find the rptDetail bind URL in
+  CustomerRpt's inline JS; test customerlist maxrows/startrow cap-lifting; grab
+  a raw row slice."
 description: ''
 lock: '!inline f/ION/_discover/customer_report_probe.script.lock'
 kind: script
