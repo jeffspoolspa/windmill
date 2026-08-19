@@ -1,0 +1,7 @@
+summary: 'DISCOVERY (read-only, browserless): what shape is CustomerRpt.cfm —
+  picker with links, form, or direct data? Tries the picker, the _xls direct
+  endpoint, and the reports menu.'
+description: ''
+lock: '!inline f/ION/_discover/customer_report_probe.script.lock'
+kind: script
+schema: null
