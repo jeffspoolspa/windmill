@@ -10,6 +10,7 @@
 // only the FILTER FORM; its rptDetail div is URL-bound to customers.cfm).
 // The data link is /reports/_xls/AllCustomers.cfm — active & inactive, the
 // same source the June 17 load used. ~9.8k rows, 36 header columns.
+// First live run 2026-08-19: 9,793 upserted, 442 changed since June.
 //
 // Two timestamps, written by what the words mean:
 //   checked_at — every comparison against ION touches it, sweep or individual.
@@ -119,6 +120,8 @@ export async function main(dry_run = true, api_notify = false) {
       const differs = dataCols
         .map((c) => `ion.customers."${c}" is distinct from excluded."${c}"`)
         .join(" or ")
+      // NB: pass chunk RAW — postgres.js serializes it once; JSON.stringify
+      // first double-encodes into a jsonb string scalar.
       const res = await sql.unsafe(
         `insert into ion.customers (${cols.map((c) => `"${c}"`).join(", ")}, checked_at, updated_at)
          select ${cols.map((c) => `r->>'${c}'`).join(", ")}, now(), now()
@@ -127,7 +130,7 @@ export async function main(dry_run = true, api_notify = false) {
            set ${updates}, checked_at = now(),
                updated_at = case when ${differs} then now() else ion.customers.updated_at end
          returning (updated_at = now()) as touched`,
-        [JSON.stringify(chunk)])
+        [chunk as any])
       upserted += res.count
       changed += res.filter((r: any) => r.touched).length
     }
