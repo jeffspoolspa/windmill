@@ -1,0 +1,24 @@
+{
+  "dependencies": {
+    "postgres": "3.4.5",
+    "windmill-client": "latest"
+  }
+}
+//bun.lock
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "dependencies": {
+        "postgres": "3.4.5",
+        "windmill-client": "latest",
+      },
+    },
+  },
+  "packages": {
+    "postgres": ["postgres@3.4.5", "", {}, "sha512-cDWgoah1Gez9rN3H4165peY9qfpEo+SA61oQv65O3cRUE1pOEoJWwddwcqKE8XZYjbblOJlYDlLV4h67HrEVDg=="],
+
+    "windmill-client": ["windmill-client@1.792.1", "", {}, "sha512-h9iyw8JkM6cT5L6MHr8HiWCWBK5/e74nXl+o7+7H7OYh/KqxYXKHAQFn8o3wYIqXZ6FFuEJskVrKMlc3etxYCQ=="],
+  }
+}

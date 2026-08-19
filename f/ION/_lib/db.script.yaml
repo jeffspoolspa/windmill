@@ -1,0 +1,6 @@
+summary: 'Shared Supabase client factory: one place for the connection defaults
+  (ssl, pool caps, timeouts) that were copy-pasted across sync scripts.'
+description: ''
+lock: '!inline f/ION/_lib/db.script.lock'
+kind: script
+schema: null
