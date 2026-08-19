@@ -1,0 +1,7 @@
+summary: Shared authed call to the .NET routing API (jpsinternal on Railway).
+  Windmill scrapes and dumps; the app decides — this is how a finished dump
+  tells the app to go decide. Reads f/ION/JPS_API_URL + f/ION/JPS_API_SECRET.
+description: ''
+lock: '!inline f/ION/_lib/notify_api.script.lock'
+kind: script
+schema: null
