@@ -1,11 +1,17 @@
 //bun-extra-requirements:
-//playwright@1.40.0
+//playwright@1.48.0
+//chromium-bidi@0.8.0
 
 // The one shared ION login. Import THIS, not _lib/session (legacy name — its
 // path substring-collides with _lib/session_cache in Windmill's bundler and
 // corrupts any file importing both). Every batch job logs in fresh: ION keeps
 // its cursor server-side, so a session shared across concurrent jobs reads
 // the wrong customer with no error to show for it.
+//
+// The requirements header pins playwright@1.48.0 + chromium-bidi@0.8.0 while
+// the import says 1.40.0 — that odd-looking combo is the one the workers'
+// bun build actually resolves; every working ION script uses it. Change all
+// three together or none.
 
 import { chromium } from "playwright@1.40.0"
 
