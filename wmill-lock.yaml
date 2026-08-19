@@ -122,6 +122,7 @@ locks:
   f/ION/_lib/apply_simple_null_complex: b9620f0f3d39b38e5404b8480f8a28c53d8e7292f08d84143a26c5254817d946
   f/ION/_lib/capture_targets: 2e7ac12ed0a9da730f2ddba9d83853ab5675417a03be4bc6f123a596a67839c2
   f/ION/_lib/correct_ambiguous_visits: 5888cb698ed9d9483552aae10d2b45e6223d98b0741d893298658fc1e251831f
+  f/ION/_lib/ion_session: 7c19fc113d4c16cb224df8b4e6340abd84faf4e38cc08086f94010c7a1498487
   f/ION/_lib/link_visits_by_event: ac3f150b8519519757a2d2dcc02697e2c59c692fb48c70493c31ce3798d81644
   f/ION/_lib/merge_dup_customers: 8a2c49caa387d6a714eccc3ef46838d5d067c6e114090c7d60ce0f78160ab8b0
   f/ION/_lib/normalize: 61d8aa2b039d31b3930d1e14d8b1f95ce2d20ec85ef8780090898e727791ce6e
