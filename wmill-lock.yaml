@@ -170,6 +170,7 @@ locks:
   f/ION/api/resolve_ambiguous_eventids: 0c6876af3523635e4b6e03eeea58af48b1faed9ee320887e6091ec74f49d6a04
   f/ION/api/resolve_customer_tasks: fcc2f4298010299a2afc55e5d18a6bc3625beab080b6111e9480a8014d3e0afd
   f/ION/api/resolve_visit_tasks_via_log: 98586e3c58a1b2de9dcd8a9ac32675db3954713390064933509e98110098a62e
+  f/ION/api/routing_api: d764f0a71ae0fa0a52fc9e777ca26ff6e6b6867915f1e7ea36020cf2d7295ebb
   f/ION/api/update_task: 0e0cad105eb3cacd0b3dda5b07ce70c4b8403b159b2c55711b2b64e1d2a624ea
   f/ION/api/upsert_task_schedule: 75c91ef9a35a667ba4065b15086fd025f833d02509ff43d852fe3040f3193529
   f/ION/api/write_task: 321d8cee35fd9107b91db59d31139a71e8a9101d4b994d223c0a98baa359b29e

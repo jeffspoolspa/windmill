@@ -1,0 +1,7 @@
+summary: "Egress proxy for the routing API: call any /maintenance/routing/* path
+  from agents whose sandbox can't reach Railway (allowlisted egress blocks the
+  TLS handshake). Transport only — same auth, same one door, nothing bypassed."
+description: ''
+lock: '!inline f/ION/api/routing_api.script.lock'
+kind: script
+schema: null
