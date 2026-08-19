@@ -9,7 +9,7 @@
 // The customer report picker is /reports/customers.cfm (CustomerRpt.cfm is
 // only the FILTER FORM; its rptDetail div is URL-bound to customers.cfm).
 // The data link is /reports/_xls/AllCustomers.cfm — active & inactive, the
-// same source the June 17 load used.
+// same source the June 17 load used. ~9.8k rows, 36 header columns.
 //
 // Two timestamps, written by what the words mean:
 //   checked_at — every comparison against ION touches it, sweep or individual.
@@ -18,7 +18,7 @@
 // Missing = a row the pull stopped touching: checked_at goes stale on its own.
 // Nothing is ever deleted.
 //
-// ponytail: every sweep rewrites ~9.6k rows to stamp checked_at. Fine here —
+// ponytail: every sweep rewrites ~9.8k rows to stamp checked_at. Fine here —
 // no triggers/audit/CDC on this table and it runs nightly. If any of those
 // attach, or refreshes go high-frequency: compress the sweep's stamp into a
 // run-log row and derive checked_at (greatest(updated_at, last_run.at)).
@@ -29,36 +29,41 @@ import { fetchReportGrid, tableFromGrid, mapColumns } from "/f/ION/_lib/report"
 import { supabaseSql } from "/f/ION/_lib/db"
 import { notifyApi } from "/f/ION/_lib/notify_api"
 
-// db column -> acceptable report headers, first match wins. ion_cust_id is
-// required: a dump that can't key is not a dump.
+// db column -> the report's actual header spellings (verified live 2026-08-19).
+// ion_cust_id is required: a dump that can't key is not a dump.
 const HEADER_MAP: [string, string[]][] = [
-  ["ion_cust_id",   ["Customer ID", "CustomerID", "Cust ID", "ID"]],
-  ["full_name",     ["Customer", "Customer Name", "Full Name"]],
+  ["ion_cust_id",   ["CustomerID", "Customer ID"]],
+  ["full_name",     ["Full Name", "Customer"]],
   ["first_name",    ["First Name"]],
   ["last_name",     ["Last Name"]],
-  ["business_name", ["Business Name", "Company", "Company Name"]],
-  ["office",        ["Office", "Office Name"]],
+  ["business_name", ["Business Name", "Company"]],
+  ["office",        ["Office"]],
   ["zone",          ["Zone"]],
-  ["status",        ["Status", "Customer Status"]],
-  ["created_raw",   ["Created", "Created Date"]],
-  ["bill_line1",    ["Bill Address", "Billing Address", "Address"]],
-  ["bill_city",     ["Bill City", "City"]],
-  ["bill_state",    ["Bill State", "State"]],
-  ["bill_postal",   ["Bill Postal", "Postal", "Zip", "Postal Code"]],
-  ["service_line1", ["Service Address", "Location"]],
+  ["status",        ["Status"]],
+  ["created_raw",   ["Created"]],
+  ["source",        ["Source"]],          // ION's lead source — its data, not our marker
+  ["bill_line1",    ["Bill Line 1"]],
+  ["bill_line2",    ["Bill Line 2"]],
+  ["bill_line3",    ["Bill Line 3"]],
+  ["bill_city",     ["Bill City"]],
+  ["bill_state",    ["Bill State"]],
+  ["bill_postal",   ["Bill Postal"]],
+  ["service_line1", ["Service Line 1"]],
+  ["service_line2", ["Service Line 2"]],
+  ["service_line3", ["Service Line 3"]],
   ["service_city",  ["Service City"]],
   ["service_state", ["Service State"]],
-  ["service_postal",["Service Postal", "Service Zip"]],
+  ["service_postal",["Service Postal"]],
   ["community",     ["Community"]],
-  ["map_no",        ["Map #", "Map No", "Map Number"]],
+  ["map_no",        ["Map No.", "Map No", "Map #"]],
   ["home_phone",    ["Home Phone"]],
-  ["mobile_phone",  ["Mobile Phone", "Cell Phone"]],
+  ["mobile_phone",  ["Mobile Phone"]],
   ["fax",           ["Fax"]],
   ["email",         ["Email Address", "Email"]],
   ["site_contact",  ["Site Contact"]],
   ["contact_phone", ["Site Phone", "Contact Phone"]],
-  ["technician",    ["Technician", "Assigned To"]],
-  ["route_name",    ["Route", "Route Name"]],
+  ["technician",    ["Technician"]],
+  ["route_name",    ["Route"]],
   ["customer_type", ["Customer Type"]],
 ]
 
@@ -75,26 +80,28 @@ export async function main(dry_run = true, api_notify = false) {
   })
   console.log(`data url: ${dataUrl.slice(0, 140)}`)
 
-  const { headers, rows } = tableFromGrid(grid)
+  const { headers, rows, dropped } = tableFromGrid(grid)
   const { colIndex, missingDbCols, unmappedHeaders } =
     mapColumns(headers, HEADER_MAP, ["ion_cust_id"])
   console.log(`mapped ${colIndex.size} cols; db cols unmapped: ${missingDbCols.join(", ") || "none"}`)
   console.log(`report headers unmapped: ${unmappedHeaders.join(" | ") || "none"}`)
+  if (dropped > 0) console.log(`dropped ${dropped} short rows (spacers/footers)`)
 
-  const records = rows
-    .map((r) => {
-      const o: Record<string, string | null> = {}
-      for (const [col, i] of colIndex) o[col] = r[i] || null
-      return o
-    })
-    .filter((o) => o.ion_cust_id && /^\d+$/.test(o.ion_cust_id))
-  console.log(`${records.length} customers parsed of ${rows.length} rows`)
+  const all = rows.map((r) => {
+    const o: Record<string, string | null> = {}
+    for (const [col, i] of colIndex) o[col] = r[i] || null
+    return o
+  })
+  const records = all.filter((o) => o.ion_cust_id && /^\d+$/.test(o.ion_cust_id))
+  const misaligned = all.length - records.length
+  console.log(`${records.length} customers parsed of ${rows.length} rows` +
+    (misaligned ? `; ${misaligned} rows failed key validation (misaligned cells?)` : ""))
 
   if (dry_run) {
     return {
-      dry_run: true, parsed: records.length,
+      dry_run: true, parsed: records.length, misaligned,
       mapped_cols: [...colIndex.keys()], missing_db_cols: missingDbCols,
-      unmapped_report_headers: unmappedHeaders, sample: records.slice(0, 5),
+      unmapped_report_headers: unmappedHeaders, sample: records.slice(0, 3),
     }
   }
 
@@ -113,11 +120,11 @@ export async function main(dry_run = true, api_notify = false) {
         .map((c) => `ion.customers."${c}" is distinct from excluded."${c}"`)
         .join(" or ")
       const res = await sql.unsafe(
-        `insert into ion.customers (${cols.map((c) => `"${c}"`).join(", ")}, source, checked_at, updated_at)
-         select ${cols.map((c) => `r->>'${c}'`).join(", ")}, 'customer_rpt', now(), now()
+        `insert into ion.customers (${cols.map((c) => `"${c}"`).join(", ")}, checked_at, updated_at)
+         select ${cols.map((c) => `r->>'${c}'`).join(", ")}, now(), now()
          from jsonb_array_elements($1::jsonb) r
          on conflict (ion_cust_id) do update
-           set ${updates}, source = 'customer_rpt', checked_at = now(),
+           set ${updates}, checked_at = now(),
                updated_at = case when ${differs} then now() else ion.customers.updated_at end
          returning (updated_at = now()) as touched`,
         [JSON.stringify(chunk)])
@@ -135,7 +142,7 @@ export async function main(dry_run = true, api_notify = false) {
   }
 
   return {
-    dry_run: false, parsed: records.length,
+    dry_run: false, parsed: records.length, misaligned,
     upserted, data_changed: changed, notified, missing_db_cols: missingDbCols,
   }
 }
