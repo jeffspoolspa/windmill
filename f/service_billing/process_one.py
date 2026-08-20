@@ -87,9 +87,14 @@ def process_one(conn, qbo_invoice_id, access_token, realm_id, force=False):
     if action == "send":  # reached directly (email route) OR after the charge
         send_result = result["send"] = send_and_record(conn, invoice, balance, STAGE,
                                                        access_token, realm_id)
+        # The reason is the ERROR, not the category. "email_failed" told the
+        # queue nothing it couldn't already see from the status, so a send
+        # that failed for a fixable reason ("no email on file") parked the
+        # invoice in needs_review with that reason living only in stdout.
         return {**result,
                 "status": "succeeded" if send_result["success"] else "needs_human",
-                **({} if send_result["success"] else {"reason": "email_failed"})}
+                **({} if send_result["success"]
+                   else {"reason": send_result.get("error") or "email_failed"})}
 
     return {**result, "status": action if action != "done" else "already_succeeded",
             **({"reason": charge_result.get("error")}

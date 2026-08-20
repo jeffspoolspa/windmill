@@ -32,6 +32,20 @@ RETURNING id, qbo_invoice_id
 """
 
 
+# Outcomes that finished the unit without doing what it was for. Their reason
+# is the only record of WHY an invoice is parked, so it is written to the
+# queue row and the event rather than left in stdout.
+DONE_OK = ("succeeded", "already_succeeded")
+
+
+def finish_reason(outcome):
+    """The reason to record on a finished unit, or None when it succeeded."""
+    if outcome.get("status") in DONE_OK:
+        return None
+    reason = outcome.get("reason") or outcome.get("error")
+    return reason[:300] if reason else None
+
+
 def main(qbo_invoice_id: str = None, qbo_invoice_ids: list = None):
     conn = get_db_conn()
     set_rate_limiter(conn)
@@ -65,10 +79,20 @@ def main(qbo_invoice_id: str = None, qbo_invoice_ids: list = None):
                                       "WHERE id = %s",
                                 (outcome["reason"][:300], claimed["id"]))
                 else:
+                    # A unit can finish WITHOUT succeeding — needs_human is the
+                    # common one (a declined card, a send with no email address
+                    # to send to). The reason used to die with the process: the
+                    # queue row closed with error NULL and processing_finished
+                    # carried only the status, so the invoice parked in
+                    # needs_review and nothing in the database said why. It is
+                    # written in both places now — the row for the operator,
+                    # the event for the history.
+                    reason = finish_reason(outcome)
                     # error preserved: a success must not erase the failure before it
                     execute_sql(conn, "UPDATE billing.service_charge_queue "
-                                      "SET finished_at = now() "
-                                      "WHERE id = %s", (claimed["id"],))
+                                      "SET finished_at = now(), "
+                                      "    error = coalesce(%s, error) "
+                                      "WHERE id = %s", (reason, claimed["id"]))
                     # LAST act for this invoice. Emitted from the script, not
                     # the queue trigger: by the time we get here everything this
                     # stage did — charge, payment, receipt, send — is already
@@ -77,6 +101,7 @@ def main(qbo_invoice_id: str = None, qbo_invoice_ids: list = None):
                          "processing_finished",
                          payload={"stage": "charge",
                                   "outcome": outcome.get("status"),
+                                  **({"reason": reason} if reason else {}),
                                   "provenance": {"source": "intent",
                                                  "intent_ref": "process_invoice"}})
                     conn.commit()
@@ -106,3 +131,21 @@ def main(qbo_invoice_id: str = None, qbo_invoice_ids: list = None):
                 "still_claimable": (remaining or {}).get("n", 0)}
     finally:
         conn.close()
+
+
+def _selfcheck():
+    """No network/DB — the reason a parked unit records."""
+    assert finish_reason({"status": "succeeded"}) is None
+    assert finish_reason({"status": "already_succeeded", "reason": "x"}) is None
+    # the case that parked Mercer 8020348 (2026-08-13) with no reason anywhere
+    assert finish_reason({"status": "needs_human",
+                          "reason": "no email on file"}) == "no email on file"
+    assert finish_reason({"status": "error", "error": "qbo_fetch_failed"}) == "qbo_fetch_failed"
+    # a status we cannot explain still finishes — it just says nothing
+    assert finish_reason({"status": "needs_human"}) is None
+    assert len(finish_reason({"status": "error", "error": "e" * 500})) == 300
+    print("process_invoice selfcheck ok")
+
+
+if __name__ == "__main__":
+    _selfcheck()
