@@ -118,6 +118,52 @@ def process_single_deposit(cur, base_url: str, headers: dict, deposit_id: str, b
     if not payments and not retail_checks and not cash_entries:
         return {"success": False, "deposit_id": deposit_id, "error": "Deposit has no items"}
     
+    # Every non-retail check must be fully covered by payment lines. A check with
+    # no payment row (or only partial payments) matches none of the line builders
+    # below, so it would be silently dropped and the QBO deposit would post short
+    # vs. what actually went to the bank. Refuse instead of building it short.
+    uncovered = []
+    for c in checks:
+        if c.get("is_retail"):
+            continue
+        check_amount = float(c.get("check_amount") or 0)
+        covered = sum(
+            float(p.get("amount") or 0)
+            for p in payments
+            if str(p["check_id"]) == str(c["id"])
+        )
+        if abs(covered - check_amount) > 0.01:
+            uncovered.append({
+                "check_id": str(c["id"]),
+                "check_number": c.get("check_number"),
+                "check_name": c.get("check_name"),
+                "check_amount": check_amount,
+                "covered_amount": round(covered, 2),
+                "shortfall": round(check_amount - covered, 2),
+                "message": (
+                    f"Check #{c.get('check_number') or c['id']} "
+                    f"({c.get('check_name') or 'unknown'}) has no linked QBO payment"
+                    if covered == 0 else
+                    f"Check #{c.get('check_number') or c['id']} is only partially covered: "
+                    f"payments total {covered:.2f} vs check amount {check_amount:.2f}"
+                ),
+            })
+    
+    if uncovered:
+        shortfall = round(sum(u["shortfall"] for u in uncovered), 2)
+        return {
+            "success": False,
+            "deposit_id": deposit_id,
+            "error": "checks_not_covered",
+            "uncovered_checks": uncovered,
+            "shortfall": shortfall,
+            "message": (
+                f"{len(uncovered)} check(s) have no/partial QBO payment, totaling "
+                f"{shortfall:.2f}. Creating this deposit would post it short to QBO. "
+                f"Link the payment(s) and retry."
+            ),
+        }
+    
     # Validate retail checks have income accounts
     for rc in retail_checks:
         if not rc.get("retail_qbo_account_id"):
