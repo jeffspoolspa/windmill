@@ -187,7 +187,6 @@ value:
                   expr: flow_input.parsed_email
               lock: '!inline i.lock'
               language: python3
-has_on_behalf_of: false
 schema:
   $schema: https://json-schema.org/draft/2020-12/schema
   type: object
