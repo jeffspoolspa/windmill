@@ -7,6 +7,8 @@
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
+from html import unescape
+import re
 import requests
 import base64
 import wmill
@@ -14,6 +16,17 @@ from google.oauth2 import service_account
 from google.auth.transport.requests import Request as AuthRequest
 from supabase import create_client
 from datetime import date
+
+
+def html_to_text(html: str) -> str:
+    """Cheap HTML -> plain text for the text/plain alternative."""
+    text = re.sub(r'(?i)<br\s*/?>', '\n', html)
+    text = re.sub(r'(?i)</(p|div|tr|li|h\d)>', '\n', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = unescape(text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
 
 def main(email: str, wo_number: str, office: str, message: str, cc: list, attach_pdf: bool):
     service_account_info = wmill.get_resource("u/carter/gmail_gcp_service_account")
@@ -32,10 +45,6 @@ def main(email: str, wo_number: str, office: str, message: str, cc: list, attach
     supabase_url = wmill.get_variable("f/SUPABASE/URL")
     supabase_key = wmill.get_variable("f/SUPABASE/ANON_KEY")
     supabase = create_client(supabase_url, supabase_key)
-
-    if attach_pdf:
-        pdf_path = f"{wo_number}.pdf"
-        pdf_data = supabase.storage.from_('estimates').download(pdf_path)
 
     result = (
         supabase.table('est_emails')
@@ -58,14 +67,19 @@ def main(email: str, wo_number: str, office: str, message: str, cc: list, attach
     cc_emails = ", ".join(cc)
     print(subject)
 
-    msg = MIMEMultipart()
+    # Outer container: mixed (body + optional attachment)
+    msg = MIMEMultipart('mixed')
     msg['To'] = email
     msg['Cc'] = cc_emails
     msg['Subject'] = subject
     msg['In-Reply-To'] = last_msg_id
-    msg['References'] = f"{refs} {last_msg_id}"
+    msg['References'] = f"{refs} {last_msg_id}" if refs else last_msg_id
 
-    msg.attach(MIMEText(message, 'html'))
+    # Body: alternative (plain first, html preferred by clients)
+    body = MIMEMultipart('alternative')
+    body.attach(MIMEText(html_to_text(message), 'plain', 'utf-8'))
+    body.attach(MIMEText(message, 'html', 'utf-8'))
+    msg.attach(body)
 
     if attach_pdf:
         pdf_path = f"{wo_number}.pdf"

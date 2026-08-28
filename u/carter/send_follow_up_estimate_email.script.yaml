@@ -1,6 +1,5 @@
 summary: send_est_email
 description: ''
 lock: '!inline u/carter/send_follow_up_estimate_email.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null
