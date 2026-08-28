@@ -1,0 +1,7 @@
+summary: 'One-off: backfill est_emails bodies that were stored as snippet only'
+description: Re-fetches every WO whose est_emails rows have neither body_html
+  nor body_text (victims of the old startswith('<table') filter) via
+  u/carter/get_est_emails. Idempotent; safe to re-run.
+lock: '!inline u/carter/backfill_est_email_bodies.script.lock'
+kind: script
+schema: null
