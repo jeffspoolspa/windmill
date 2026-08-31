@@ -17,6 +17,8 @@ from google.auth.transport.requests import Request as AuthRequest
 from supabase import create_client
 from datetime import date
 
+FOLLOWUP_LIMIT = 3
+
 
 def html_to_text(html: str) -> str:
     """Cheap HTML -> plain text for the text/plain alternative."""
@@ -28,7 +30,17 @@ def html_to_text(html: str) -> str:
     return text.strip()
 
 
-def main(email: str, wo_number: str, office: str, message: str, cc: list, attach_pdf: bool):
+def count_followups(rows: list) -> int:
+    """Outbound emails from the billing mailbox, excluding ION-relayed originals."""
+    n = 0
+    for r in rows:
+        f = (r.get('from_email') or '').lower()
+        if 'jpsbilling@jeffspoolspa.com' in f and 'donotreply@ionpoolcare.com' not in f:
+            n += 1
+    return n
+
+
+def main(email: str, wo_number: str, office: str, message: str, cc: list, attach_pdf: bool, force: bool = False):
     service_account_info = wmill.get_resource("u/carter/gmail_gcp_service_account")
 
     if 'private_key' in service_account_info:
@@ -56,6 +68,16 @@ def main(email: str, wo_number: str, office: str, message: str, cc: list, attach
 
     if not result.data:
         raise ValueError(f"No email found for wo_number: {wo_number}")
+
+    already_sent = count_followups(result.data)
+    if already_sent >= FOLLOWUP_LIMIT and not force:
+        print(f"Skipping WO #{wo_number}: {already_sent} follow-ups already sent (limit {FOLLOWUP_LIMIT})")
+        return {
+            "status": "skipped",
+            "reason": f"{already_sent} follow-ups already sent (limit {FOLLOWUP_LIMIT})",
+            "wo_number": wo_number,
+            "followups_sent": already_sent,
+        }
 
     last = result.data[-1]
     last_msg_id = last['message_id_header']
@@ -104,4 +126,4 @@ def main(email: str, wo_number: str, office: str, message: str, cc: list, attach
         .execute()
     )
 
-    return {"status": "sent"}
+    return {"status": "sent", "wo_number": wo_number, "followups_sent": already_sent + 1}
