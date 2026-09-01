@@ -2,6 +2,5 @@ summary: 'WC monthly payroll: per-class-code gross + OT for Utica Right Pay
   (check-date basis)'
 description: ''
 lock: '!inline f/workers_comp/aggregate_wc_payroll.script.lock'
-has_on_behalf_of: false
 kind: script
 schema: null

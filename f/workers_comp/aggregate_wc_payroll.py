@@ -12,10 +12,17 @@ DEPARTMENT_TO_CLASS_CODE = {
     "Retail":      "8017",
 }
 OT_LABELS = {"Overtime", "Double overtime", "Double Overtime"}
+# Non-OT includable wage labels. Correction/retro pay is includable wages.
 KNOWN_EARNINGS = {"Regular Hours", "Regular", "Overtime", "Double overtime",
                   "Double Overtime", "Vacation Hours", "Sick Hours",
-                  "Holiday Hours", "Bonus", "Commission"}
+                  "Holiday Hours", "Bonus", "Commission", "Correction Payment"}
 EXCLUDED = {"Reimbursement", "Reimbursements"}
+
+# Only these threaten correctness (OT split / class-code allocation), so only
+# these block submission. gross_mismatch is informational: the portal total is
+# taken from the authoritative gross_pay field and OT from explicit OT lines, so
+# a non-OT line-vs-gross delta (e.g. a grossed-up bonus) cannot change either.
+BLOCKING_TYPES = {"unknown_earning", "missing_department", "unmapped_department"}
 
 
 def gusto_get(url, headers, params=None, max_retries=5):
@@ -28,8 +35,6 @@ def gusto_get(url, headers, params=None, max_retries=5):
 
 
 def all_compensations(url, headers):
-    """Gusto paginates employee_compensations with standard ?per=&page= and the
-    X-Total-Pages header (the employee_compensations_* params are ignored)."""
     comps, page = [], 1
     while True:
         r = gusto_get(url, headers, {"per": 100, "page": page})
@@ -46,8 +51,8 @@ def all_compensations(url, headers):
 
 
 def main(check_start: str = "", check_end: str = ""):
-    # Default to the previous COMPLETED calendar month (you file last month's
-    # payroll). Pass explicit YYYY-MM-DD strings to override.
+    # Default to the previous COMPLETED calendar month. Pass explicit YYYY-MM-DD
+    # to override (e.g. to file the current month on its last day).
     if not check_start or not check_end:
         first_this = date.today().replace(day=1)
         last_prev = first_this - timedelta(days=1)
@@ -84,8 +89,8 @@ def main(check_start: str = "", check_end: str = ""):
             payrolls.append(p)
 
     by_code = defaultdict(lambda: {"gross": 0.0, "ot": 0.0})
-    exceptions, emps_paid = [], set()
-    payroll_gross = defaultdict(float)   # keyed by check_date; accumulate (dupes possible)
+    exceptions, warnings, emps_paid = [], [], set()
+    payroll_gross = defaultdict(float)
 
     for p in payrolls:
         puid = p["payroll_uuid"]
@@ -112,9 +117,10 @@ def main(check_start: str = "", check_end: str = ""):
                         unknown.append(nm)
             recon = round(line_total - excl_total, 2)
             if abs(recon - round(gross, 2)) > 0.01:
-                exceptions.append({"type": "gross_mismatch", "employee_uuid": emp,
-                                   "payroll": puid, "lines_recon": recon,
-                                   "gusto_gross": round(gross, 2)})
+                # Informational only: gross comes from gross_pay, OT from OT lines.
+                warnings.append({"type": "gross_mismatch", "employee_uuid": emp,
+                                 "payroll": puid, "lines_recon": recon,
+                                 "gusto_gross": round(gross, 2)})
             if unknown:
                 exceptions.append({"type": "unknown_earning", "employee_uuid": emp,
                                    "payroll": puid, "names": sorted(set(unknown))})
@@ -138,11 +144,10 @@ def main(check_start: str = "", check_end: str = ""):
 
     report = {c: {"gross_wages": round(v["gross"], 2), "overtime_pay": round(v["ot"], 2)}
               for c, v in sorted(by_code.items())}
+    blocking = [e for e in exceptions if e["type"] in BLOCKING_TYPES]
     return {
         "period_basis": "check_date_in_month",
         "check_window": [check_start, check_end],
-        "payrolls_used": [{"check_date": p.get("check_date"), "off_cycle": p.get("off_cycle"),
-                           "uuid": p["payroll_uuid"]} for p in payrolls],
         "portal_inputs_by_class_code": report,
         "grand_total_gross_wages": round(sum(v["gross"] for v in by_code.values()), 2),
         "grand_total_overtime_pay": round(sum(v["ot"] for v in by_code.values()), 2),
@@ -150,5 +155,7 @@ def main(check_start: str = "", check_end: str = ""):
         "distinct_employees_paid": len(emps_paid),
         "exceptions": exceptions,
         "exceptions_count": len(exceptions),
-        "ready_to_submit": len(exceptions) == 0,
+        "warnings": warnings,
+        "warnings_count": len(warnings),
+        "ready_to_submit": len(blocking) == 0,
     }
