@@ -18,6 +18,10 @@ from supabase import create_client
 from datetime import date
 
 FOLLOWUP_LIMIT = 3
+# Opening line of the templated follow-up. Manual replies from the billing
+# mailbox never contain it, so this is what separates automated sends from
+# human conversation on the same thread.
+TEMPLATE_MARKER = "i wanted to follow up regarding your estimate"
 
 
 def html_to_text(html: str) -> str:
@@ -31,11 +35,17 @@ def html_to_text(html: str) -> str:
 
 
 def count_followups(rows: list) -> int:
-    """Outbound emails from the billing mailbox, excluding ION-relayed originals."""
+    """Templated follow-ups already sent from the billing mailbox on this WO.
+    Excludes ION-relayed originals and manual replies."""
     n = 0
     for r in rows:
         f = (r.get('from_email') or '').lower()
-        if 'jpsbilling@jeffspoolspa.com' in f and 'donotreply@ionpoolcare.com' not in f:
+        if 'jpsbilling@jeffspoolspa.com' not in f or 'donotreply@ionpoolcare.com' in f:
+            continue
+        haystack = ' '.join(
+            (r.get(k) or '') for k in ('body_text', 'body_html', 'body_content', 'snippet')
+        ).lower()
+        if TEMPLATE_MARKER in haystack:
             n += 1
     return n
 
