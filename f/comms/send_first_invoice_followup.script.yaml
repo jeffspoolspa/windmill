@@ -1,0 +1,11 @@
+summary: Coastal Blue August invoice follow-up email (Perfect Pools, CC Chris),
+  idempotent, logged to comms.messages
+description: Builds the send list live from Supabase (revenue.invoices memo is
+  the memo of record), renders the approved template, sends via Gmail as
+  "Perfect Pools <jpsbilling@jeffspoolspa.com>" with chris@jeffspoolspa.com on
+  CC, and logs each send to comms.messages. Skips accounts already logged as
+  sent, closed agreements, and accounts with no email. dry_run=True lists
+  without sending; test_to sends one sample to that address only.
+lock: '!inline f/comms/send_first_invoice_followup.script.lock'
+kind: script
+schema: null
