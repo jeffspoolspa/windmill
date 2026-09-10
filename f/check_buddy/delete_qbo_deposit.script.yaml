@@ -1,0 +1,7 @@
+summary: Delete a QBO Deposit by ID
+description: Deletes a QBO Deposit entity (read SyncToken, then POST
+  ?operation=delete). Pure QBO call — local app_checks reset is done by the
+  frontend via reconcileDepositFromQbo. Already-deleted deposits return success.
+lock: '!inline f/check_buddy/delete_qbo_deposit.script.lock'
+kind: script
+schema: null
