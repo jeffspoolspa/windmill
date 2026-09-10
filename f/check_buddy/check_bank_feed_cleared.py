@@ -8,6 +8,9 @@ import psycopg2
 import json
 from datetime import datetime, timedelta, timezone
 
+# ponytail: flat threshold for auto-accepting bank/bookkeeper adjustment lines; make it a setting if larger ones show up.
+ADJUSTMENT_MAX = 1.0
+
 
 def refresh_qbo_token() -> tuple[str, str]:
     """Refresh QBO token and return (access_token, realm_id)."""
@@ -153,6 +156,42 @@ def get_cleared_deposit_ids(base_url: str, headers: dict, start_date: str, end_d
                 cleared_ids.add(str(deposit_id))
     
     return cleared_ids
+
+
+def is_adjustment_line(line: dict) -> bool:
+    """Small unlinked DepositLineDetail line, e.g. a bank encoding difference."""
+    amt = float(line.get("line_amount", 0))
+    return (
+        not line.get("linked_txn_id")
+        and line.get("detail_type") == "DepositLineDetail"
+        and amt != 0
+        and abs(amt) <= ADJUSTMENT_MAX
+    )
+
+
+def accept_adjustment_lines(cur, deposit_id: str, office: str, lines: list, now: str) -> list:
+    """Mirror QBO adjustment lines as local cash entries. Returns the inserted rows."""
+    inserted = []
+    for line in lines:
+        detail = line.get("detail") or {}
+        desc = f"QBO adjustment: {line.get('description') or detail.get('account_name') or 'bank difference'}"
+        cur.execute("""
+            INSERT INTO app_checks.cash_entries
+                (deposit_id, office, amount, description, qbo_account_id, qbo_account_name, reconciled_at, created_at, updated_at)
+            VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (deposit_id, office, line["line_amount"], desc,
+              detail.get("account_id") or None, detail.get("account_name") or None, now, now, now))
+        cols = [d[0] for d in cur.description]
+        inserted.append(dict(zip(cols, cur.fetchone())))
+    if inserted:
+        total_adj = sum(float(r["amount"]) for r in inserted)
+        cur.execute("""
+            UPDATE app_checks.deposits SET
+                total_amount = COALESCE(total_amount, 0) + %s, cash_count = COALESCE(cash_count, 0) + %s, updated_at = %s
+            WHERE id = %s::uuid
+        """, (total_adj, len(inserted), now, deposit_id))
+    return inserted
 
 
 def validate_deposit_lines(qbo_deposit: dict, payments: list, retail_checks: list, cash_entries: list) -> dict:
@@ -316,11 +355,12 @@ def main(
         str_ids = [str(d) for d in deposit_ids]
         cur.execute("SELECT * FROM app_checks.deposits WHERE id = ANY(%s::uuid[])", (str_ids,))
     else:
+        # Also re-check deposits that cleared the bank feed but didn't fully reconcile
         cur.execute("""
             SELECT * FROM app_checks.deposits
             WHERE deposit_source = 'api'
               AND qbo_deposit_id IS NOT NULL
-              AND bank_feed_cleared = false
+              AND (bank_feed_cleared = false OR status <> 'reconciled')
         """)
     
     if cur.description:
@@ -380,19 +420,20 @@ def main(
         if not qbo_deposit_id:
             continue
         
-        is_cleared = str(qbo_deposit_id) in cleared_ids
+        is_cleared = str(qbo_deposit_id) in cleared_ids or bool(deposit.get("bank_feed_cleared"))
         
         if not is_cleared:
             results.append({"deposit_id": deposit_id, "qbo_deposit_id": qbo_deposit_id, "cleared": False, "reconciled": False})
             continue
         
-        newly_cleared += 1
+        if not deposit.get("bank_feed_cleared"):
+            newly_cleared += 1
         
         try:
             # Mark bank feed cleared
             cur.execute("""
                 UPDATE app_checks.deposits SET
-                    bank_feed_cleared = true, bank_feed_cleared_at = %s, updated_at = %s
+                    bank_feed_cleared = true, bank_feed_cleared_at = COALESCE(bank_feed_cleared_at, %s), updated_at = %s
                 WHERE id = %s::uuid
             """, (now, now, deposit_id))
             
@@ -433,6 +474,15 @@ def main(
             
             # Run validation
             validation = validate_deposit_lines(qbo_deposit, payments, retail_checks, cash_entries)
+            
+            # Accept small unlinked QBO adjustment lines (e.g. $0.03 bank encoding difference)
+            # by mirroring them as local cash entries, then re-validate.
+            adj_lines = [l for l in validation["reconciliation_details"]["unmatched_details"] if is_adjustment_line(l)]
+            if adj_lines:
+                office = (checks[0].get("office") if checks else None) or (cash_entries[0].get("office") if cash_entries else None) or "Brunswick"
+                cash_entries.extend(accept_adjustment_lines(cur, deposit_id, office, adj_lines, now))
+                validation = validate_deposit_lines(qbo_deposit, payments, retail_checks, cash_entries)
+            
             recon_details = validation["reconciliation_details"]
             fully_reconciled = validation["fully_reconciled"]
             
@@ -486,6 +536,7 @@ def main(
                 "qbo_deposit_id": qbo_deposit_id,
                 "cleared": True,
                 "reconciled": fully_reconciled,
+                "adjustments_accepted": len(adj_lines),
                 "matched_lines": recon_details.get("matched_lines", 0),
                 "unmatched_lines": recon_details.get("unmatched_lines", 0),
                 "amount_match": recon_details.get("amount_match", False),
