@@ -26,15 +26,20 @@ def norm_name(last_first):
     return f"{first} {last}".lower()
 
 
-def start_min(hours_str):
+def start_min(hours_str, end=False):
+    """'6:28 AM - 2:44 PM' -> minutes after midnight of the start (or the end)."""
     s = str(hours_str or "").strip()
     if not s or "Now" in s or " - " not in s:
         return None
     try:
-        t = datetime.strptime(s.split(" - ")[0].strip(), "%I:%M %p").time()
+        t = datetime.strptime(s.split(" - ")[1 if end else 0].strip(), "%I:%M %p").time()
         return t.hour * 60 + t.minute
     except ValueError:
         return None
+
+
+# Punch clocks set to the wrong zone: minutes to add to every punch (Carter: Aaron's phone is on Central).
+TZ_FIX_MIN = {"aaron newbauer": 60}
 
 
 def fnum(x):
@@ -98,8 +103,12 @@ def main(csv_text: str):
                        and str(val(r, "Approval status")).strip() == "Approved"
                        and day.isoweekday() < 6
                        and str(day) not in HOLIDAYS_2026)
+            fix = TZ_FIX_MIN.get(key, 0)
+            cin = start_min(val(r, "Hours"))
+            cout = start_min(val(r, "Hours 2"), end=True) or start_min(val(r, "Hours"), end=True)
             out.append({"employee_id": eid, "day": str(day),
-                        "clock_in_min": start_min(val(r, "Hours")),
+                        "clock_in_min": cin + fix if cin is not None else None,
+                        "clock_out_min": cout + fix if cout is not None else None,
                         "worked_min": round(total * 60),
                         "adj_min": round((reg + ot * 1.5 + dot * 2.0) * 60),
                         "pto_min": round((pto + upto) * 60),
