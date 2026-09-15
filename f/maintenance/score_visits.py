@@ -41,7 +41,7 @@ def retry_wait(e, attempt):
 
 def main(p_start: str = "", p_end: str = "",
          dry_run: bool = False, max_visits: int = 0, skip_llm: bool = False,
-         only_visit_ids: list = None):
+         only_visit_ids: list = None, only_unscored: bool = False):
     if not p_start:
         from datetime import datetime, timedelta, timezone
         today = datetime.now(timezone(timedelta(hours=-4))).date()
@@ -63,6 +63,12 @@ def main(p_start: str = "", p_end: str = "",
         visits = visits[:max_visits]
     if only_visit_ids:
         want = set(only_visit_ids); visits = [v for v in visits if v["visit_id"] in want]
+    if only_unscored:  # skip visits already scored under this rubric (backfill for orphaned techs, etc.)
+        done, ids = set(), [v["visit_id"] for v in visits]
+        for i in range(0, len(ids), 200):
+            done |= {r["visit_id"] for r in sb.schema("maintenance").table("visit_scores").select("visit_id")
+                     .eq("rubric_version", RUBRIC).in_("visit_id", ids[i:i + 200]).execute().data}
+        visits = [v for v in visits if v["visit_id"] not in done]
 
     evs = {v["visit_id"]: evaluate(v) for v in visits}
 
