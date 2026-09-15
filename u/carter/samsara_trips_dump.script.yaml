@@ -1,0 +1,18 @@
+summary: 'SCRATCH: dump maintenance truck trips (Samsara) for truck<->tech matching'
+description: ''
+lock: '!inline u/carter/samsara_trips_dump.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    name_filter:
+      type: string
+      default: MNT
+    p_end:
+      type: string
+      default: 2026-08-31
+    p_start:
+      type: string
+      default: 2026-08-01
+  required: []
