@@ -45,6 +45,9 @@ schema:
     raw:
       type: boolean
       default: false
+    states_day:
+      type: string
+      default: ''
     stops_for:
       type: string
       default: ''

@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = "", raw: bool = False):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = "", raw: bool = False, states_day: str = ""):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -90,6 +90,42 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 dist[(v["name"], day)] += t.get("distanceMeters") or 0
             cur = ce; time.sleep(0.2)
 
+    if states_day and gps_truck:  # full-day engine states + GPS cadence for one truck
+        v = next(x for x in trucks if gps_truck.lower() in x["name"].lower())
+        base = {"vehicleIds": v["id"], "startTime": f"{states_day}T05:00:00-04:00", "endTime": f"{states_day}T18:00:00-04:00"}
+        def hist(types):
+            out, after = [], None
+            while True:
+                r = sget(tok, "/fleet/vehicles/stats/history", {**base, "types": types, **({"after": after} if after else {})})
+                r.raise_for_status(); j = r.json()
+                for veh in j.get("data", []): out += veh.get(types, [])
+                pg = j.get("pagination", {})
+                if not pg.get("hasNextPage"): break
+                after = pg["endCursor"]
+            return out
+        es = hist("engineStates"); gps = hist("gps")
+        def et(ts): return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(ET)
+        states = [[et(x["time"]).strftime("%H:%M:%S"), x["value"]] for x in es]
+        # collapse to intervals
+        iv = []
+        for i, x in enumerate(es):
+            t0 = et(x["time"]); t1 = et(es[i + 1]["time"]) if i + 1 < len(es) else None
+            iv.append([t0.strftime("%H:%M:%S"), t1.strftime("%H:%M:%S") if t1 else None, x["value"],
+                       round((t1 - t0).total_seconds() / 60, 1) if t1 else None])
+        # gps cadence: points per 5-min bucket + stationary runs (speed<1) with their span
+        from collections import Counter
+        buckets = Counter(et(g["time"]).strftime("%H:%M")[:4] + "0" for g in gps)
+        runs, cur = [], None
+        for g in gps:
+            t = et(g["time"]); still = (g.get("speedMilesPerHour") or 0) < 1
+            if still and cur is None: cur = [t, t, (g["latitude"], g["longitude"]), 1]
+            elif still: cur[1] = t; cur[3] += 1
+            elif cur: runs.append(cur); cur = None
+        if cur: runs.append(cur)
+        runs = [[a.strftime("%H:%M:%S"), b.strftime("%H:%M:%S"), round((b - a).total_seconds() / 60, 1), n, [round(c[0], 5), round(c[1], 5)]]
+                for a, b, c, n in runs if (b - a).total_seconds() >= 60]
+        return {"truck": v["name"], "engine_intervals": iv, "gps_points": len(gps),
+                "gps_points_per_10min": dict(sorted(buckets.items())), "stationary_runs_ge_1min": runs}
     if raw:  # untouched sample of both Samsara payloads for one truck (first MNT match), one day
         v = trucks[0]
         s0 = int(datetime.fromisoformat(f"{p_start}T00:00:00-04:00").timestamp() * 1000)
