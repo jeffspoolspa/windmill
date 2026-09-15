@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = ""):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = ""):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -90,6 +90,30 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 dist[(v["name"], day)] += t.get("distanceMeters") or 0
             cur = ce; time.sleep(0.2)
 
+    if day_log and stops_for:  # one tech-day: ION stops vs the truck's full trip/park log
+        tech_ids = [t for t, n in roster.items() if stops_for.lower() in n.lower()]
+        locs = set()
+        for tid in tech_ids: locs |= stops.get((tid, day_log), set())
+        best, bs = None, 0
+        for v in trucks:
+            p = pts.get((v["name"], day_log))
+            if not p: continue
+            sc = sum(1 for l in locs if any(dist_m(coords[l], q) <= RADIUS_M for q in p)) / max(len(locs), 1)
+            if sc > bs: best, bs = v["name"], sc
+        def fmt(ms): return datetime.fromtimestamp(ms / 1000, ET).strftime("%H:%M")
+        tl = sorted(trips[(best, day_log)]) if best else []
+        log = []
+        for i, t in enumerate(tl):
+            near = min(((round(dist_m(coords[l], (t[2], t[3]))), l) for l in locs), default=None)
+            park = round((tl[i + 1][0] - t[1]) / 60000) if i + 1 < len(tl) else None
+            log.append({"trip": f"{fmt(t[0])}-{fmt(t[1])}", "ends_at": [round(t[2], 5), round(t[3], 5)],
+                        "parked_min": park, "nearest_route_pool_m": near})
+        ion = []
+        for v in vis:
+            if v["actual_tech_id"] in tech_ids and v["visit_date"] == day_log:
+                l = v["service_location_id"]
+                ion.append({"loc": l, "coords": coords.get(l), "start": (v["started_at"] or "")[11:16], "end": (v["ended_at"] or "")[11:16]})
+        return {"truck": best, "score": round(bs, 2), "ion": sorted(ion, key=lambda x: x["start"]), "truck_log": log}
     if stops_for:
         # dwell = gap between consecutive trips of the tech's matched truck, parked at trip_k end
         tech_ids = [t for t, n in roster.items() if stops_for.lower() in n.lower()]
