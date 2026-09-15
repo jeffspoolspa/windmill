@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = ""):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = ""):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -85,11 +85,62 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                         pts[(v["name"], day)].append((c["latitude"], c["longitude"]))
                 ec = t.get("endCoordinates") or {}
                 if ec.get("latitude"):
-                    trips[(v["name"], day)].append((t["startMs"], t.get("endMs") or t["startMs"], ec["latitude"], ec["longitude"]))
+                    trips[(v["name"], day)].append((t["startMs"], t.get("endMs") or t["startMs"], ec["latitude"], ec["longitude"], t.get("distanceMeters") or 0))
                 drive[(v["name"], day)] += (t.get("endMs") or t["startMs"]) - t["startMs"]
                 dist[(v["name"], day)] += t.get("distanceMeters") or 0
             cur = ce; time.sleep(0.2)
 
+    if loc_day and stops_for:  # LOCATION-FIRST: cluster parks by place, match to route pools by distance only
+        tech_ids = [t for t, n in roster.items() if stops_for.lower() in n.lower()]
+        locs = set()
+        for tid in tech_ids: locs |= stops.get((tid, loc_day), set())
+        best, bs = None, 0
+        for v in trucks:
+            p = pts.get((v["name"], loc_day))
+            if not p: continue
+            sc = sum(1 for l in locs if any(dist_m(coords[l], q) <= RADIUS_M for q in p)) / max(len(locs), 1)
+            if sc > bs: best, bs = v["name"], sc
+        def fmt(ms): return datetime.fromtimestamp(ms / 1000, ET).strftime("%H:%M")
+        branches = [(float(b["latitude"]), float(b["longitude"])) for b in sb.table("branches").select("latitude,longitude").execute().data if b["latitude"]]
+        tl = sorted(trips[(best, loc_day)]) if best else []
+        # parks = gap after each trip except the last; cluster by 100 m
+        clusters = []  # {"c":(lat,lng), "parks":[(parkMs, leaveMs)], "trip_idx":[i]}
+        for i, t in enumerate(tl):
+            if i + 1 >= len(tl): break
+            q = (t[2], t[3])
+            for c in clusters:
+                if dist_m(c["c"], q) <= 100:
+                    c["parks"].append((t[1], tl[i + 1][0])); c["trip_idx"].append(i); break
+            else:
+                clusters.append({"c": q, "parks": [(t[1], tl[i + 1][0])], "trip_idx": [i]})
+        # match route pools to nearest cluster within 300 m (distance only)
+        pool_stop = {}
+        for l in locs:
+            near = min(((dist_m(coords[l], c["c"]), k) for k, c in enumerate(clusters)), default=None)
+            if near and near[0] <= 300: pool_stop[l] = (near[1], near[0])
+        stops_out = []
+        for k, c in enumerate(clusters):
+            pools = [l for l, (kk, _) in pool_stop.items() if kk == k]
+            kind = "route pool" if pools else "office" if any(dist_m(b, c["c"]) <= 300 for b in branches) else "non-route"
+            stops_out.append({"stop": k + 1, "coords": [round(c["c"][0], 5), round(c["c"][1], 5)], "kind": kind,
+                              "pools": pools, "parked": [f"{fmt(a)}-{fmt(b)}" for a, b in c["parks"]],
+                              "total_min": round(sum(b - a for a, b in c["parks"]) / 60000)})
+        # legs: trip i goes from cluster-of-(i-1) to cluster-of-i
+        at = {}
+        for k, c in enumerate(clusters):
+            for i in c["trip_idx"]: at[i] = k + 1
+        legs = [{"leg": i + 1, "from": at.get(i - 1, "start"), "to": at.get(i, "end"),
+                 "drive": f"{fmt(t[0])}-{fmt(t[1])}", "min": round((t[1] - t[0]) / 60000), "mi": round(t[4] / 1609, 1)} for i, t in enumerate(tl)]
+        visits_out = []
+        for v in sorted(vis, key=lambda v: v["started_at"] or ""):
+            if v["actual_tech_id"] in tech_ids and v["visit_date"] == loc_day:
+                l = v["service_location_id"]
+                ps = pool_stop.get(l)
+                visits_out.append({"loc": l, "ion": f"{(v['started_at'] or '')[11:16]}-{(v['ended_at'] or '')[11:16]}",
+                                   "stop": ps[0] + 1 if ps else None, "m_from_pin": ps[1] if ps else None})
+        return {"truck": best, "score": round(bs, 2), "stops": stops_out, "legs": legs, "visits": visits_out,
+                "unmatched_visits": [x["loc"] for x in visits_out if x["stop"] is None],
+                "non_route_stops": [x["stop"] for x in stops_out if x["kind"] == "non-route"]}
     if day_log and stops_for:  # one tech-day: ION stops vs the truck's full trip/park log
         tech_ids = [t for t, n in roster.items() if stops_for.lower() in n.lower()]
         locs = set()
