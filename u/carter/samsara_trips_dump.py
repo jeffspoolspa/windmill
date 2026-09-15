@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = ""):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -86,6 +86,19 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 dist[(v["name"], day)] += t.get("distanceMeters") or 0
             cur = ce; time.sleep(0.2)
 
+    if probe_day:  # per stop: nearest trip endpoint from ANY fetched vehicle that day
+        res = {}
+        for (tid, day), locs in stops.items():
+            if day != probe_day or detail_for.lower() not in roster[tid].lower(): continue
+            for l in locs:
+                best = None
+                for v in trucks:
+                    for q in pts.get((v["name"], day), []):
+                        dm = dist_m(coords[l], q)
+                        if best is None or dm < best[0]: best = (round(dm), v["name"])
+                res[f"{coords[l][0]:.5f},{coords[l][1]:.5f}"] = best
+        return {"tech_day": f"{detail_for} {probe_day}", "stops": res,
+                "vehicles_with_trips_that_day": sorted({n for (n, d) in pts if d == probe_day})}
     # score
     out = {}
     for (tid, day), locs in sorted(stops.items(), key=lambda k: (roster[k[0][0]], k[0][1])):
