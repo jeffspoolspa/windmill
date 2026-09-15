@@ -129,11 +129,23 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 t1 = es[j + 1][0] if j + 1 < len(es) else es[j][0]
                 if es[j][1] == "Idle": idle += (t1 - es[j][0]).total_seconds() / 60
                 j += 1
-            t0, t1 = es[i][0], (es[j][0] if j < len(es) else es[-1][0])
+            t0 = es[i][0]
+            open_end = j >= len(es)  # still off at end of window (parked for the night)
+            t1 = es[j][0] if not open_end else t0
             mins = (t1 - t0).total_seconds() / 60
-            if mins >= MIN_STOP_MIN:
-                raw_stops.append({"start": t0, "end": t1, "min": round(mins, 1), "idle_min": round(idle, 1), "coords": loc_at(t0)})
+            if mins >= MIN_STOP_MIN or open_end:
+                raw_stops.append({"start": t0, "end": t1, "min": round(mins, 1) if not open_end else None,
+                                  "idle_min": round(idle, 1), "coords": loc_at(t0), "open": open_end})
             i = j
+        # merge a stop split by a short on-site reposition (same place, engine on < 3 min, moved < 0.2 mi)
+        merged = []
+        for st in raw_stops:
+            if merged and dist_m(merged[-1]["coords"], st["coords"]) <= 100 and (st["start"] - merged[-1]["end"]).total_seconds() < 180:
+                m = merged[-1]; m["end"] = st["end"]; m["idle_min"] = round(m["idle_min"] + st["idle_min"], 1)
+                m["min"] = round((m["end"] - m["start"]).total_seconds() / 60, 1) if not st["open"] else None; m["open"] = st["open"]
+            else:
+                merged.append(st)
+        raw_stops = merged
         # place clusters (<=100 m) so return visits group; classify
         places = []
         for st in raw_stops:
@@ -163,13 +175,13 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 visits_out.append({"loc": v["service_location_id"], "ion": f"{(v['started_at'] or '')[11:16]}-{(v['ended_at'] or '')[11:16]}",
                                    "place": pool_place.get(v["service_location_id"])})
         tot = {"pool": 0, "shop": 0, "non-route": 0, "idle": 0}
-        for st in raw_stops: tot[st["kind"]] += st["min"]; tot["idle"] += st["idle_min"]
+        for st in raw_stops: tot[st["kind"]] += st["min"] or 0; tot["idle"] += st["idle_min"]
         tot["drive"] = round(sum(l["min"] for l in legs), 1); tot["miles"] = round(sum(l["mi"] for l in legs), 1)
         on = [t for t, v in es if v == "On"]
         return {"tech": stops_for, "day": build_day, "truck": best["name"],
-                "first_engine_on": hhmm(on[0]) if on else None, "last_engine_off": hhmm(raw_stops[-1]["start"]) if raw_stops else None,
+                "first_engine_on": hhmm(on[0]) if on else None, "last_engine_off": hhmm(raw_stops[-1]["start"]) if raw_stops else None, "ends_at_shop": bool(raw_stops and raw_stops[-1]["kind"] == "shop" and raw_stops[-1]["open"]),
                 "stops": [{"n": k + 1, "place": st["place"], "kind": st["kind"], "pools": st["pools"], "arrive": hhmm(st["start"]), "depart": hhmm(st["end"]),
-                           "min": st["min"], "idle_min": st["idle_min"], "coords": [round(st["coords"][0], 5), round(st["coords"][1], 5)]} for k, st in enumerate(raw_stops)],
+                           "min": st["min"], "idle_min": st["idle_min"], "open": st["open"], "coords": [round(st["coords"][0], 5), round(st["coords"][1], 5)]} for k, st in enumerate(raw_stops)],
                 "legs": legs, "visits": visits_out, "unmatched_visits": [x["loc"] for x in visits_out if x["place"] is None],
                 "totals_min": {k: round(v, 1) for k, v in tot.items()}}
     if states_day and gps_truck:  # full-day engine states + GPS cadence for one truck
