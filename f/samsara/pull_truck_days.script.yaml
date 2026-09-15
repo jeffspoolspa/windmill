@@ -1,0 +1,21 @@
+summary: 'Samsara layer: per truck-day stops + legs (engineStates + GPS) ->
+  maintenance.samsara_stops/legs/vehicles'
+description: No techs, no business rules. Defaults to yesterday; pass
+  p_start/p_end to backfill. name_filter is |-separated substrings of vehicle
+  names ("" = all vehicles).
+lock: '!inline f/samsara/pull_truck_days.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    name_filter:
+      type: string
+      default: MNT|Spare
+    p_end:
+      type: string
+      default: ''
+    p_start:
+      type: string
+      default: ''
+  required: []
