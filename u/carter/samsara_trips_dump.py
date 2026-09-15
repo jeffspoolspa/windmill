@@ -95,7 +95,7 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
         s0 = int(datetime.fromisoformat(f"{p_start}T00:00:00-04:00").timestamp() * 1000)
         tr = sget(tok, "/v1/fleet/trips", {"vehicleId": v["id"], "startMs": s0, "endMs": s0 + 86400000}).json()
         g = sget(tok, "/fleet/vehicles/stats/history", {"vehicleIds": v["id"], "types": "gps",
-                 "startTime": f"{p_start}T10:40:00-04:00", "endTime": f"{p_start}T10:42:00-04:00"}).json()
+                 "startTime": f"{p_start}T10:46:00-04:00", "endTime": f"{p_start}T10:50:00-04:00"}).json()
         veh = sget(tok, "/fleet/vehicles", {"limit": 1}).json()
         return {"vehicle": v, "trips_response_keys": list(tr.keys()), "trip_count": len(tr.get("trips", [])),
                 "trip_sample": tr.get("trips", [])[:2],
