@@ -97,7 +97,14 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
         g = sget(tok, "/fleet/vehicles/stats/history", {"vehicleIds": v["id"], "types": "gps",
                  "startTime": f"{p_start}T10:46:00-04:00", "endTime": f"{p_start}T10:50:00-04:00"}).json()
         veh = sget(tok, "/fleet/vehicles", {"limit": 1}).json()
-        return {"vehicle": v, "trips_response_keys": list(tr.keys()), "trip_count": len(tr.get("trips", [])),
+        addrs, after, n = [], None, 0
+        while True:
+            a = sget(tok, "/addresses", {"limit": 512, **({"after": after} if after else {})}).json()
+            n += len(a.get("data", [])); addrs = addrs or a.get("data", [])[:2]
+            pg = a.get("pagination", {})
+            if not pg.get("hasNextPage"): break
+            after = pg["endCursor"]
+        return {"address_count": n, "address_sample": addrs, "vehicle": v, "trips_response_keys": list(tr.keys()), "trip_count": len(tr.get("trips", [])),
                 "trip_sample": tr.get("trips", [])[:2],
                 "gps_response_keys": list(g.keys()), "gps_pagination": g.get("pagination"),
                 "gps_sample": {k: (val[:3] if k == "gps" else val) for k, val in (g.get("data") or [{}])[0].items()},
