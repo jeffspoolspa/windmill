@@ -6,6 +6,18 @@ schema:
   $schema: https://json-schema.org/draft/2020-12/schema
   type: object
   properties:
+    compact:
+      type: boolean
+      default: false
+    day_log:
+      type: string
+      default: ''
+    detail_for:
+      type: string
+      default: ''
+    loc_day:
+      type: string
+      default: ''
     name_filter:
       type: string
       default: MNT
@@ -15,4 +27,10 @@ schema:
     p_start:
       type: string
       default: 2026-08-01
+    probe_day:
+      type: string
+      default: ''
+    stops_for:
+      type: string
+      default: ''
   required: []
