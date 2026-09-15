@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = ""):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -119,6 +119,8 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
             if d["truck"]: shared[(d["truck"], d["day"])].append(name)
     shared = [[k[1], k[0], v] for k, v in sorted(shared.items(), key=lambda kv: (kv[0][1], kv[0][0])) if len(v) > 1]
     truck_days = {v["name"]: sum(1 for (n, d) in drive if n == v["name"]) for v in trucks}
+    if compact:
+        return [[n, d["day"], d["truck"], d["drive_min"], d["miles"], d["score"]] for n, days in out.items() for d in days]
     if detail_for:
         return {n: d for n, d in out.items() if detail_for.lower() in n.lower()}
     return {"summary": summary, "shared_truck_days": shared,
