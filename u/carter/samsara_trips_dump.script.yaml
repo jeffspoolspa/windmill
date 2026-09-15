@@ -42,6 +42,9 @@ schema:
     probe_day:
       type: string
       default: ''
+    raw:
+      type: boolean
+      default: false
     stops_for:
       type: string
       default: ''

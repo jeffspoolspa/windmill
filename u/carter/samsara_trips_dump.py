@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = ""):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = "", raw: bool = False):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -90,6 +90,18 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 dist[(v["name"], day)] += t.get("distanceMeters") or 0
             cur = ce; time.sleep(0.2)
 
+    if raw:  # untouched sample of both Samsara payloads for one truck (first MNT match), one day
+        v = trucks[0]
+        s0 = int(datetime.fromisoformat(f"{p_start}T00:00:00-04:00").timestamp() * 1000)
+        tr = sget(tok, "/v1/fleet/trips", {"vehicleId": v["id"], "startMs": s0, "endMs": s0 + 86400000}).json()
+        g = sget(tok, "/fleet/vehicles/stats/history", {"vehicleIds": v["id"], "types": "gps",
+                 "startTime": f"{p_start}T10:40:00-04:00", "endTime": f"{p_start}T10:42:00-04:00"}).json()
+        veh = sget(tok, "/fleet/vehicles", {"limit": 1}).json()
+        return {"vehicle": v, "trips_response_keys": list(tr.keys()), "trip_count": len(tr.get("trips", [])),
+                "trip_sample": tr.get("trips", [])[:2],
+                "gps_response_keys": list(g.keys()), "gps_pagination": g.get("pagination"),
+                "gps_sample": {k: (val[:3] if k == "gps" else val) for k, val in (g.get("data") or [{}])[0].items()},
+                "vehicles_sample": veh}
     if gps_truck:  # raw GPS breadcrumbs for one truck in a window; distance to a lat,lng if given
         v = next(x for x in trucks if gps_truck.lower() in x["name"].lower())
         r = sget(tok, "/fleet/vehicles/stats/history", {"vehicleIds": v["id"], "types": "gps",
