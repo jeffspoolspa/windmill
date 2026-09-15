@@ -36,6 +36,9 @@ schema:
     loc_day:
       type: string
       default: ''
+    month_write:
+      type: boolean
+      default: false
     name_filter:
       type: string
       default: MNT

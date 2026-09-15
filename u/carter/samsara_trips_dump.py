@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = "", raw: bool = False, states_day: str = "", build_day: str = "", extract_day: str = ""):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = "", raw: bool = False, states_day: str = "", build_day: str = "", extract_day: str = "", month_write: bool = False):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -90,6 +90,90 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 dist[(v["name"], day)] += t.get("distanceMeters") or 0
             cur = ce; time.sleep(0.2)
 
+    if month_write and stops_for:  # all days for one tech: engine-state stops+legs -> classify -> upsert truck_stops/truck_legs
+        MIN_STOP_MIN = 2
+        tech_ids = [t for t, n in roster.items() if stops_for.lower() in n.lower()]
+        branches = [(float(b["latitude"]), float(b["longitude"])) for b in sb.table("branches").select("latitude,longitude").execute().data if b["latitude"]]
+        def et(ts): return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(ET)
+        def hist(vid, day, types):
+            out, after = [], None
+            base = {"vehicleIds": vid, "startTime": f"{day}T00:00:00-04:00", "endTime": f"{day}T23:59:59-04:00"}
+            while True:
+                r = sget(tok, "/fleet/vehicles/stats/history", {**base, "types": types, **({"after": after} if after else {})})
+                r.raise_for_status(); j = r.json()
+                for veh in j.get("data", []): out += veh.get(types, [])
+                pg = j.get("pagination", {})
+                if not pg.get("hasNextPage"): break
+                after = pg["endCursor"]
+            return out
+        days = sorted({d for (t, d) in stops if t in tech_ids})
+        written, skipped = 0, []
+        for day in days:
+            tid = tech_ids[0]
+            locs = set()
+            for t in tech_ids: locs |= stops.get((t, day), set())
+            best, bs = None, 0
+            for v in trucks:
+                p = pts.get((v["name"], day))
+                if not p: continue
+                sc = sum(1 for l in locs if any(dist_m(coords[l], q) <= RADIUS_M for q in p)) / max(len(locs), 1)
+                if sc > bs: best, bs = v, sc
+            if not best or bs < MIN_SCORE: skipped.append([day, round(bs, 2)]); continue
+            es = [(et(x["time"]), x["value"]) for x in hist(best["id"], day, "engineStates")]
+            gps = [(et(g["time"]), g["latitude"], g["longitude"], (g.get("reverseGeo") or {}).get("formattedLocation"), (g.get("address") or {}).get("name")) for g in hist(best["id"], day, "gps")]
+            if not es or not gps: skipped.append([day, "no samsara history"]); continue
+            def fix_at(t): return min(gps, key=lambda g: abs((g[0] - t).total_seconds()))
+            st_list, i = [], 0
+            while i < len(es):
+                if es[i][1] == "On": i += 1; continue
+                j, idle = i, 0.0
+                while j < len(es) and es[j][1] != "On":
+                    t1 = es[j + 1][0] if j + 1 < len(es) else es[j][0]
+                    if es[j][1] == "Idle": idle += (t1 - es[j][0]).total_seconds() / 60
+                    j += 1
+                t0 = es[i][0]; open_end = j >= len(es); t1 = es[j][0] if not open_end else t0
+                if (t1 - t0).total_seconds() / 60 >= MIN_STOP_MIN or open_end:
+                    f = fix_at(t0)
+                    st_list.append({"arrive": t0, "depart": t1, "open": open_end, "idle": idle, "lat": f[1], "lng": f[2], "addr": f[3], "geo": f[4]})
+                i = j
+            merged = []
+            for st in st_list:
+                if merged and dist_m((merged[-1]["lat"], merged[-1]["lng"]), (st["lat"], st["lng"])) <= 100 and (st["arrive"] - merged[-1]["depart"]).total_seconds() < 180:
+                    merged[-1]["depart"] = st["depart"]; merged[-1]["idle"] += st["idle"]; merged[-1]["open"] = st["open"]
+                else: merged.append(st)
+            st_list = merged
+            places = []
+            for st in st_list:
+                for k, c in enumerate(places):
+                    if dist_m(c, (st["lat"], st["lng"])) <= 100: st["place"] = k + 1; break
+                else: places.append((st["lat"], st["lng"])); st["place"] = len(places)
+            pool_place = {}
+            for l in locs:
+                near = min(((dist_m(coords[l], c), k + 1) for k, c in enumerate(places)), default=None)
+                if near and near[0] <= 300: pool_place[l] = near[1]
+            for st in st_list:
+                st["pools"] = [l for l, k in pool_place.items() if k == st["place"]]
+                st["kind"] = "shop" if any(dist_m(b, (st["lat"], st["lng"])) <= 300 for b in branches) else "pool" if st["pools"] else "non-route"
+            now = datetime.now(timezone.utc).isoformat()
+            rows_s = [{"employee_id": tid, "day": day, "stop": k + 1, "truck": best["name"], "arrive": st["arrive"].isoformat(),
+                       "depart": None if st["open"] else st["depart"].isoformat(),
+                       "min": None if st["open"] else round((st["depart"] - st["arrive"]).total_seconds() / 60, 1),
+                       "idle_min": round(st["idle"], 1), "lat": st["lat"], "lng": st["lng"], "address": st["addr"], "geofence": st["geo"],
+                       "kind": st["kind"], "place": st["place"], "location_ids": st["pools"], "updated_at": now}
+                      for k, st in enumerate(st_list)]
+            rows_l = []
+            for k, (a, b) in enumerate(zip(st_list, st_list[1:])):
+                path = [g for g in gps if a["depart"] <= g[0] <= b["arrive"]]
+                mi = sum(dist_m(path[q][1:3], path[q + 1][1:3]) for q in range(len(path) - 1)) / 1609
+                rows_l.append({"employee_id": tid, "day": day, "leg": k + 1, "from_stop": k + 1, "to_stop": k + 2,
+                               "depart": a["depart"].isoformat(), "arrive": b["arrive"].isoformat(),
+                               "min": round((b["arrive"] - a["depart"]).total_seconds() / 60, 1), "mi": round(mi, 1),
+                               "kind": f'{a["kind"]}->{b["kind"]}', "updated_at": now})
+            # ponytail: upsert on the PK; a re-run with fewer stops leaves stale tail rows — add a per-day clear when this becomes the keeper
+            if rows_s: sb.schema("maintenance").table("truck_stops").upsert(rows_s).execute()
+            if rows_l: sb.schema("maintenance").table("truck_legs").upsert(rows_l).execute()
+            written += 1
+        return {"tech": stops_for, "days_written": written, "skipped": skipped}
     if extract_day and gps_truck:  # SAMSARA LAYER ONLY: stops (where/when/idle) + legs (from/to/when). No business rules.
         MIN_STOP_MIN = 2
         v = next(x for x in trucks if gps_truck.lower() in x["name"].lower())
