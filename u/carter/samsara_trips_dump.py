@@ -124,10 +124,15 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
             if not es or not gps: skipped.append([day, "no samsara history"]); continue
             def fix_at(t): return min(gps, key=lambda g: abs((g[0] - t).total_seconds()))
             st_list, i = [], 0
-            if es[0][1] == "On":  # truck was parked overnight: synthesize the opening stop (arrive = midnight, depart = first engine-on)
-                f = fix_at(es[0][0])
-                st_list.append({"arrive": es[0][0].replace(hour=0, minute=0, second=0, microsecond=0), "depart": es[0][0], "open": False,
-                                "idle": 0.0, "lat": f[1], "lng": f[2], "addr": f[3], "geo": f[4], "overnight": True})
+            # overnight park: everything before the first On (Samsara emits a 0-length Off right before it) is one stop,
+            # arrive = midnight, depart = first engine-on, min NULL
+            k = next((n for n, x in enumerate(es) if x[1] == "On"), None)
+            if k is not None:
+                f = fix_at(es[k][0])
+                st_list.append({"arrive": es[k][0].replace(hour=0, minute=0, second=0, microsecond=0), "depart": es[k][0], "open": False,
+                                "idle": round(sum((es[n + 1][0] - es[n][0]).total_seconds() / 60 for n in range(k) if es[n][1] == "Idle"), 1),
+                                "lat": f[1], "lng": f[2], "addr": f[3], "geo": f[4], "overnight": True})
+                i = k
             while i < len(es):
                 if es[i][1] == "On": i += 1; continue
                 j, idle = i, 0.0
@@ -142,7 +147,7 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 i = j
             merged = []
             for st in st_list:
-                if merged and dist_m((merged[-1]["lat"], merged[-1]["lng"]), (st["lat"], st["lng"])) <= 100 and (st["arrive"] - merged[-1]["depart"]).total_seconds() < 180:
+                if merged and not merged[-1].get("overnight") and dist_m((merged[-1]["lat"], merged[-1]["lng"]), (st["lat"], st["lng"])) <= 100 and (st["arrive"] - merged[-1]["depart"]).total_seconds() < 180:
                     merged[-1]["depart"] = st["depart"]; merged[-1]["idle"] += st["idle"]; merged[-1]["open"] = st["open"]
                 else: merged.append(st)
             st_list = merged
