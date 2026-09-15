@@ -127,7 +127,7 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
         def fmt(ms): return datetime.fromtimestamp(ms / 1000, ET).strftime("%H:%M")
         def wall(ts):  # ION started_at/ended_at = ET wall time mislabeled UTC
             return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=ET) if ts else None
-        visits_out, nonpool, summ = [], [], {"logged_min": 0, "dwell_min": 0, "matched": 0, "unmatched": 0, "nonpool_min": 0, "nonpool_stops": 0}
+        visits_out, nonpool, geo_suspect, summ = [], [], [], {"logged_min": 0, "dwell_min": 0, "matched": 0, "unmatched": 0, "nonpool_min": 0, "nonpool_stops": 0}
         days = sorted({v["visit_date"] for v in vis if v["actual_tech_id"] in tech_ids})
         for day in days:
             locs = set()
@@ -143,7 +143,7 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
             if not best or bs < MIN_SCORE: continue
             tl = sorted(trips[(best, day)])
             dwells = [(tl[i][1], tl[i + 1][0], tl[i][2], tl[i][3]) for i in range(len(tl) - 1)]  # (parkMs, leaveMs, lat, lng)
-            used = set()
+            used = {}
             # group visit rows per location (multi-body sites = one stop)
             per_loc = defaultdict(list)
             for v in vis:
@@ -154,21 +154,33 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 en = [wall(r["ended_at"]) for r in rows if r["ended_at"]]
                 lst, len_ = (min(st) if st else None), (max(en) if en else None)
                 logged = round((len_ - lst).total_seconds() / 60) if lst and len_ else None
-                cands = [(i, d) for i, d in enumerate(dwells) if dist_m(coords[l], (d[2], d[3])) <= 300 and i not in used]
+                # a park may serve two pools within 150 m of each other (tech walks) -> not consumed
+                cands = [(i, d) for i, d in enumerate(dwells) if dist_m(coords[l], (d[2], d[3])) <= 300
+                         and (i not in used or any(dist_m(coords[l], coords[o]) <= 150 for o in used[i]))]
+                how = "geo"
                 if cands and lst:
                     i, d = min(cands, key=lambda c: abs(c[1][0] / 1000 - lst.timestamp()))
                 elif cands:
                     i, d = cands[0]
+                elif lst and len_:  # geocode suspect: unclaimed park overlapping the ION window
+                    ov = [(min(d[1] / 1000, len_.timestamp()) - max(d[0] / 1000, lst.timestamp()), i, d)
+                          for i, d in enumerate(dwells) if i not in used]
+                    ov = [o for o in ov if o[0] >= 300]  # >= 5 min overlap
+                    if ov:
+                        _, i, d = max(ov); how = "time"
+                        geo_suspect.append([day, l, round(dist_m(coords[l], (d[2], d[3]))), round(d[2], 5), round(d[3], 5)])
+                    else:
+                        i, d = None, None
                 else:
                     i, d = None, None
                 if d:
-                    used.add(i); dm = round((d[1] - d[0]) / 60000)
+                    used.setdefault(i, []).append(l); dm = round((d[1] - d[0]) / 60000)
                     summ["matched"] += 1; summ["dwell_min"] += dm
                     if logged: summ["logged_min"] += logged
-                    visits_out.append([day, l, lst.strftime("%H:%M") if lst else None, logged, fmt(d[0]), dm, len(rows)])
+                    visits_out.append([day, l, lst.strftime("%H:%M") if lst else None, logged, fmt(d[0]), dm, len(rows), how])
                 else:
                     summ["unmatched"] += 1
-                    visits_out.append([day, l, lst.strftime("%H:%M") if lst else None, logged, None, None, len(rows)])
+                    visits_out.append([day, l, lst.strftime("%H:%M") if lst else None, logged, None, None, len(rows), None])
             for i, d in enumerate(dwells):
                 dm = round((d[1] - d[0]) / 60000)
                 if i in used or dm < 5: continue
@@ -178,7 +190,7 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                        "customer" if any(dist_m(a, q) <= 120 for a in all_locs) else "other"
                 nonpool.append([day, fmt(d[0]), dm, kind, round(q[0], 5), round(q[1], 5)])
                 summ["nonpool_min"] += dm; summ["nonpool_stops"] += 1
-        return {"tech": stops_for, "summary": summ, "visits": visits_out, "nonpool": nonpool}
+        return {"tech": stops_for, "summary": summ, "visits": visits_out, "nonpool": nonpool, "geo_suspect": geo_suspect}
     if probe_day:  # per stop: nearest trip endpoint from ANY fetched vehicle that day
         res = {}
         for (tid, day), locs in stops.items():
