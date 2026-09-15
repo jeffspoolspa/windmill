@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = ""):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = ""):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -37,7 +37,7 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
     # stops with coords
     vis, off = [], 0
     while True:  # PostgREST caps at 1000 rows per request
-        page = sb.schema("maintenance").table("visits").select("actual_tech_id,visit_date,service_location_id") \
+        page = sb.schema("maintenance").table("visits").select("id,actual_tech_id,visit_date,service_location_id,started_at,ended_at") \
                  .gte("visit_date", p_start).lte("visit_date", p_end).eq("status", "completed") \
                  .in_("actual_tech_id", list(roster)).range(off, off + 999).execute().data
         vis += page
@@ -67,6 +67,7 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
     s = int(datetime.fromisoformat(f"{p_start}T00:00:00-04:00").timestamp() * 1000)
     e = int((datetime.fromisoformat(f"{p_end}T00:00:00-04:00") + timedelta(days=1)).timestamp() * 1000)
     pts = defaultdict(list)      # (truck, day) -> [(lat,lng)]
+    trips = defaultdict(list)    # (truck, day) -> [(startMs,endMs,endlat,endlng)]
     drive = defaultdict(int)     # (truck, day) -> trip ms
     dist = defaultdict(int)      # (truck, day) -> meters
     errors = {}
@@ -82,10 +83,78 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 for c in (t.get("startCoordinates"), t.get("endCoordinates")):
                     if c and c.get("latitude"):
                         pts[(v["name"], day)].append((c["latitude"], c["longitude"]))
+                ec = t.get("endCoordinates") or {}
+                if ec.get("latitude"):
+                    trips[(v["name"], day)].append((t["startMs"], t.get("endMs") or t["startMs"], ec["latitude"], ec["longitude"]))
                 drive[(v["name"], day)] += (t.get("endMs") or t["startMs"]) - t["startMs"]
                 dist[(v["name"], day)] += t.get("distanceMeters") or 0
             cur = ce; time.sleep(0.2)
 
+    if stops_for:
+        # dwell = gap between consecutive trips of the tech's matched truck, parked at trip_k end
+        tech_ids = [t for t, n in roster.items() if stops_for.lower() in n.lower()]
+        branches = [(float(b["latitude"]), float(b["longitude"])) for b in sb.table("branches").select("latitude,longitude").execute().data if b["latitude"]]
+        all_locs, off = [], 0
+        while True:
+            pg = sb.table("service_locations").select("latitude,longitude").not_.is_("latitude", "null").range(off, off + 999).execute().data
+            all_locs += [(float(l["latitude"]), float(l["longitude"])) for l in pg]
+            if len(pg) < 1000: break
+            off += 1000
+        def fmt(ms): return datetime.fromtimestamp(ms / 1000, ET).strftime("%H:%M")
+        def wall(ts):  # ION started_at/ended_at = ET wall time mislabeled UTC
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=ET) if ts else None
+        visits_out, nonpool, summ = [], [], {"logged_min": 0, "dwell_min": 0, "matched": 0, "unmatched": 0, "nonpool_min": 0, "nonpool_stops": 0}
+        days = sorted({v["visit_date"] for v in vis if v["actual_tech_id"] in tech_ids})
+        for day in days:
+            locs = set()
+            for tid in tech_ids: locs |= stops.get((tid, day), set())
+            if not locs: continue
+            # best truck for the day (same scoring as main mode)
+            best, bs = None, 0
+            for v in trucks:
+                p = pts.get((v["name"], day))
+                if not p: continue
+                sc = sum(1 for l in locs if any(dist_m(coords[l], q) <= RADIUS_M for q in p)) / len(locs)
+                if sc > bs: best, bs = v["name"], sc
+            if not best or bs < MIN_SCORE: continue
+            tl = sorted(trips[(best, day)])
+            dwells = [(tl[i][1], tl[i + 1][0], tl[i][2], tl[i][3]) for i in range(len(tl) - 1)]  # (parkMs, leaveMs, lat, lng)
+            used = set()
+            # group visit rows per location (multi-body sites = one stop)
+            per_loc = defaultdict(list)
+            for v in vis:
+                if v["actual_tech_id"] in tech_ids and v["visit_date"] == day and v["service_location_id"] in locs:
+                    per_loc[v["service_location_id"]].append(v)
+            for l, rows in per_loc.items():
+                st = [wall(r["started_at"]) for r in rows if r["started_at"]]
+                en = [wall(r["ended_at"]) for r in rows if r["ended_at"]]
+                lst, len_ = (min(st) if st else None), (max(en) if en else None)
+                logged = round((len_ - lst).total_seconds() / 60) if lst and len_ else None
+                cands = [(i, d) for i, d in enumerate(dwells) if dist_m(coords[l], (d[2], d[3])) <= 300 and i not in used]
+                if cands and lst:
+                    i, d = min(cands, key=lambda c: abs(c[1][0] / 1000 - lst.timestamp()))
+                elif cands:
+                    i, d = cands[0]
+                else:
+                    i, d = None, None
+                if d:
+                    used.add(i); dm = round((d[1] - d[0]) / 60000)
+                    summ["matched"] += 1; summ["dwell_min"] += dm
+                    if logged: summ["logged_min"] += logged
+                    visits_out.append([day, l, lst.strftime("%H:%M") if lst else None, logged, fmt(d[0]), dm, len(rows)])
+                else:
+                    summ["unmatched"] += 1
+                    visits_out.append([day, l, lst.strftime("%H:%M") if lst else None, logged, None, None, len(rows)])
+            for i, d in enumerate(dwells):
+                dm = round((d[1] - d[0]) / 60000)
+                if i in used or dm < 5: continue
+                q = (d[2], d[3])
+                if any(dist_m(coords[l], q) <= 300 for l in locs): continue  # near a route pool, just unmatched
+                kind = "shop" if any(dist_m(b, q) <= 300 for b in branches) else \
+                       "customer" if any(dist_m(a, q) <= 120 for a in all_locs) else "other"
+                nonpool.append([day, fmt(d[0]), dm, kind, round(q[0], 5), round(q[1], 5)])
+                summ["nonpool_min"] += dm; summ["nonpool_stops"] += 1
+        return {"tech": stops_for, "summary": summ, "visits": visits_out, "nonpool": nonpool}
     if probe_day:  # per stop: nearest trip endpoint from ANY fetched vehicle that day
         res = {}
         for (tid, day), locs in stops.items():
