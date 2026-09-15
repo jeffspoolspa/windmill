@@ -149,7 +149,7 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
             for v in vis:
                 if v["actual_tech_id"] in tech_ids and v["visit_date"] == day and v["service_location_id"] in locs:
                     per_loc[v["service_location_id"]].append(v)
-            for l, rows in per_loc.items():
+            for l, rows in sorted(per_loc.items(), key=lambda kv: min((r["started_at"] or "9") for r in kv[1])):
                 st = [wall(r["started_at"]) for r in rows if r["started_at"]]
                 en = [wall(r["ended_at"]) for r in rows if r["ended_at"]]
                 lst, len_ = (min(st) if st else None), (max(en) if en else None)
@@ -158,7 +158,10 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 cands = [(i, d) for i, d in enumerate(dwells) if dist_m(coords[l], (d[2], d[3])) <= 300
                          and (i not in used or any(dist_m(coords[l], coords[o]) <= 150 for o in used[i]))]
                 how = "geo"
-                if cands and lst:
+                if cands and lst and len_:  # prefer the park that overlaps the ION window, then nearest in time
+                    def ov(c): return min(c[1][1] / 1000, len_.timestamp()) - max(c[1][0] / 1000, lst.timestamp())
+                    i, d = max(cands, key=lambda c: (ov(c) > 0, ov(c), -abs(c[1][0] / 1000 - lst.timestamp())))
+                elif cands and lst:
                     i, d = min(cands, key=lambda c: abs(c[1][0] / 1000 - lst.timestamp()))
                 elif cands:
                     i, d = cands[0]
