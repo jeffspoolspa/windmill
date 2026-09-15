@@ -6,6 +6,9 @@ schema:
   $schema: https://json-schema.org/draft/2020-12/schema
   type: object
   properties:
+    build_day:
+      type: string
+      default: ''
     compact:
       type: boolean
       default: false

@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = "", raw: bool = False, states_day: str = ""):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = "", raw: bool = False, states_day: str = "", build_day: str = ""):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -90,6 +90,88 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 dist[(v["name"], day)] += t.get("distanceMeters") or 0
             cur = ce; time.sleep(0.2)
 
+    if build_day and stops_for:  # KEEPER CANDIDATE: engine-state stops + legs + classification for one tech-day
+        MIN_STOP_MIN = 2
+        tech_ids = [t for t, n in roster.items() if stops_for.lower() in n.lower()]
+        locs = set()
+        for tid in tech_ids: locs |= stops.get((tid, build_day), set())
+        best, bs = None, 0
+        for v in trucks:
+            p = pts.get((v["name"], build_day))
+            if not p: continue
+            sc = sum(1 for l in locs if any(dist_m(coords[l], q) <= RADIUS_M for q in p)) / max(len(locs), 1)
+            if sc > bs: best, bs = v, sc
+        if not best: return {"error": "no truck matched", "tech": stops_for, "day": build_day}
+        base = {"vehicleIds": best["id"], "startTime": f"{build_day}T00:00:00-04:00", "endTime": f"{build_day}T23:59:59-04:00"}
+        def hist(types):
+            out, after = [], None
+            while True:
+                r = sget(tok, "/fleet/vehicles/stats/history", {**base, "types": types, **({"after": after} if after else {})})
+                r.raise_for_status(); j = r.json()
+                for veh in j.get("data", []): out += veh.get(types, [])
+                pg = j.get("pagination", {})
+                if not pg.get("hasNextPage"): break
+                after = pg["endCursor"]
+            return out
+        def et(ts): return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(ET)
+        es = [(et(x["time"]), x["value"]) for x in hist("engineStates")]
+        gps = [(et(g["time"]), g["latitude"], g["longitude"]) for g in hist("gps")]
+        branches = [(float(b["latitude"]), float(b["longitude"])) for b in sb.table("branches").select("latitude,longitude").execute().data if b["latitude"]]
+        def loc_at(t):  # nearest GPS fix in time
+            return min(gps, key=lambda g: abs((g[0] - t).total_seconds()))[1:] if gps else None
+        def hhmm(t): return t.strftime("%H:%M")
+        # stops = contiguous Off/Idle spans >= MIN_STOP_MIN; idle tracked inside
+        raw_stops, i = [], 0
+        while i < len(es):
+            if es[i][1] == "On": i += 1; continue
+            j, idle = i, 0.0
+            while j < len(es) and es[j][1] != "On":
+                t1 = es[j + 1][0] if j + 1 < len(es) else es[j][0]
+                if es[j][1] == "Idle": idle += (t1 - es[j][0]).total_seconds() / 60
+                j += 1
+            t0, t1 = es[i][0], (es[j][0] if j < len(es) else es[-1][0])
+            mins = (t1 - t0).total_seconds() / 60
+            if mins >= MIN_STOP_MIN:
+                raw_stops.append({"start": t0, "end": t1, "min": round(mins, 1), "idle_min": round(idle, 1), "coords": loc_at(t0)})
+            i = j
+        # place clusters (<=100 m) so return visits group; classify
+        places = []
+        for st in raw_stops:
+            for k, c in enumerate(places):
+                if dist_m(c, st["coords"]) <= 100: st["place"] = k + 1; break
+            else:
+                places.append(st["coords"]); st["place"] = len(places)
+        pool_place = {}
+        for l in locs:
+            near = min(((dist_m(coords[l], c), k + 1) for k, c in enumerate(places)), default=None)
+            if near and near[0] <= 300: pool_place[l] = near[1]
+        for st in raw_stops:
+            pools = [l for l, k in pool_place.items() if k == st["place"]]
+            st["kind"] = "shop" if any(dist_m(b, st["coords"]) <= 300 for b in branches) else "pool" if pools else "non-route"
+            st["pools"] = pools
+        # legs between consecutive stops; miles = GPS path length
+        legs = []
+        for a, b in zip(raw_stops, raw_stops[1:]):
+            path = [g for g in gps if a["end"] <= g[0] <= b["start"]]
+            mi = sum(dist_m(path[k][1:], path[k + 1][1:]) for k in range(len(path) - 1)) / 1609
+            legs.append({"from": a["place"], "to": b["place"], "kind": f'{a["kind"]}→{b["kind"]}',
+                         "depart": hhmm(a["end"]), "arrive": hhmm(b["start"]),
+                         "min": round((b["start"] - a["end"]).total_seconds() / 60, 1), "mi": round(mi, 1)})
+        visits_out = []
+        for v in sorted(vis, key=lambda v: v["started_at"] or ""):
+            if v["actual_tech_id"] in tech_ids and v["visit_date"] == build_day:
+                visits_out.append({"loc": v["service_location_id"], "ion": f"{(v['started_at'] or '')[11:16]}-{(v['ended_at'] or '')[11:16]}",
+                                   "place": pool_place.get(v["service_location_id"])})
+        tot = {"pool": 0, "shop": 0, "non-route": 0, "idle": 0}
+        for st in raw_stops: tot[st["kind"]] += st["min"]; tot["idle"] += st["idle_min"]
+        tot["drive"] = round(sum(l["min"] for l in legs), 1); tot["miles"] = round(sum(l["mi"] for l in legs), 1)
+        on = [t for t, v in es if v == "On"]
+        return {"tech": stops_for, "day": build_day, "truck": best["name"],
+                "first_engine_on": hhmm(on[0]) if on else None, "last_engine_off": hhmm(raw_stops[-1]["start"]) if raw_stops else None,
+                "stops": [{"n": k + 1, "place": st["place"], "kind": st["kind"], "pools": st["pools"], "arrive": hhmm(st["start"]), "depart": hhmm(st["end"]),
+                           "min": st["min"], "idle_min": st["idle_min"], "coords": [round(st["coords"][0], 5), round(st["coords"][1], 5)]} for k, st in enumerate(raw_stops)],
+                "legs": legs, "visits": visits_out, "unmatched_visits": [x["loc"] for x in visits_out if x["place"] is None],
+                "totals_min": {k: round(v, 1) for k, v in tot.items()}}
     if states_day and gps_truck:  # full-day engine states + GPS cadence for one truck
         v = next(x for x in trucks if gps_truck.lower() in x["name"].lower())
         base = {"vehicleIds": v["id"], "startTime": f"{states_day}T05:00:00-04:00", "endTime": f"{states_day}T18:00:00-04:00"}
