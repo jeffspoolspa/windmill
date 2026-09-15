@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = "", raw: bool = False, states_day: str = "", build_day: str = ""):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = "", raw: bool = False, states_day: str = "", build_day: str = "", extract_day: str = ""):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -90,6 +90,59 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 dist[(v["name"], day)] += t.get("distanceMeters") or 0
             cur = ce; time.sleep(0.2)
 
+    if extract_day and gps_truck:  # SAMSARA LAYER ONLY: stops (where/when/idle) + legs (from/to/when). No business rules.
+        MIN_STOP_MIN = 2
+        v = next(x for x in trucks if gps_truck.lower() in x["name"].lower())
+        base = {"vehicleIds": v["id"], "startTime": f"{extract_day}T00:00:00-04:00", "endTime": f"{extract_day}T23:59:59-04:00"}
+        def hist(types):
+            out, after = [], None
+            while True:
+                r = sget(tok, "/fleet/vehicles/stats/history", {**base, "types": types, **({"after": after} if after else {})})
+                r.raise_for_status(); j = r.json()
+                for veh in j.get("data", []): out += veh.get(types, [])
+                pg = j.get("pagination", {})
+                if not pg.get("hasNextPage"): break
+                after = pg["endCursor"]
+            return out
+        def et(ts): return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(ET)
+        es = [(et(x["time"]), x["value"]) for x in hist("engineStates")]
+        gps = [(et(g["time"]), g["latitude"], g["longitude"], (g.get("reverseGeo") or {}).get("formattedLocation"), (g.get("address") or {}).get("name")) for g in hist("gps")]
+        def fix_at(t): return min(gps, key=lambda g: abs((g[0] - t).total_seconds())) if gps else None
+        def hhmm(t): return t.strftime("%H:%M")
+        stops, i = [], 0
+        while i < len(es):
+            if es[i][1] == "On": i += 1; continue
+            j, idle = i, 0.0
+            while j < len(es) and es[j][1] != "On":
+                t1 = es[j + 1][0] if j + 1 < len(es) else es[j][0]
+                if es[j][1] == "Idle": idle += (t1 - es[j][0]).total_seconds() / 60
+                j += 1
+            t0 = es[i][0]; open_end = j >= len(es); t1 = es[j][0] if not open_end else t0
+            if (t1 - t0).total_seconds() / 60 >= MIN_STOP_MIN or open_end:
+                f = fix_at(t0)
+                stops.append({"arrive": t0, "depart": t1, "open": open_end, "idle_min": idle,
+                              "lat": f[1], "lng": f[2], "address": f[3], "geofence": f[4]})
+            i = j
+        merged = []  # same spot, engine on < 3 min between = one stop
+        for st in stops:
+            if merged and dist_m((merged[-1]["lat"], merged[-1]["lng"]), (st["lat"], st["lng"])) <= 100 and (st["arrive"] - merged[-1]["depart"]).total_seconds() < 180:
+                merged[-1]["depart"] = st["depart"]; merged[-1]["idle_min"] += st["idle_min"]; merged[-1]["open"] = st["open"]
+            else:
+                merged.append(st)
+        stops = merged
+        out_stops = [{"stop": k + 1, "arrive": hhmm(st["arrive"]), "depart": None if st["open"] else hhmm(st["depart"]),
+                      "min": None if st["open"] else round((st["depart"] - st["arrive"]).total_seconds() / 60, 1),
+                      "idle_min": round(st["idle_min"], 1), "lat": round(st["lat"], 5), "lng": round(st["lng"], 5),
+                      "address": st["address"], "geofence": st["geofence"]} for k, st in enumerate(stops)]
+        legs = []
+        for k, (a, b) in enumerate(zip(stops, stops[1:])):
+            path = [g for g in gps if a["depart"] <= g[0] <= b["arrive"]]
+            mi = sum(dist_m(path[q][1:3], path[q + 1][1:3]) for q in range(len(path) - 1)) / 1609
+            legs.append({"leg": k + 1, "from_stop": k + 1, "to_stop": k + 2, "depart": hhmm(a["depart"]), "arrive": hhmm(b["arrive"]),
+                         "min": round((b["arrive"] - a["depart"]).total_seconds() / 60, 1), "mi": round(mi, 1)})
+        on = [t for t, val in es if val == "On"]
+        return {"truck": v["name"], "day": extract_day, "first_engine_on": hhmm(on[0]) if on else None,
+                "stops": out_stops, "legs": legs}
     if build_day and stops_for:  # KEEPER CANDIDATE: engine-state stops + legs + classification for one tech-day
         MIN_STOP_MIN = 2
         tech_ids = [t for t, n in roster.items() if stops_for.lower() in n.lower()]

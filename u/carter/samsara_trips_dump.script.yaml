@@ -18,6 +18,9 @@ schema:
     detail_for:
       type: string
       default: ''
+    extract_day:
+      type: string
+      default: ''
     gps_from:
       type: string
       default: ''
