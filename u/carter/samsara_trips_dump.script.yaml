@@ -15,6 +15,18 @@ schema:
     detail_for:
       type: string
       default: ''
+    gps_from:
+      type: string
+      default: ''
+    gps_near:
+      type: string
+      default: ''
+    gps_to:
+      type: string
+      default: ''
+    gps_truck:
+      type: string
+      default: ''
     loc_day:
       type: string
       default: ''

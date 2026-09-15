@@ -24,7 +24,7 @@ def dist_m(a, b):
     dx = (a[1] - b[1]) * 111320 * math.cos(math.radians(a[0]))
     return math.hypot(dx, dy)
 
-def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = ""):
+def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: str = "MNT", detail_for: str = "", compact: bool = False, probe_day: str = "", stops_for: str = "", day_log: str = "", loc_day: str = "", gps_truck: str = "", gps_from: str = "", gps_to: str = "", gps_near: str = ""):
     tok = wmill.get_variable("f/samsara/api_token")
     sb = create_client(wmill.get_variable("f/SUPABASE/URL"), wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"))
 
@@ -90,6 +90,19 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
                 dist[(v["name"], day)] += t.get("distanceMeters") or 0
             cur = ce; time.sleep(0.2)
 
+    if gps_truck:  # raw GPS breadcrumbs for one truck in a window; distance to a lat,lng if given
+        v = next(x for x in trucks if gps_truck.lower() in x["name"].lower())
+        r = sget(tok, "/fleet/vehicles/stats/history", {"vehicleIds": v["id"], "types": "gps",
+                 "startTime": gps_from, "endTime": gps_to})
+        r.raise_for_status()
+        near = tuple(map(float, gps_near.split(","))) if gps_near else None
+        out = []
+        for veh in r.json().get("data", []):
+            for g in veh.get("gps", []):
+                q = (g["latitude"], g["longitude"])
+                out.append([g["time"][11:19], round(g.get("speedMilesPerHour", 0)), round(dist_m(near, q)) if near else None,
+                            round(q[0], 5), round(q[1], 5)])
+        return {"truck": v["name"], "points": out}
     if loc_day and stops_for:  # LOCATION-FIRST: cluster parks by place, match to route pools by distance only
         tech_ids = [t for t, n in roster.items() if stops_for.lower() in n.lower()]
         locs = set()
