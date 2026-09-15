@@ -124,6 +124,10 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
             if not es or not gps: skipped.append([day, "no samsara history"]); continue
             def fix_at(t): return min(gps, key=lambda g: abs((g[0] - t).total_seconds()))
             st_list, i = [], 0
+            if es[0][1] == "On":  # truck was parked overnight: synthesize the opening stop (arrive = midnight, depart = first engine-on)
+                f = fix_at(es[0][0])
+                st_list.append({"arrive": es[0][0].replace(hour=0, minute=0, second=0, microsecond=0), "depart": es[0][0], "open": False,
+                                "idle": 0.0, "lat": f[1], "lng": f[2], "addr": f[3], "geo": f[4], "overnight": True})
             while i < len(es):
                 if es[i][1] == "On": i += 1; continue
                 j, idle = i, 0.0
@@ -157,7 +161,7 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
             now = datetime.now(timezone.utc).isoformat()
             rows_s = [{"employee_id": tid, "day": day, "stop": k + 1, "truck": best["name"], "arrive": st["arrive"].isoformat(),
                        "depart": None if st["open"] else st["depart"].isoformat(),
-                       "min": None if st["open"] else round((st["depart"] - st["arrive"]).total_seconds() / 60, 1),
+                       "min": None if (st["open"] or st.get("overnight")) else round((st["depart"] - st["arrive"]).total_seconds() / 60, 1),
                        "idle_min": round(st["idle"], 1), "lat": st["lat"], "lng": st["lng"], "address": st["addr"], "geofence": st["geo"],
                        "kind": st["kind"], "place": st["place"], "location_ids": st["pools"], "updated_at": now}
                       for k, st in enumerate(st_list)]
