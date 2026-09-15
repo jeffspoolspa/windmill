@@ -35,9 +35,14 @@ def main(p_start: str = "2026-08-01", p_end: str = "2026-08-31", name_filter: st
               and (e.get("branches") or {}).get("name") in ("Brunswick, GA", "Saint Marys, GA")}
 
     # stops with coords
-    vis = sb.schema("maintenance").table("visits").select("actual_tech_id,visit_date,service_location_id") \
-            .gte("visit_date", p_start).lte("visit_date", p_end).eq("status", "completed") \
-            .in_("actual_tech_id", list(roster)).execute().data
+    vis, off = [], 0
+    while True:  # PostgREST caps at 1000 rows per request
+        page = sb.schema("maintenance").table("visits").select("actual_tech_id,visit_date,service_location_id") \
+                 .gte("visit_date", p_start).lte("visit_date", p_end).eq("status", "completed") \
+                 .in_("actual_tech_id", list(roster)).range(off, off + 999).execute().data
+        vis += page
+        if len(page) < 1000: break
+        off += 1000
     loc_ids = list({v["service_location_id"] for v in vis if v["service_location_id"]})
     coords = {}
     for i in range(0, len(loc_ids), 200):
