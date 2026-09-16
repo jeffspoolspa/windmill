@@ -124,6 +124,9 @@ def cache_invoices_from_mirror(cur, doc_numbers: list[str]) -> int:
         FROM qbo.invoices q
         WHERE q.doc_number = ANY(%s)
           AND NOT EXISTS (SELECT 1 FROM billing.invoices b WHERE b.qbo_invoice_id = q.id)
+          -- billing.invoices FKs public."Customers"; a customer QBO knows but our
+          -- cache does not cannot carry an invoice row. Counted, not cached.
+          AND EXISTS (SELECT 1 FROM public."Customers" c WHERE c.qbo_customer_id = q.customer_id)
     """, (doc_numbers,))
     n = 0
     for r in cur.fetchall():
@@ -176,6 +179,12 @@ def main(dry_run: bool = True, shape: str = 'both', year: str = None, limit: int
             res = upsert(conn, df, on_conflict='nothing')
 
             cur.execute("""
+                SELECT count(*) AS n FROM qbo.invoices q
+                WHERE q.doc_number = ANY(%s)
+                  AND NOT EXISTS (SELECT 1 FROM public."Customers" c WHERE c.qbo_customer_id = q.customer_id)
+            """, (docs,))
+            no_customer = cur.fetchone()['n']
+            cur.execute("""
                 SELECT count(*) FILTER (WHERE qbo_invoice_id IS NOT NULL) AS linked,
                        count(*) AS total, min(completed)::text AS lo, max(completed)::text AS hi
                 FROM public.work_orders WHERE skipped_reason = %s
@@ -184,6 +193,7 @@ def main(dry_run: bool = True, shape: str = 'both', year: str = None, limit: int
             summary['shapes'][s] = {
                 'rows': res['rows'], 'inserted': res['written'],
                 'invoice_numbers': len(docs), 'invoices_cached_from_mirror': cached,
+                'invoices_in_mirror_but_customer_uncached': no_customer,
                 'bad_dates_coerced': bad_dates,
                 'history_total_after': snap['total'], 'history_linked_after': snap['linked'],
                 'history_completed_range': [snap['lo'], snap['hi']],
