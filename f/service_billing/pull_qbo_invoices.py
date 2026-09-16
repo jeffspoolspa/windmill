@@ -77,6 +77,7 @@ def find_invoice_numbers_to_fetch(conn, force_refresh, max_age_minutes, limit):
             FROM public.work_orders w
             WHERE w.invoice_number IS NOT NULL
               AND w.billable = true
+              AND w.skipped_at IS NULL
         """
         params = []
     else:
@@ -86,6 +87,7 @@ def find_invoice_numbers_to_fetch(conn, force_refresh, max_age_minutes, limit):
             LEFT JOIN billing.invoices i ON i.doc_number = w.invoice_number
             WHERE w.invoice_number IS NOT NULL
               AND w.billable = true
+              AND w.skipped_at IS NULL
               AND (i.qbo_invoice_id IS NULL
                    OR i.fetched_at < (now() - (%s || ' minutes')::interval))
         """
@@ -224,6 +226,7 @@ def link_work_orders_to_invoices(conn):
             FROM public.work_orders wo
             WHERE wo.invoice_number IS NOT NULL
               AND wo.billable = true
+              AND wo.skipped_at IS NULL
         ) sub
         WHERE w.wo_number = sub.wo_number
           AND w.qbo_invoice_id IS DISTINCT FROM sub.target_id
@@ -244,6 +247,7 @@ def seed_awaiting_pre_processing(conn):
             SELECT 1 FROM public.work_orders w
             WHERE w.qbo_invoice_id = i.qbo_invoice_id
               AND w.billable = true
+              AND w.skipped_at IS NULL
           )
     """)
     seeded = cur.rowcount or 0

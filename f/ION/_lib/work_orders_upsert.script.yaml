@@ -1,0 +1,7 @@
+summary: ION work-order report row -> public.work_orders (clean + COPY upsert +
+  employee link)
+description: The one transform/writer for public.work_orders ION-owned columns.
+  Called by f/ION/work_orders.flow and f/ION/backfill_work_orders_from_mirror.
+lock: '!inline f/ION/_lib/work_orders_upsert.script.lock'
+kind: script
+schema: null
