@@ -1,0 +1,8 @@
+summary: Backfill historical work orders (+ mirrored QBO invoices) from the .NET
+  ion mirror, stamped as pre-pipeline history
+description: Dry by default (runs + rolls back). Same transform as the 4h scrape
+  via f/ION/_lib/work_orders_upsert. Stamps skipped_reason=pre-pipeline history
+  so billing never touches these rows.
+lock: '!inline f/ION/backfill_work_orders_from_mirror.script.lock'
+kind: script
+schema: null

@@ -46,6 +46,5 @@ value:
         language: python3
         tag: chromium
   same_worker: true
-has_on_behalf_of: false
 schema: null
 tag: chromium
