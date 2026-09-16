@@ -27,6 +27,10 @@ SALT_RANGE = (3000, 3800)   # Carter 2026-09-15, final (was 2700–3400 through 
 # splash features, chem checks) even though the tasks appear on the form —
 # readings + photos only, normalization handles the rest. (Carter 2026-08-13:
 # kiddie/baby pools, lazy rivers, zero-depth entries stay full-checklist.)
+# A note that says the visit was a chem check / pre-inspection / no-service stop waives the
+# checklist too (Carter 2026-09-15, RESERVE AT DEMERE 8/10: "Chem check only and pre inspection").
+CHEMCHECK_NOTE_RE = re.compile(r"chem(ical)?s?\s*(check|test)\s*only|\bcheck\s*only\b|pre[- ]?inspection|inspection\s*only|\bno\s*service\b|chem(ical)?s\s*only",
+                               re.IGNORECASE)
 NO_CHECKLIST_RE = re.compile(r"spa|hot ?tub|fountain|splash|sprayground|chem ?check",
                              re.IGNORECASE)
 
@@ -154,7 +158,8 @@ def evaluate(v):
     if v["is_salt"] and sal is not None and not (SALT_RANGE[0] <= sal <= SALT_RANGE[1]):
         exc.append(("salt_range", "salt" in kinds))
 
-    no_checklist = bool(NO_CHECKLIST_RE.search(v.get("service_type") or ""))
+    no_checklist = bool(NO_CHECKLIST_RE.search(v.get("service_type") or "")
+                        or CHEMCHECK_NOTE_RE.search(note or ""))
     if no_checklist:
         misses = []
     else:
