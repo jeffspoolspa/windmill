@@ -21,7 +21,7 @@ W_CHECK, W_PHOTOS = 5, 15
 W_READ = {"fc": 15, "ph": 15, "ta": 5, "cya": 5, "psi": 10, "salt": 10}
 PSI_HIGH = 25
 PSI_LOW = 5    # under 5 = gauge/pump problem — needs a note (backwash can't fix low)
-SALT_RANGE = (2700, 3400)
+SALT_RANGE = (3000, 3600)   # Carter 2026-09-15 (was 2700–3400 through Aug scoring v1)
 
 # Service types where the cleaning checklist doesn't apply (spas, fountains,
 # splash features, chem checks) even though the tasks appear on the form —
