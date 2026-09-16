@@ -18,7 +18,9 @@ Sources (ion.work_orders, both already Closed in ION, not yet in our cache):
             vocabulary tables. Rulings 2026-09-16:
               completed       := wo_date
               corrective_action := NULL
-              sub_total       := sum(qty * sales_price) of billable wo_lines
+              sub_total       := sum(sales_price) of billable wo_lines
+                                 (ion.wo_lines.sales_price is the EXTENDED line amount,
+                                  verified against QBO subtotals on 5,009 linked rows)
 
 Every backfilled WO is stamped skipped_at + skipped_reason = HISTORY_REASON.
 That one annotation is what keeps them out of the billing pipeline
@@ -81,7 +83,7 @@ SELECT w.wo_number,
        w.wo_date::text                           AS scheduled,
        w.wo_date::text                           AS completed,
        w.schedule_status,
-       (SELECT round(sum(l.qty * l.sales_price), 2)::text FROM ion.wo_lines l
+       (SELECT round(sum(l.sales_price), 2)::text FROM ion.wo_lines l
          WHERE l.wo_number = w.wo_number AND l.billable) AS sub_total,
        NULLIF(w.invoice_number, '')              AS invoice_number,
        tm.label                                  AS inv_terms,
