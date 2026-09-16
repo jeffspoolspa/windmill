@@ -103,6 +103,7 @@ def upsert(conn, work_orders: pd.DataFrame, *, on_conflict: str = 'update') -> d
     update_cols = [c for c in columns if c != 'wo_number']
 
     cur = conn.cursor()
+    cur.execute('DROP TABLE IF EXISTS work_orders_temp')  # two upserts in one transaction (the backfill)
     cur.execute('CREATE TEMP TABLE work_orders_temp (LIKE public.work_orders INCLUDING DEFAULTS) ON COMMIT DROP')
     buf = io.StringIO()
     work_orders.to_csv(buf, sep='\t', header=False, index=False, na_rep='',
