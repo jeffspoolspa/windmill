@@ -20,4 +20,8 @@ schema:
       description: ''
       default: null
       properties: {}
+    deposited_lookback_days:
+      type: integer
+      description: ''
+      default: 90
   required: []

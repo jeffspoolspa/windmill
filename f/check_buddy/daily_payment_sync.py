@@ -37,6 +37,15 @@ def refresh_qbo_token() -> tuple[str, str]:
     return tokens["access_token"], resource["realm_id"]
 
 
+def is_object_not_found(response) -> bool:
+    """True only for QBO's Object Not Found fault (code 610): the payment is really gone."""
+    try:
+        errors = response.json().get("Fault", {}).get("Error", [])
+    except ValueError:
+        return False
+    return any(str(e.get("code")) == "610" for e in errors)
+
+
 def read_qbo_payment(base_url: str, headers: dict, payment_id: str) -> dict:
     """Read a single QBO payment. Returns payment state or deleted indicator."""
     response = requests.get(
@@ -44,7 +53,8 @@ def read_qbo_payment(base_url: str, headers: dict, payment_id: str) -> dict:
         headers=headers
     )
     
-    if response.status_code in (400, 404):
+    # Only a 610 fault means deleted; any other 400 or odd reply raises, so the payment is skipped and logged.
+    if is_object_not_found(response):
         return {"exists": False, "deleted": True, "payment_id": payment_id}
     
     if not response.ok:
@@ -54,7 +64,7 @@ def read_qbo_payment(base_url: str, headers: dict, payment_id: str) -> dict:
     payment_data = result.get("Payment", {})
     
     if not payment_data:
-        return {"exists": False, "deleted": True, "payment_id": payment_id}
+        raise Exception(f"QBO returned no Payment for {payment_id}: {response.text[:500]}")
     
     applied_invoices = []
     for line in payment_data.get("Line", []):
@@ -99,19 +109,19 @@ def read_qbo_payment(base_url: str, headers: dict, payment_id: str) -> dict:
 def check_deposits_for_payments(base_url: str, headers: dict, payment_ids: list[str], lookback_days: int = 90) -> dict:
     """Check which payments are in QBO deposits. Returns payment_id -> {deposit_id, deposit_date}."""
     cutoff_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-    query = f"SELECT * FROM Deposit WHERE TxnDate >= '{cutoff_date}'"
-    
-    response = requests.get(
-        f"{base_url}/query",
-        headers=headers,
-        params={"query": query}
-    )
-    
-    if not response.ok:
-        raise Exception(f"QBO deposit query failed: {response.status_code} - {response.text}")
-    
-    result = response.json()
-    deposits = result.get("QueryResponse", {}).get("Deposit", [])
+    page_size = 1000  # QBO's max; without paging QBO returns only the first 100
+    deposits = []
+    start = 1
+    while True:
+        query = f"SELECT * FROM Deposit WHERE TxnDate >= '{cutoff_date}' STARTPOSITION {start} MAXRESULTS {page_size}"
+        response = requests.get(f"{base_url}/query", headers=headers, params={"query": query})
+        if not response.ok:
+            raise Exception(f"QBO deposit query failed: {response.status_code} - {response.text}")
+        page = response.json().get("QueryResponse", {}).get("Deposit", [])
+        deposits += page
+        if len(page) < page_size:
+            break
+        start += page_size
     
     payment_to_deposit = {}
     for deposit in deposits:
