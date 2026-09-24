@@ -9,7 +9,6 @@ lock: '!inline f/check_buddy/daily_payment_sync.script.lock'
 concurrency_key: qbo_api
 concurrency_time_window_s: 10
 concurrent_limit: 1
-has_on_behalf_of: false
 kind: script
 schema:
   $schema: https://json-schema.org/draft/2020-12/schema

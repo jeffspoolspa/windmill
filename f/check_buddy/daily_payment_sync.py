@@ -242,24 +242,32 @@ def main(supabase: dict = None) -> dict:
         
         try:
             if not qbo_state.get("exists") or qbo_state.get("deleted"):
-                cur.execute("DELETE FROM app_checks.check_payments WHERE id = %s", (cp_id,))
-                cur.execute("SELECT COUNT(*) FROM app_checks.check_payments WHERE check_id = %s", (check_id,))
-                remaining = cur.fetchone()[0]
-                
-                if remaining == 0:
-                    cur.execute("""
-                        UPDATE app_checks.scanned_checks 
-                        SET status = 'review', processed_at = NULL,
-                            validation_flags = COALESCE(validation_flags, '{}') || ARRAY['payment_deleted'],
-                            updated_at = %s
-                        WHERE id = %s
-                    """, (now, check_id))
-                
+                # Read the deposit link before the check leaves it (autocommit: each statement commits on its own).
                 cur.execute("SELECT deposit_id FROM app_checks.scanned_checks WHERE id = %s", (check_id,))
                 dep_row = cur.fetchone()
                 if dep_row and dep_row[0]:
                     affected_deposits.add(dep_row[0])
-                
+
+                cur.execute("DELETE FROM app_checks.check_payments WHERE id = %s", (cp_id,))
+                cur.execute("SELECT COUNT(*) FROM app_checks.check_payments WHERE check_id = %s", (check_id,))
+                remaining = cur.fetchone()[0]
+
+                if remaining == 0:
+                    # QBO only lets a payment be deleted once it is off its deposit, so the check leaves ours too.
+                    # Clearing deposit_id here is what lets guard_check_status_downgrade allow status='review'.
+                    cur.execute("""
+                        UPDATE app_checks.scanned_checks
+                        SET status = 'review', processed_at = NULL,
+                            deposit_id = NULL, qbo_payment_id = NULL,
+                            validation_flags = CASE
+                                WHEN COALESCE(validation_flags, '[]'::jsonb) ? 'payment_deleted'
+                                    THEN validation_flags
+                                ELSE COALESCE(validation_flags, '[]'::jsonb) || '["payment_deleted"]'::jsonb
+                            END,
+                            updated_at = %s
+                        WHERE id = %s
+                    """, (now, check_id))
+
                 results["deleted"] += 1
                 results["details"].append(f"Payment {qbo_txn_id} deleted in QBO, check_payment {cp_id} removed")
                 continue
@@ -288,9 +296,9 @@ def main(supabase: dict = None) -> dict:
                     if abs(total_payments - check_amount) > 0.01:
                         cur.execute("""
                             UPDATE app_checks.scanned_checks
-                            SET validation_flags = COALESCE(validation_flags, '{}') || ARRAY['amount_mismatch'],
+                            SET validation_flags = COALESCE(validation_flags, '[]'::jsonb) || '["amount_mismatch"]'::jsonb,
                                 updated_at = %s
-                            WHERE id = %s AND NOT ('amount_mismatch' = ANY(COALESCE(validation_flags, '{}')))
+                            WHERE id = %s AND NOT (COALESCE(validation_flags, '[]'::jsonb) ? 'amount_mismatch')
                         """, (now, check_id))
                 
                 actions.append("amount_updated")
@@ -385,6 +393,14 @@ def main(supabase: dict = None) -> dict:
                     "last_reconciliation_check": now,
                 }
                 
+                # A deleted payment can pull its check off this deposit; keep totals in step (same math as the client).
+                cur.execute("""
+                    SELECT COUNT(*), COALESCE(SUM(check_amount), 0)
+                        + (SELECT COALESCE(SUM(amount), 0) FROM app_checks.cash_entries WHERE deposit_id = %s)
+                    FROM app_checks.scanned_checks WHERE deposit_id = %s
+                """, (deposit_id, deposit_id))
+                update_data["check_count"], update_data["total_amount"] = cur.fetchone()
+
                 if unreconciled_count == 0 and reconciled_count > 0:
                     update_data["status"] = "reconciled"
                     update_data["reconciled_at"] = now
