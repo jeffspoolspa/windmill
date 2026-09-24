@@ -130,9 +130,11 @@ def check_deposits_for_payments(base_url: str, headers: dict, payment_ids: list[
     return payment_to_deposit
 
 
-def main(supabase: dict = None) -> dict:
+def main(supabase: dict = None, deposited_lookback_days: int = 90) -> dict:
     """
-    Daily sync of unreconciled check_payments against QBO.
+    Daily sync of check_payments against QBO: all undeposited ones, plus deposited ones
+    whose payment_date is within deposited_lookback_days (so a payment deleted or edited
+    in QBO after it was deposited is still seen).
     Only syncs Payment-type entities (SalesReceipt/JournalEntry/Transfer are linked
     during reconciliation and don't need ongoing sync).
     Bottom-up deposit detection only applies to manual deposits.
@@ -155,15 +157,17 @@ def main(supabase: dict = None) -> dict:
     
     # Step 1: Query unreconciled Payment-type check_payments with deposit_source
     cur.execute("""
-        SELECT cp.id, cp.check_id, cp.qbo_txn_id, cp.amount, cp.qbo_customer_id, COALESCE(d.deposit_source, 'manual') as deposit_source
+        SELECT cp.id, cp.check_id, cp.qbo_txn_id, cp.amount, cp.qbo_customer_id, COALESCE(d.deposit_source, 'manual') as deposit_source,
+               cp.qbo_deposit_id
         FROM app_checks.check_payments cp
         LEFT JOIN app_checks.scanned_checks sc ON sc.id = cp.check_id
         LEFT JOIN app_checks.deposits d ON d.id = sc.deposit_id
         WHERE cp.qbo_txn_id IS NOT NULL
-          AND cp.qbo_deposit_id IS NULL
+          AND (cp.qbo_deposit_id IS NULL
+               OR cp.payment_date::date >= CURRENT_DATE - %s)
           AND cp.qbo_entity_type = 'Payment'
         ORDER BY cp.created_at ASC
-    """)
+    """, (deposited_lookback_days,))
     payments_to_sync = cur.fetchall()
     
     if not payments_to_sync:
@@ -201,7 +205,7 @@ def main(supabase: dict = None) -> dict:
     existing_payment_ids = []
     manual_existing_payment_ids = []
     for row in payments_to_sync:
-        cp_id, check_id, qbo_txn_id, local_amount, qbo_customer_id, deposit_source = row
+        cp_id, check_id, qbo_txn_id, local_amount, qbo_customer_id, deposit_source, local_deposit_id = row
         try:
             qbo_state = read_qbo_payment(base_url, headers, qbo_txn_id)
             qbo_states[cp_id] = {
@@ -211,6 +215,7 @@ def main(supabase: dict = None) -> dict:
                 "local_amount": float(local_amount),
                 "qbo_customer_id": qbo_customer_id,
                 "deposit_source": deposit_source,
+                "local_deposit_id": local_deposit_id,
                 "qbo_state": qbo_state,
             }
             if qbo_state.get("exists"):
@@ -239,6 +244,7 @@ def main(supabase: dict = None) -> dict:
         local_amount = info["local_amount"]
         qbo_customer_id = info["qbo_customer_id"]
         qbo_state = info["qbo_state"]
+        local_deposit_id = info["local_deposit_id"]
         
         try:
             if not qbo_state.get("exists") or qbo_state.get("deleted"):
@@ -248,25 +254,35 @@ def main(supabase: dict = None) -> dict:
                 if dep_row and dep_row[0]:
                     affected_deposits.add(dep_row[0])
 
-                cur.execute("DELETE FROM app_checks.check_payments WHERE id = %s", (cp_id,))
-                cur.execute("SELECT COUNT(*) FROM app_checks.check_payments WHERE check_id = %s", (check_id,))
+                cur.execute(
+                    "SELECT COUNT(*) FROM app_checks.check_payments WHERE check_id = %s AND id != %s",
+                    (check_id, cp_id),
+                )
                 remaining = cur.fetchone()[0]
 
-                if remaining == 0:
-                    # QBO only lets a payment be deleted once it is off its deposit, so the check leaves ours too.
-                    # Clearing deposit_id here is what lets guard_check_status_downgrade allow status='review'.
-                    cur.execute("""
-                        UPDATE app_checks.scanned_checks
-                        SET status = 'review', processed_at = NULL,
-                            deposit_id = NULL, qbo_payment_id = NULL,
-                            validation_flags = CASE
-                                WHEN COALESCE(validation_flags, '[]'::jsonb) ? 'payment_deleted'
-                                    THEN validation_flags
-                                ELSE COALESCE(validation_flags, '[]'::jsonb) || '["payment_deleted"]'::jsonb
-                            END,
-                            updated_at = %s
-                        WHERE id = %s
-                    """, (now, check_id))
+                # Revert the check before deleting its last payment, both in one transaction.
+                # psycopg2 only opens a transaction with autocommit off; `with conn` commits or rolls back.
+                conn.autocommit = False
+                try:
+                    with conn:
+                        if remaining == 0:
+                            # QBO only lets a payment be deleted once it is off its deposit, so the check leaves ours too.
+                            # Clearing deposit_id here is what lets guard_check_status_downgrade allow status='review'.
+                            cur.execute("""
+                                UPDATE app_checks.scanned_checks
+                                SET status = 'review', processed_at = NULL,
+                                    deposit_id = NULL, qbo_payment_id = NULL,
+                                    validation_flags = CASE
+                                        WHEN COALESCE(validation_flags, '[]'::jsonb) ? 'payment_deleted'
+                                            THEN validation_flags
+                                        ELSE COALESCE(validation_flags, '[]'::jsonb) || '["payment_deleted"]'::jsonb
+                                    END,
+                                    updated_at = %s
+                                WHERE id = %s
+                            """, (now, check_id))
+                        cur.execute("DELETE FROM app_checks.check_payments WHERE id = %s", (cp_id,))
+                finally:
+                    conn.autocommit = True
 
                 results["deleted"] += 1
                 results["details"].append(f"Payment {qbo_txn_id} deleted in QBO, check_payment {cp_id} removed")
@@ -324,7 +340,8 @@ def main(supabase: dict = None) -> dict:
                     """, (check_id, cp_id, inv["invoice_id"], inv.get("invoice_number", ""), inv["amount_applied"], qbo_customer_id))
                 actions.append("invoices_rebuilt")
             
-            if qbo_txn_id in deposit_map:
+            # Already-deposited payments are found again every run; only act when QBO shows a new deposit.
+            if qbo_txn_id in deposit_map and deposit_map[qbo_txn_id]["deposit_id"] != str(local_deposit_id or ""):
                 dep_info = deposit_map[qbo_txn_id]
                 cur.execute("""
                     UPDATE app_checks.check_payments
