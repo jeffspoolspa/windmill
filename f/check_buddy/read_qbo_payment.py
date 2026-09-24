@@ -34,6 +34,15 @@ def refresh_qbo_token() -> tuple[str, str]:
     return tokens["access_token"], resource["realm_id"]
 
 
+def is_object_not_found(response) -> bool:
+    """True only for QBO's Object Not Found fault (code 610): the payment is really gone."""
+    try:
+        errors = response.json().get("Fault", {}).get("Error", [])
+    except ValueError:
+        return False
+    return any(str(e.get("code")) == "610" for e in errors)
+
+
 def main(qbo_payment_id: str) -> dict:
     """
     Read a single QBO Payment by ID and return its full current state.
@@ -67,8 +76,9 @@ def main(qbo_payment_id: str) -> dict:
         headers=headers
     )
     
-    # Handle deleted/not found
-    if response.status_code in (400, 404):
+    # Deleted only on QBO's 610 Object Not Found fault. Any other 400 or odd reply raises:
+    # the app clears a check's deposit link when it hears "deleted", so a false positive costs data.
+    if is_object_not_found(response):
         return {
             "exists": False,
             "deleted": True,
@@ -82,11 +92,7 @@ def main(qbo_payment_id: str) -> dict:
     payment_data = result.get("Payment", {})
     
     if not payment_data:
-        return {
-            "exists": False,
-            "deleted": True,
-            "payment_id": qbo_payment_id,
-        }
+        raise Exception(f"QBO returned no Payment for {qbo_payment_id}: {response.text[:500]}")
     
     # Extract applied invoices from Line items
     applied_invoices = []
