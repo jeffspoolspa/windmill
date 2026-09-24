@@ -1,0 +1,9 @@
+summary: Link app deposit to an existing QBO Deposit found via its payments' LinkedTxn
+description: 'Fallback when create_qbo_deposit fails: finds the QBO Deposit each
+  Payment already sits in (exactly one, all payments), compares TotalAmt to our
+  total, and writes app_checks.deposits.qbo_deposit_id +
+  check_payments.qbo_deposit_id. dry_run=true reads only. Source of truth:
+  deposit-buddy repo windmill/check_buddy/link_existing_qbo_deposit.py'
+lock: '!inline f/check_buddy/link_existing_qbo_deposit.script.lock'
+kind: script
+schema: null
