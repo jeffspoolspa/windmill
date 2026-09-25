@@ -152,7 +152,7 @@ def upsert_links_from_raw(cur, payment_id, raw, known_invoice_ids, txn_date):
     return written
 
 
-def main(qbo_customer_id: str, lookback_days: int = 365,
+def main(qbo_customer_id: str, lookback_days: int = 730,
          access_token: str = None, realm_id: str = None):
     """
     Returns:

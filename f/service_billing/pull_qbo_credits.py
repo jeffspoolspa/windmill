@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
-LOOKBACK_DAYS = 180
+LOOKBACK_DAYS = 730
 
 
 def refresh_qbo_token():
@@ -141,7 +141,7 @@ def upsert_links_from_raw(cur, payment_id, raw, known_invoice_ids, txn_date):
     return written
 
 
-def main(lookback_days: int = 180):
+def main(lookback_days: int = 730):
     print(f"=== pull_qbo_credits started (lookback={lookback_days} days) ===")
     access_token, realm_id = refresh_qbo_token()
     conn = get_db_conn()

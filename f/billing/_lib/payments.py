@@ -884,7 +884,7 @@ def _pm_row_to_result(row, picked_reason):
 
 def load_applicable_credits(conn, qbo_customer_id, memo_match=None,
                             memo_exclude="maint", ref_match=None,
-                            max_age_months=6):
+                            max_age_months=24):
     """Unapplied credits selected by DATA, not domain knowledge: the caller
     says what it's looking for (memo_match='maint' for maintenance,
     ref_match=<wo_number> for a work order) or what to skip
