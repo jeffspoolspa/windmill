@@ -34,6 +34,15 @@ def refresh_qbo_token() -> tuple[str, str]:
     return tokens["access_token"], resource["realm_id"]
 
 
+def is_object_not_found(response) -> bool:
+    """True only for QBO's Object Not Found fault (code 610): the deposit is really gone."""
+    try:
+        errors = response.json().get("Fault", {}).get("Error", [])
+    except ValueError:
+        return False
+    return any(str(e.get("code")) == "610" for e in errors)
+
+
 def main(
     qbo_deposit_id: str,
 ) -> dict:
@@ -70,7 +79,9 @@ def main(
         headers=headers,
     )
     
-    if response.status_code == 400 or response.status_code == 404:
+    # Not found only on QBO's 610 Object Not Found fault. Any other 400 or odd reply raises,
+    # so a transient or auth error is never read as "the deposit is gone".
+    if is_object_not_found(response):
         return {"exists": False, "error": f"Deposit {qbo_deposit_id} not found"}
     
     if not response.ok:
@@ -80,7 +91,7 @@ def main(
     deposit = data.get("Deposit", {})
     
     if not deposit:
-        return {"exists": False, "error": "No deposit in response"}
+        raise Exception(f"QBO returned no Deposit for {qbo_deposit_id}: {response.text[:500]}")
     
     # Extract deposit header info
     deposit_id = deposit.get("Id", "")
