@@ -400,13 +400,6 @@ def main(
         newly_cleared += 1
         
         try:
-            # Mark bank feed cleared
-            cur.execute("""
-                UPDATE app_checks.deposits SET
-                    bank_feed_cleared = true, bank_feed_cleared_at = %s, updated_at = %s
-                WHERE id = %s::uuid
-            """, (now, now, deposit_id))
-            
             # Run top-down validation
             qbo_deposit = read_qbo_deposit(base_url, headers, qbo_deposit_id)
             
@@ -420,6 +413,13 @@ def main(
                 """, (now, deposit_id))
                 errors.append({"deposit_id": deposit_id, "error": f"QBO deposit {qbo_deposit_id} no longer exists"})
                 continue
+            
+            # Mark bank feed cleared only after a good read: a failed read leaves it false, so the next run retries
+            cur.execute("""
+                UPDATE app_checks.deposits SET
+                    bank_feed_cleared = true, bank_feed_cleared_at = %s, updated_at = %s
+                WHERE id = %s::uuid
+            """, (now, now, deposit_id))
             
             # Get our records for this deposit
             cur.execute("SELECT * FROM app_checks.scanned_checks WHERE deposit_id = %s::uuid", (deposit_id,))
