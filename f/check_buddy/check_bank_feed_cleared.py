@@ -8,9 +8,6 @@ import psycopg2
 import json
 from datetime import datetime, timedelta, timezone
 
-# ponytail: flat threshold for auto-accepting bank/bookkeeper adjustment lines; make it a setting if larger ones show up.
-ADJUSTMENT_MAX = 1.0
-
 
 def refresh_qbo_token() -> tuple[str, str]:
     """Refresh QBO token and return (access_token, realm_id)."""
@@ -55,6 +52,15 @@ def get_db_conn():
     return conn
 
 
+def is_object_not_found(response) -> bool:
+    """True only for QBO's Object Not Found fault (code 610): the deposit is really gone."""
+    try:
+        errors = response.json().get("Fault", {}).get("Error", [])
+    except ValueError:
+        return False
+    return any(str(e.get("code")) == "610" for e in errors)
+
+
 def read_qbo_deposit(base_url: str, headers: dict, qbo_deposit_id: str) -> dict:
     """Read a full QBO Deposit by ID. Returns deposit details with all line items."""
     response = requests.get(
@@ -62,7 +68,9 @@ def read_qbo_deposit(base_url: str, headers: dict, qbo_deposit_id: str) -> dict:
         headers=headers,
     )
     
-    if response.status_code in (400, 404):
+    # Gone only on QBO's 610 fault. Anything else raises; main() logs it and skips the deposit,
+    # because "not exists" NULLs the deposit's qbo_deposit_id.
+    if is_object_not_found(response):
         return {"exists": False, "error": f"Deposit {qbo_deposit_id} not found"}
     
     if not response.ok:
@@ -72,7 +80,7 @@ def read_qbo_deposit(base_url: str, headers: dict, qbo_deposit_id: str) -> dict:
     deposit = data.get("Deposit", {})
     
     if not deposit:
-        return {"exists": False, "error": "No deposit in response"}
+        raise Exception(f"QBO returned no Deposit for {qbo_deposit_id}: {response.text[:500]}")
     
     deposit_total = float(deposit.get("TotalAmt", 0))
     deposit_account = deposit.get("DepositToAccountRef", {}).get("name", "")
@@ -156,42 +164,6 @@ def get_cleared_deposit_ids(base_url: str, headers: dict, start_date: str, end_d
                 cleared_ids.add(str(deposit_id))
     
     return cleared_ids
-
-
-def is_adjustment_line(line: dict) -> bool:
-    """Small unlinked DepositLineDetail line, e.g. a bank encoding difference."""
-    amt = float(line.get("line_amount", 0))
-    return (
-        not line.get("linked_txn_id")
-        and line.get("detail_type") == "DepositLineDetail"
-        and amt != 0
-        and abs(amt) <= ADJUSTMENT_MAX
-    )
-
-
-def accept_adjustment_lines(cur, deposit_id: str, office: str, lines: list, now: str) -> list:
-    """Mirror QBO adjustment lines as local cash entries. Returns the inserted rows."""
-    inserted = []
-    for line in lines:
-        detail = line.get("detail") or {}
-        desc = f"QBO adjustment: {line.get('description') or detail.get('account_name') or 'bank difference'}"
-        cur.execute("""
-            INSERT INTO app_checks.cash_entries
-                (deposit_id, office, amount, description, qbo_account_id, qbo_account_name, reconciled_at, created_at, updated_at)
-            VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING *
-        """, (deposit_id, office, line["line_amount"], desc,
-              detail.get("account_id") or None, detail.get("account_name") or None, now, now, now))
-        cols = [d[0] for d in cur.description]
-        inserted.append(dict(zip(cols, cur.fetchone())))
-    if inserted:
-        total_adj = sum(float(r["amount"]) for r in inserted)
-        cur.execute("""
-            UPDATE app_checks.deposits SET
-                total_amount = COALESCE(total_amount, 0) + %s, cash_count = COALESCE(cash_count, 0) + %s, updated_at = %s
-            WHERE id = %s::uuid
-        """, (total_adj, len(inserted), now, deposit_id))
-    return inserted
 
 
 def validate_deposit_lines(qbo_deposit: dict, payments: list, retail_checks: list, cash_entries: list) -> dict:
@@ -355,12 +327,11 @@ def main(
         str_ids = [str(d) for d in deposit_ids]
         cur.execute("SELECT * FROM app_checks.deposits WHERE id = ANY(%s::uuid[])", (str_ids,))
     else:
-        # Also re-check deposits that cleared the bank feed but didn't fully reconcile
         cur.execute("""
             SELECT * FROM app_checks.deposits
             WHERE deposit_source = 'api'
               AND qbo_deposit_id IS NOT NULL
-              AND (bank_feed_cleared = false OR status <> 'reconciled')
+              AND bank_feed_cleared = false
         """)
     
     if cur.description:
@@ -420,23 +391,15 @@ def main(
         if not qbo_deposit_id:
             continue
         
-        is_cleared = str(qbo_deposit_id) in cleared_ids or bool(deposit.get("bank_feed_cleared"))
+        is_cleared = str(qbo_deposit_id) in cleared_ids
         
         if not is_cleared:
             results.append({"deposit_id": deposit_id, "qbo_deposit_id": qbo_deposit_id, "cleared": False, "reconciled": False})
             continue
         
-        if not deposit.get("bank_feed_cleared"):
-            newly_cleared += 1
+        newly_cleared += 1
         
         try:
-            # Mark bank feed cleared
-            cur.execute("""
-                UPDATE app_checks.deposits SET
-                    bank_feed_cleared = true, bank_feed_cleared_at = COALESCE(bank_feed_cleared_at, %s), updated_at = %s
-                WHERE id = %s::uuid
-            """, (now, now, deposit_id))
-            
             # Run top-down validation
             qbo_deposit = read_qbo_deposit(base_url, headers, qbo_deposit_id)
             
@@ -450,6 +413,13 @@ def main(
                 """, (now, deposit_id))
                 errors.append({"deposit_id": deposit_id, "error": f"QBO deposit {qbo_deposit_id} no longer exists"})
                 continue
+            
+            # Mark bank feed cleared only after a good read: a failed read leaves it false, so the next run retries
+            cur.execute("""
+                UPDATE app_checks.deposits SET
+                    bank_feed_cleared = true, bank_feed_cleared_at = %s, updated_at = %s
+                WHERE id = %s::uuid
+            """, (now, now, deposit_id))
             
             # Get our records for this deposit
             cur.execute("SELECT * FROM app_checks.scanned_checks WHERE deposit_id = %s::uuid", (deposit_id,))
@@ -474,15 +444,6 @@ def main(
             
             # Run validation
             validation = validate_deposit_lines(qbo_deposit, payments, retail_checks, cash_entries)
-            
-            # Accept small unlinked QBO adjustment lines (e.g. $0.03 bank encoding difference)
-            # by mirroring them as local cash entries, then re-validate.
-            adj_lines = [l for l in validation["reconciliation_details"]["unmatched_details"] if is_adjustment_line(l)]
-            if adj_lines:
-                office = (checks[0].get("office") if checks else None) or (cash_entries[0].get("office") if cash_entries else None) or "Brunswick"
-                cash_entries.extend(accept_adjustment_lines(cur, deposit_id, office, adj_lines, now))
-                validation = validate_deposit_lines(qbo_deposit, payments, retail_checks, cash_entries)
-            
             recon_details = validation["reconciliation_details"]
             fully_reconciled = validation["fully_reconciled"]
             
@@ -536,7 +497,6 @@ def main(
                 "qbo_deposit_id": qbo_deposit_id,
                 "cleared": True,
                 "reconciled": fully_reconciled,
-                "adjustments_accepted": len(adj_lines),
                 "matched_lines": recon_details.get("matched_lines", 0),
                 "unmatched_lines": recon_details.get("unmatched_lines", 0),
                 "amount_match": recon_details.get("amount_match", False),
