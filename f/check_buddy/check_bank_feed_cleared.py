@@ -52,6 +52,15 @@ def get_db_conn():
     return conn
 
 
+def is_object_not_found(response) -> bool:
+    """True only for QBO's Object Not Found fault (code 610): the deposit is really gone."""
+    try:
+        errors = response.json().get("Fault", {}).get("Error", [])
+    except ValueError:
+        return False
+    return any(str(e.get("code")) == "610" for e in errors)
+
+
 def read_qbo_deposit(base_url: str, headers: dict, qbo_deposit_id: str) -> dict:
     """Read a full QBO Deposit by ID. Returns deposit details with all line items."""
     response = requests.get(
@@ -59,7 +68,9 @@ def read_qbo_deposit(base_url: str, headers: dict, qbo_deposit_id: str) -> dict:
         headers=headers,
     )
     
-    if response.status_code in (400, 404):
+    # Gone only on QBO's 610 fault. Anything else raises; main() logs it and skips the deposit,
+    # because "not exists" NULLs the deposit's qbo_deposit_id.
+    if is_object_not_found(response):
         return {"exists": False, "error": f"Deposit {qbo_deposit_id} not found"}
     
     if not response.ok:
@@ -69,7 +80,7 @@ def read_qbo_deposit(base_url: str, headers: dict, qbo_deposit_id: str) -> dict:
     deposit = data.get("Deposit", {})
     
     if not deposit:
-        return {"exists": False, "error": "No deposit in response"}
+        raise Exception(f"QBO returned no Deposit for {qbo_deposit_id}: {response.text[:500]}")
     
     deposit_total = float(deposit.get("TotalAmt", 0))
     deposit_account = deposit.get("DepositToAccountRef", {}).get("name", "")

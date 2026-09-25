@@ -31,6 +31,15 @@ def refresh_qbo_token() -> tuple[str, str]:
     return tokens["access_token"], resource["realm_id"]
 
 
+def is_object_not_found(response) -> bool:
+    """True only for QBO's Object Not Found fault (code 610): the payment is really gone."""
+    try:
+        errors = response.json().get("Fault", {}).get("Error", [])
+    except ValueError:
+        return False
+    return any(str(e.get("code")) == "610" for e in errors)
+
+
 def main(qbo_payment_id: str) -> dict:
     """
     Delete (void) a QBO Payment by ID.
@@ -56,7 +65,9 @@ def main(qbo_payment_id: str) -> dict:
     # 1) Read the payment to get its SyncToken
     read_resp = requests.get(f"{base_url}/payment/{qbo_payment_id}", headers=headers)
 
-    if read_resp.status_code in (400, 404):
+    # Already deleted only on QBO's 610 fault. Anything else fails the script: reporting success
+    # lets the app drop its rows while the QBO payment still exists, and a resubmit duplicates it.
+    if is_object_not_found(read_resp):
         return {"success": True, "already_deleted": True, "payment_id": qbo_payment_id}
 
     if not read_resp.ok:
@@ -64,7 +75,7 @@ def main(qbo_payment_id: str) -> dict:
 
     payment = read_resp.json().get("Payment", {})
     if not payment:
-        return {"success": True, "already_deleted": True, "payment_id": qbo_payment_id}
+        raise Exception(f"QBO returned no Payment for {qbo_payment_id}: {read_resp.text[:500]}")
 
     sync_token = payment.get("SyncToken")
     if sync_token is None:
