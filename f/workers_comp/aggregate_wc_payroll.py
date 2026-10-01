@@ -10,6 +10,8 @@ DEPARTMENT_TO_CLASS_CODE = {
     "Service":     "9014",
     "Slide Crew":  "9014",
     "Retail":      "8017",
+    "SAV Maintenance": "9014",   # Savannah branch maintenance
+    "RH Maintenance":  "9014",   # Richmond Hill branch maintenance
 }
 OT_LABELS = {"Overtime", "Double overtime", "Double Overtime"}
 # Non-OT includable wage labels. Correction/retro pay is includable wages.

@@ -3,4 +3,18 @@ summary: 'WC monthly payroll: per-class-code gross + OT for Utica Right Pay
 description: ''
 lock: '!inline f/workers_comp/aggregate_wc_payroll.script.lock'
 kind: script
-schema: null
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    check_end:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+    check_start:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+  required: []
