@@ -1,6 +1,7 @@
 """Read-only: the Zoho Inventory inputs a quarterly inventory valuation needs.
 
-Returns stock on hand per item at each requested location, and every bill line dated in [bills_from, bills_to].
+Returns stock on hand per item at each requested location, and every bill line dated in [bills_from, bills_to]
+as compact rows [date, item_id, sku, qty, rate, location_name] (Windmill caps result size; pull long ranges in parts).
 Writes nothing anywhere.
 """
 import time
@@ -45,14 +46,13 @@ def _pages(h, path, key, **params):
         time.sleep(0.6)
 
 
-def main(location_names: list = ["RH"], bills_from: str = "2026-01-01", bills_to: str = "2026-09-30"):
+def main(location_names: list = [], bills_from: str = "2026-01-01", bills_to: str = "2026-09-30"):
     h = {"Authorization": f"Zoho-oauthtoken {_token()}"}
     locations = {l["location_name"]: l["location_id"] for l in _get(h, "locations")["locations"]}
 
     stock = {}
     for name in location_names:
-        stock[name] = [{"item_id": i["item_id"], "sku": i.get("sku"), "name": i.get("name"),
-                        "stock_on_hand": i.get("stock_on_hand")}
+        stock[name] = [[i["item_id"], i.get("sku"), i.get("stock_on_hand")]
                        for i in _pages(h, "items", "items", location_id=locations[name])
                        if i.get("stock_on_hand")]
 
@@ -61,11 +61,8 @@ def main(location_names: list = ["RH"], bills_from: str = "2026-01-01", bills_to
     for b in bills:
         detail = _get(h, f"bills/{b['bill_id']}")["bill"]
         for l in detail.get("line_items", []):
-            lines.append({"bill_id": detail["bill_id"], "bill_number": detail.get("bill_number"),
-                          "date": detail.get("date"), "vendor": detail.get("vendor_name"),
-                          "status": detail.get("status"), "item_id": l.get("item_id"), "sku": l.get("sku"),
-                          "name": l.get("name"), "qty": l.get("quantity"), "rate": l.get("rate"),
-                          "location_name": l.get("location_name")})
+            lines.append([detail.get("date"), l.get("item_id"), l.get("sku"), l.get("quantity"), l.get("rate"),
+                          l.get("location_name")])
         time.sleep(0.6)
 
     return {"stock": stock, "bills": len(bills), "bill_lines": lines}

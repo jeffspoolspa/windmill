@@ -20,8 +20,7 @@ schema:
     location_names:
       type: array
       description: ''
-      default:
-        - RH
+      default: []
       items:
         type: string
       originalType: string[]
