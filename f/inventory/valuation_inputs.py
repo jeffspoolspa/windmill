@@ -2,8 +2,10 @@
 
 Returns stock on hand per item at each requested location, and every bill line dated in [bills_from, bills_to]
 as compact rows [date, item_id, sku, qty, rate, location_name] (Windmill caps result size; pull long ranges in parts).
+The result is JSON text: `wmill script run -s` prints a string verbatim but abbreviates nested objects.
 Writes nothing anywhere.
 """
+import json
 import time
 import requests
 import wmill
@@ -65,4 +67,4 @@ def main(location_names: list = [], bills_from: str = "2026-01-01", bills_to: st
                           l.get("location_name")])
         time.sleep(0.6)
 
-    return {"stock": stock, "bills": len(bills), "bill_lines": lines}
+    return json.dumps({"stock": stock, "bills": len(bills), "bill_lines": lines})
