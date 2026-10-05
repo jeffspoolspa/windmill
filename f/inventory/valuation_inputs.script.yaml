@@ -1,0 +1,28 @@
+summary: Read-only Zoho inputs for quarterly inventory valuation (location
+  stock, bill lines)
+description: ''
+lock: '!inline f/inventory/valuation_inputs.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    bills_from:
+      type: string
+      description: ''
+      default: 2026-01-01
+      originalType: string
+    bills_to:
+      type: string
+      description: ''
+      default: 2026-09-30
+      originalType: string
+    location_names:
+      type: array
+      description: ''
+      default:
+        - RH
+      items:
+        type: string
+      originalType: string[]
+  required: []
