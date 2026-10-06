@@ -1,6 +1,7 @@
-summary: Read-only Zoho inputs for quarterly inventory valuation (location
-  stock, bill lines)
-description: ''
+summary: Read-only Zoho inputs for inventory valuation (location stock, bill
+  lines, movements)
+description: Deployed from ~/ops/tasks/inventory-valuation/zoho_inputs.py, the
+  one copy of this logic. Edit there, then redeploy.
 lock: '!inline f/inventory/valuation_inputs.script.lock'
 kind: script
 schema:
@@ -24,4 +25,14 @@ schema:
       items:
         type: string
       originalType: string[]
+    movements_location:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+    movements_since:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
   required: []
