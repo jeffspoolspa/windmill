@@ -1,3 +1,5 @@
+# extra_requirements:
+# wmill
 """Read-only Zoho Inventory inputs for the quarterly valuation. The one copy of this logic: Windmill runs it as
 f/inventory/valuation_inputs (deployed from this file); any other host only needs its own main() for credentials.
 
