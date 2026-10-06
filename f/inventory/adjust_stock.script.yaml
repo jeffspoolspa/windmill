@@ -1,0 +1,46 @@
+summary: Write - post a quantity inventory adjustment at one Zoho location (dry
+  run by default)
+description: ''
+lock: '!inline f/inventory/adjust_stock.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    description:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    date:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    dry_run:
+      type: boolean
+      description: ''
+      default: true
+    lines:
+      type: array
+      description: ''
+      default: null
+      items:
+        type: string
+      originalType: string[]
+    location_name:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    reference:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - location_name
+    - date
+    - reference
+    - description
+    - lines
