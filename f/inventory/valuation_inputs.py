@@ -10,6 +10,10 @@ Writes nothing anywhere.
 import json
 import time
 import requests
+try:
+    import wmill                  # present on Windmill (imported at top level so Windmill installs it); absent elsewhere
+except ImportError:
+    wmill = None
 
 ORG = "870657839"
 BASE = "https://www.zohoapis.com/inventory/v1"
@@ -105,7 +109,6 @@ def main(location_names: list = [], bills_from: str = "2026-01-01", bills_to: st
          movements_location: str = "", movements_since: str = ""):
     """Windmill entry: credentials from Windmill variables. Returns JSON text (`wmill script run -s` prints a string
     verbatim but abbreviates nested objects; Windmill caps result size, so pull long bill ranges in parts)."""
-    import wmill
     h = token(wmill.get_variable("u/ZOHO/CLIENT_ID"), wmill.get_variable("u/ZOHO/CLIENT_SECRET"),
               wmill.get_variable("u/ZOHO/REFRESH_TOKEN"))
     out = {"stock": location_stock(h, location_names)}
