@@ -2,4 +2,8 @@ summary: Shared idempotent send gate + send preconditions (no first-send past du
 description: ''
 lock: '!inline f/billing/_lib/delivery.script.lock'
 kind: script
-schema: null
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties: {}
+  required: []

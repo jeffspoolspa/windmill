@@ -75,6 +75,17 @@ def deliver_invoice(conn, invoice_id, email, email_status,
     return r
 
 
+def _send_waived(conn, qbo_invoice_id):
+    """billing.send_waived: the latest delivery_waived / _revoked fact."""
+    if conn is None:
+        return False
+    cur = conn.cursor()
+    cur.execute("SELECT billing.send_waived(%s)", (qbo_invoice_id,))
+    waived = bool(cur.fetchone()[0])
+    cur.close()
+    return waived
+
+
 def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
     """The WORKFLOW send: WAL-book an attempt, remedy a past-due first send by
     bumping the due date (we have the primitive; refusing was the pre-bump
@@ -82,6 +93,13 @@ def send_and_record(conn, invoice_row, balance, stage, access_token, realm_id):
     any engine that delivers as part of processing. Returns {success, ...}."""
     import time
     qbo_invoice_id = invoice_row["qbo_invoice_id"]
+
+    # A person (or the aged-out rule) said never send this one. Checked HERE,
+    # the one door every service send passes through (the queue, the forced
+    # manual Send, payment recovery), so no caller can route around it; a
+    # card charge that succeeded still stands, only the email is skipped.
+    if _send_waived(conn, qbo_invoice_id):
+        return {"success": True, "waived": True}
 
     # A send books NOTHING ahead of itself, and that is deliberate.
     #
@@ -186,7 +204,7 @@ def _selfcheck():
         emits, bumps = [], []
         saved = {k: g[k] for k in ("insert_webhook_expectation", "emit",
                                    "send_invoice_email", "bump_invoice_due_date_to_today",
-                                   "fetch_qbo_invoice", "echo_invoice")}
+                                   "fetch_qbo_invoice", "echo_invoice", "_send_waived")}
         g.update(
             insert_webhook_expectation=lambda c, t, i: None,
             emit=lambda *a, **k: emits.append(a[3]),
@@ -218,6 +236,15 @@ def _selfcheck():
                 "success": True, "skipped": True, "sent_to": "x@y"}
             r = send_and_record(None, inv, 0, "process", "t", "r")
             assert r["success"] and r["skipped"] and emits == ["invoice_emailed"], emits
+
+            # a waived send never reaches QBO and records nothing
+            emits.clear(); bumps.clear()
+            g["_send_waived"] = lambda c, q: True
+            g["send_invoice_email"] = lambda q, cu, at, r: (_ for _ in ()).throw(
+                AssertionError("a waived invoice must not be sent"))
+            r = send_and_record(None, inv, 50.0, "process", "t", "r")
+            assert r == {"success": True, "waived": True}, r
+            assert emits == [] and bumps == [], (emits, bumps)
         finally:
             g.update(saved)
     finally:
