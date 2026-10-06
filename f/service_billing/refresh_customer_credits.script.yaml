@@ -3,4 +3,27 @@ summary: Single-customer QBO credits refresh; accepts caller token (no double
 description: ''
 lock: '!inline f/service_billing/refresh_customer_credits.script.lock'
 kind: script
-schema: null
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    access_token:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    lookback_days:
+      type: integer
+      description: ''
+      default: 730
+    qbo_customer_id:
+      type: string
+      description: ''
+      originalType: string
+    realm_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - qbo_customer_id

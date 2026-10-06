@@ -24,8 +24,6 @@ import wmill
 QBO_RESOURCE = "u/carter/quickbooks_api"
 SUPABASE_RESOURCE = "u/carter/supabase"
 
-STALE_DAYS = 180
-
 
 def _json_default(o):
     if isinstance(o, Decimal):
@@ -179,7 +177,6 @@ def main(qbo_customer_id: str, lookback_days: int = 730,
 
     now = datetime.now(timezone.utc)
     qbo_cutoff = (now - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-    ui_cutoff = (date.today() - timedelta(days=STALE_DAYS)).isoformat()
 
     pay_query = (
         f"SELECT * FROM Payment "
@@ -276,13 +273,10 @@ def main(qbo_customer_id: str, lookback_days: int = 730,
         cur.execute("""
             SELECT id, qbo_payment_id, type, unapplied_amt, total_amt,
                    txn_date, ref_num, memo
-            FROM billing.customer_payments
+            FROM public.billing_open_credits  -- the gate's filter; never re-derive it
             WHERE qbo_customer_id = %s
-              AND unapplied_amt > 0
-              AND (txn_date IS NULL OR txn_date >= %s)
-              AND (memo IS NULL OR memo !~* 'maint')
             ORDER BY txn_date ASC NULLS LAST
-        """, (qbo_customer_id, ui_cutoff))
+        """, (qbo_customer_id,))
         rows = cur.fetchall()
         cur.close()
 
