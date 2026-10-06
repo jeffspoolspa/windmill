@@ -37,12 +37,20 @@ GRACE_MINUTES = 2  # let the wake path win before self-heal re-enqueues
 #
 # action_available keeps out the ones with nothing left to do: 21 of those 27
 # were already SENT, so they are A/R, and enrichment is not owed on them.
+#
+# An UNSENT invoice that is still OWED is owed enrichment too, even when its
+# email is waived (Skip sending) and there is no card to charge: action_available
+# is false for it, but enrichment is where its waiting credit gets applied.
+# Without this arm a skipped email-route invoice never applied its credit and
+# sat in A/R next to it (2026-10-06 cleanup: McCullars, Pittman, Singleton).
 ELIGIBLE = """
       i.pre_processed_at IS NULL
   AND w.billable IS TRUE AND w.skipped_at IS NULL
   AND NOT billing.invoice_voided(i.qbo_invoice_id)
   AND NOT billing.invoice_on_hold(i.qbo_invoice_id)
-  AND billing.action_available(i.qbo_invoice_id)
+  AND (billing.action_available(i.qbo_invoice_id)
+       OR (i.email_status IS DISTINCT FROM 'EmailSent'
+           AND coalesce(i.balance, 0) >= 0.01))
 """
 
 # Lost-trigger backstop: an eligible invoice with no live queue row gets one.
