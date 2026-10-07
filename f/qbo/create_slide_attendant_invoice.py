@@ -38,10 +38,18 @@ def main(
     period_label: str = "September 2026",
     lines: list = None,
     dry_run: bool = True,
+    args: dict = None,
 ):
     """
     lines: [{"desc": str, "qty": float, "rate": float}, ...]
+    args: optional wrapper (the MCP runner nests inputs under this key); unpacked if present.
     """
+    if args:
+        customer_id = args.get("customer_id", customer_id)
+        txn_date = args.get("txn_date", txn_date)
+        period_label = args.get("period_label", period_label)
+        lines = args.get("lines", lines)
+        dry_run = args.get("dry_run", dry_run)
     if not lines:
         raise Exception("lines is required")
 
