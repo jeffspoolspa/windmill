@@ -1,11 +1,11 @@
 summary: Create the monthly Slide Attendant Labor invoice in QBO (dry_run
-  default; copies class from prior slide invoice)
+  default; mirrors prior slide invoice)
 description: Creates one QBO Invoice for the slide crew month. Token via
   f/qbo/get_access_token (ADR 012 one door; never refreshes directly). Looks up
-  the Slide Attendant Labor item by name, mirrors ClassRef/BillEmail from the
-  customer's most recent prior slide invoice, aborts if an invoice for the same
-  period already exists, and only writes when dry_run=false. Accepts an `args`
-  wrapper because the MCP runner nests inputs under it.
+  the Slide Attendant Labor item by name, mirrors ClassRef/BillEmail/terms from
+  the customer's most recent prior slide invoice, aborts if an invoice for the
+  same period already exists, and only writes when dry_run=false. Accepts an
+  `args` wrapper because the MCP runner nests inputs under it.
 lock: '!inline f/qbo/create_slide_attendant_invoice.script.lock'
 kind: script
 schema:
@@ -20,7 +20,12 @@ schema:
     customer_id:
       type: string
       description: ''
-      default: '8377'
+      default: '8472'
+      originalType: string
+    customer_memo:
+      type: string
+      description: ''
+      default: ''
       originalType: string
     dry_run:
       type: boolean

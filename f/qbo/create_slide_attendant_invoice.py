@@ -33,9 +33,10 @@ def _query(token, realm, q):
 
 
 def main(
-    customer_id: str = "8377",
+    customer_id: str = "8472",
     txn_date: str = "2026-09-30",
     period_label: str = "September 2026",
+    customer_memo: str = "",
     lines: list = None,
     dry_run: bool = True,
     args: dict = None,
@@ -48,6 +49,7 @@ def main(
         customer_id = args.get("customer_id", customer_id)
         txn_date = args.get("txn_date", txn_date)
         period_label = args.get("period_label", period_label)
+        customer_memo = args.get("customer_memo", customer_memo)
         lines = args.get("lines", lines)
         dry_run = args.get("dry_run", dry_run)
     if not lines:
@@ -55,13 +57,11 @@ def main(
 
     token, realm = _token()
 
-    # 1. Item lookup by exact name (abort if missing; never create items here)
     items = _query(token, realm, f"SELECT Id, Name, Type FROM Item WHERE Name = '{ITEM_NAME}'").get("Item", [])
     if len(items) != 1:
         raise Exception(f"Expected exactly one item named {ITEM_NAME!r}, found {len(items)}: {items}")
     item = items[0]
 
-    # 2. Prior slide invoices for this customer: mirror class, detect duplicate period
     prior = _query(
         token, realm,
         f"SELECT * FROM Invoice WHERE CustomerRef = '{customer_id}' ORDERBY TxnDate DESC MAXRESULTS 50",
@@ -84,13 +84,13 @@ def main(
                 "CustomerMemo": inv.get("CustomerMemo"), "descs": descs,
             })
 
-    dup = [p for p in slide_prior if any(period_label in d for d in p["descs"])]
+    dup = [p for p in slide_prior if any(period_label in d for d in p["descs"])
+           or (p.get("CustomerMemo") or {}).get("value", "").startswith(period_label.split()[0])]
     if dup:
         raise Exception(f"An invoice for {period_label} already exists for customer {customer_id}: {dup}")
 
     template = slide_prior[0] if slide_prior else None
 
-    # 3. Build payload
     qbo_lines = []
     for i, ln in enumerate(lines, start=1):
         qty = round(float(ln["qty"]), 2)
@@ -108,11 +108,9 @@ def main(
                 **({"ClassRef": template["ClassRef"]} if template and template.get("ClassRef") else {}),
             },
         })
-    payload = {
-        "CustomerRef": {"value": customer_id},
-        "TxnDate": txn_date,
-        "Line": qbo_lines,
-    }
+    payload = {"CustomerRef": {"value": customer_id}, "TxnDate": txn_date, "Line": qbo_lines}
+    if customer_memo:
+        payload["CustomerMemo"] = {"value": customer_memo}
     if template:
         if template.get("ClassRef"):
             payload["ClassRef"] = template["ClassRef"]
@@ -123,17 +121,13 @@ def main(
 
     computed_total = round(sum(l["Amount"] for l in qbo_lines), 2)
     summary = {
-        "dry_run": dry_run,
-        "item": item,
-        "template_invoice": template,
+        "dry_run": dry_run, "item": item, "template_invoice": template,
         "prior_slide_invoices": [(p["DocNumber"], p["TxnDate"], p["TotalAmt"]) for p in slide_prior],
-        "payload": payload,
-        "computed_total": computed_total,
+        "payload": payload, "computed_total": computed_total,
     }
     if dry_run:
         return summary
 
-    # 4. Write
     created = _req("POST", f"{QBO}/{realm}/invoice?minorversion=73", token, payload)["Invoice"]
     summary["created"] = {
         "Id": created["Id"], "DocNumber": created.get("DocNumber"),
