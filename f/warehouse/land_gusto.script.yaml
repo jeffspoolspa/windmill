@@ -1,0 +1,39 @@
+summary: ''
+description: ''
+lock: '!inline f/warehouse/land_gusto.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    csv_text:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+    days_back:
+      type: integer
+      description: ''
+      default: 45
+    end:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+    kind:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    source_file:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+    start:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+  required:
+    - kind

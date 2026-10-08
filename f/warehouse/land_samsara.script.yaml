@@ -1,0 +1,30 @@
+summary: ''
+description: ''
+lock: '!inline f/warehouse/land_samsara.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    end:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+    kind:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    name_filter:
+      type: string
+      description: ''
+      default: MNT|Spare
+      originalType: string
+    start:
+      type: string
+      description: ''
+      default: ''
+      originalType: string
+  required:
+    - kind
