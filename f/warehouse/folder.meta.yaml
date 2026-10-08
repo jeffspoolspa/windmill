@@ -1,0 +1,6 @@
+summary: Warehouse land jobs; code lives in ~/ops/warehouse
+display_name: warehouse
+extra_perms:
+  u/carter: true
+owners:
+  - u/carter
