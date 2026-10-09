@@ -19,7 +19,6 @@ API = "https://api.gusto.com"
 ET = ZoneInfo("America/New_York")
 HOURLY = {"Regular Hours": "reg_min", "Overtime": "ot_min",
           "Double overtime": "dot_min", "Double Overtime": "dot_min"}
-SUFFIX_RE = re.compile(r"[\s,]+(jr|sr|ii|iii|iv|v)\.?$", re.IGNORECASE)
 
 
 def upsert(cur, table, key, rows, batch=500):
@@ -57,10 +56,7 @@ def land_payweek(db_url, token, company_id, days_back=45, start=None, end=None):
     payrolls = r.json()
 
     with psycopg.connect(db_url) as c, c.cursor() as cur:
-        # ponytail: identity resolved at land so the PK holds as today; Core re-resolves if this moves
-        cur.execute("select gusto_uuid::text, id from public.employees where gusto_uuid is not null")
-        emp = dict(cur.fetchall())
-        rows, unmatched = [], set()
+        rows = []
         now = datetime.now(timezone.utc).isoformat()
         for p in payrolls:
             puuid = p.get("payroll_uuid") or p.get("uuid")
@@ -75,10 +71,6 @@ def land_payweek(db_url, token, company_id, days_back=45, start=None, end=None):
                     break
                 page += 1
             for comp in comps:
-                eid = emp.get(comp.get("employee_uuid"))
-                if eid is None:
-                    unmatched.add(comp.get("employee_uuid"))
-                    continue
                 mins = {"reg_min": 0, "ot_min": 0, "dot_min": 0}
                 for hc in comp.get("hourly_compensations", []):
                     col = HOURLY.get(hc.get("name"))
@@ -87,18 +79,13 @@ def land_payweek(db_url, token, company_id, days_back=45, start=None, end=None):
                 pto = sum(round(float(t.get("hours") or 0) * 60) for t in comp.get("paid_time_off", []))
                 if not any(mins.values()) and not pto:
                     continue  # salaried / no-hours rows
-                rows.append({"employee_id": eid, "payroll_uuid": puuid,
+                rows.append({"gusto_uuid": comp.get("employee_uuid"), "payroll_uuid": puuid,
                              "period_start": pp.get("start_date"), "period_end": pp.get("end_date"),
                              **mins, "adj_min": round(mins["reg_min"] + mins["ot_min"] * 1.5 + mins["dot_min"] * 2.0),
                              "pto_min": pto, "updated_at": now})
             time.sleep(0.15)
-        upsert(cur, "gusto.payweek", ("employee_id", "payroll_uuid"), rows)
-    return {"payrolls": len(payrolls), "rows": len(rows), "window": [start, end],
-            "unmatched_gusto_uuids": sorted(u for u in unmatched if u)}
-
-
-def norm_name(first, last):
-    return f"{first} {SUFFIX_RE.sub('', last).strip()}".lower()
+        upsert(cur, "gusto.payweek", ("gusto_uuid", "payroll_uuid"), rows)
+    return {"payrolls": len(payrolls), "rows": len(rows), "window": [start, end]}
 
 
 def clock_min(seg, end=False):
@@ -165,20 +152,9 @@ def land_punch_csv(db_url, csv_text, source_file=None):
     """Gusto time-tracking CSV -> gusto.punch_day, raw (no zone fix, no holidays, no call-outs)."""
     rows = parse_punch_csv(csv_text, source_file)
     with psycopg.connect(db_url) as c, c.cursor() as cur:
-        cur.execute("select first_name, last_name, id from public.employees "
-                    "where first_name is not null and last_name is not null")
-        emp = {norm_name(f, l): i for f, l, i in cur.fetchall()}
-        unmatched = set()
-        for row in rows:
-            last, _, first = row["employee_name"].partition(",")
-            row["employee_id"] = emp.get(norm_name(first.strip(), last.strip())) if first else None
-            if row["employee_id"] is None:
-                unmatched.add(row["employee_name"])
-        rows = [r for r in rows if r["employee_id"] is not None]
-        upsert(cur, "gusto.punch_day", ("employee_id", "day"), rows)
+        upsert(cur, "gusto.punch_day", ("employee_name", "day"), rows)  # Core links each name to an employee
     days = [r["day"] for r in rows]
-    return {"rows": len(rows), "day_range": [min(days), max(days)] if days else None,
-            "unmatched_names": sorted(unmatched)}
+    return {"rows": len(rows), "day_range": [min(days), max(days)] if days else None}
 
 
 def main(kind: str, start: str = "", end: str = "", days_back: int = 45,
@@ -202,5 +178,4 @@ if __name__ == "__main__":  # parser self-check, no network or database
     a, b = parse_punch_csv(sample, "t.csv")
     assert (a["clock_in_min"], a["clock_out_min"], a["worked_min"]) == (388, 884, 465), a
     assert b["clock_in_min"] is None and b["pto_min"] == 480 and b["punches"] is None, b
-    assert norm_name("John", "Doe Jr.") == "john doe"
     print("ok")

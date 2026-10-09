@@ -1,9 +1,9 @@
 # extra_requirements:
 # psycopg[binary]
 # wmill
-# Land Samsara facts into the warehouse, raw as they arrived: samsara.driver_day (driver
-# reports) and samsara.stop / leg / vehicle (engineStates + GPS per truck-day). No business
-# rules: truck-by-date, tech attribution and stop classification are Core.
+# Land Samsara facts into the warehouse, raw as they arrived: samsara.stop / leg / vehicle (engineStates + GPS per
+# truck-day). No business rules and no driver identity: which tech drove which truck comes from Core, by matching
+# stops to visited addresses (core.match_truck_days).
 # Windmill path: f/warehouse/land_samsara.py; only main() touches Windmill.
 import json
 import math
@@ -54,36 +54,6 @@ def bounds(d):
     s = datetime(d.year, d.month, d.day, tzinfo=ET)
     n = d + timedelta(days=1)
     return s, datetime(n.year, n.month, n.day, tzinfo=ET)
-
-
-def land_driver_days(db_url, tok, start, end=None):
-    """Per driver-day idle (fuel-energy report) + drive (safety score) -> samsara.driver_day."""
-    with psycopg.connect(db_url) as c, c.cursor() as cur:
-        # ponytail: identity resolved at land so the PK holds as today; Core re-resolves if this moves
-        cur.execute("select gusto_uuid::text, id from public.employees where gusto_uuid is not null")
-        emp = dict(cur.fetchall())
-        rows, unmatched, now = [], set(), datetime.now(timezone.utc).isoformat()
-        for d in days(start, end):
-            s, e = bounds(d)
-            r = sget(tok, "/fleet/reports/drivers/fuel-energy",
-                     {"startDate": s.isoformat(), "endDate": (e - timedelta(seconds=1)).isoformat()})
-            r.raise_for_status()
-            for rep in r.json().get("data", {}).get("driverReports", []):
-                drv = rep.get("driver", {})
-                eid = emp.get((drv.get("externalIds") or {}).get("gusto"))
-                if eid is None:
-                    if drv.get("name"):
-                        unmatched.add(drv["name"])
-                    continue
-                sc = sget(tok, f"/v1/fleet/drivers/{drv['id']}/safety/score",
-                          {"startMs": int(s.timestamp() * 1000), "endMs": int(e.timestamp() * 1000)})
-                rows.append({"employee_id": eid, "day": str(d),
-                             "drive_ms": sc.json().get("totalTimeDrivenMs") if sc.status_code == 200 else None,
-                             "idle_ms": rep.get("engineIdleTimeDurationMs"),
-                             "samsara_driver_id": str(drv["id"]), "updated_at": now})
-                time.sleep(0.2)
-        upsert(cur, "samsara.driver_day", ("employee_id", "day"), rows)
-    return {"rows": len(rows), "unmatched_drivers": sorted(unmatched)}
 
 
 def dist_m(a, b):
@@ -220,13 +190,11 @@ def land_truck_days(db_url, tok, start, end=None, name_filter="MNT|Spare"):
 
 
 def main(kind: str, start: str = "", end: str = "", name_filter: str = "MNT|Spare"):
-    """kind: 'driver_days' | 'truck_days'. start/end are local dates; default yesterday."""
+    """kind: 'truck_days'. start/end are local dates; default yesterday."""
     import wmill
     db, tok = wmill.get_variable("f/warehouse/land_url"), wmill.get_variable("f/samsara/api_token").strip()
     start = start or str(datetime.now(ET).date() - timedelta(days=1))
     end = end or start
-    if kind == "driver_days":
-        return land_driver_days(db, tok, start, end)
     if kind == "truck_days":
         return land_truck_days(db, tok, start, end, name_filter)
     raise ValueError(f"unknown kind {kind!r}")
