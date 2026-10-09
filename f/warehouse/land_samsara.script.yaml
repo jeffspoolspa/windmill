@@ -19,7 +19,7 @@ schema:
     name_filter:
       type: string
       description: ''
-      default: MNT|Spare
+      default: MNT|Spare|Savannah
       originalType: string
     start:
       type: string

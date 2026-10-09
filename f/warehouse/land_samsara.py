@@ -144,7 +144,7 @@ def truck_day(tok, v, d):
     return rows_s, rows_l
 
 
-def land_truck_days(db_url, tok, start, end=None, name_filter="MNT|Spare"):
+def land_truck_days(db_url, tok, start, end=None, name_filter="MNT|Spare|Savannah"):
     """All vehicles -> samsara.vehicle; per matching truck-day, stops + legs -> samsara.stop / samsara.leg.
     Each landed truck-day replaces its previous rows, so a rerun with fewer stops leaves no stale tail."""
     vehicles, after = [], None
@@ -189,7 +189,7 @@ def land_truck_days(db_url, tok, start, end=None, name_filter="MNT|Spare"):
             "stops": len(stops), "legs": len(legs), "errors": errors}
 
 
-def main(kind: str, start: str = "", end: str = "", name_filter: str = "MNT|Spare"):
+def main(kind: str, start: str = "", end: str = "", name_filter: str = "MNT|Spare|Savannah"):
     """kind: 'truck_days'. start/end are local dates; default yesterday."""
     import wmill
     db, tok = wmill.get_variable("f/warehouse/land_url"), wmill.get_variable("f/samsara/api_token").strip()
