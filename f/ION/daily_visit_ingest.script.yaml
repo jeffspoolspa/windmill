@@ -1,9 +1,0 @@
-summary: 'Daily log-detail visit sync: ingest_day_logs(window) +
-  recover_orphan_tasks() + reconcile_visit_locations(). Self-healing: every
-  visit gets event_id + customer + task + location. Runs on chromium (ION
-  login).'
-description: ''
-lock: '!inline f/ION/daily_visit_ingest.script.lock'
-kind: script
-schema: null
-tag: chromium
