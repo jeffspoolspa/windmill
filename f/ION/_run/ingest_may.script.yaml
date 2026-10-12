@@ -1,7 +1,0 @@
-summary: 'One-shot runner: log-based re-ingest of May 2026 visits in weekly
-  chunks (commits each), no args'
-description: ''
-lock: '!inline f/ION/_run/ingest_may.script.lock'
-kind: script
-schema: null
-tag: chromium
