@@ -124,10 +124,9 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
     const taskRows = eventIds.length ? await sql<any[]>`
       SELECT DISTINCT ON (ts.ion_task_id)
              ts.ion_task_id, ts.task_id, t.customer_id,
-             t.billing_method, rt.task_price_cents
+             t.billing_method
       FROM maintenance.task_schedules ts
       JOIN maintenance.tasks t ON t.id = ts.task_id
-      LEFT JOIN ion.recurring_tasks rt ON rt.ion_task_id = ts.ion_task_id
       WHERE ts.ion_task_id = ANY(${eventIds})
       ORDER BY ts.ion_task_id, ts.active DESC, ts.updated_at DESC` : []
     const tmap: Record<string, any> = {}
@@ -139,7 +138,9 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
       v.task_id = tm?.task_id ?? null
       v.customer_id = tm?.customer_id ?? null
       v.billing_method = tm?.billing_method ?? "per_visit"
-      v.price_cents = (tm?.task_price_cents ?? null) ?? priceFromService(v.service_type)
+      // ion.recurring_tasks stopped syncing 2026-06-02 and is dropped (2026-10-12):
+      // the service type's price is the only price this pipeline sets.
+      v.price_cents = priceFromService(v.service_type)
       v.actual_tech_id = (v.submitted_by && aliasMap[v.submitted_by]) ? aliasMap[v.submitted_by] : null
       if (v.task_id) resolved++
       if (v.actual_tech_id) techLinked++
@@ -210,3 +211,4 @@ export async function main(start_date: string, end_date: string, dry_run: boolea
   }
   return result
 }
+

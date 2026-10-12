@@ -4,4 +4,35 @@ description: only_log_id targets one visit refresh; retraction still compares
   the FULL day list.
 lock: '!inline f/ION/ingest_day_logs.script.lock'
 kind: script
-schema: null
+schema:
+  properties:
+    dry_run:
+      type: boolean
+      description: ''
+      default: true
+    end_date:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    only_log_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    sb:
+      type: object
+      description: ''
+      default: null
+    sess:
+      type: object
+      description: ''
+      default: null
+    start_date:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+  required:
+    - start_date
+    - end_date
