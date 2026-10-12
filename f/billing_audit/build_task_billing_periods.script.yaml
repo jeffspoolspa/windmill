@@ -2,6 +2,20 @@ summary: Build task_billing_periods (invoice promises) — task-driven; ADR 007 
   location; Model B priced consumables; locked-month skip
 description: ''
 lock: '!inline f/billing_audit/build_task_billing_periods.script.lock'
-has_on_behalf_of: false
 kind: script
-schema: null
+schema:
+  properties:
+    dry_run:
+      type: boolean
+      description: ''
+      default: true
+    lock_through:
+      type: object
+      description: ''
+      default: null
+    supabase_connection:
+      type: object
+      description: ''
+      default: null
+  required:
+    - supabase_connection

@@ -56,21 +56,13 @@ WITH locked_months AS (
 ),
 task_loc AS (
   -- ADR 007 §9: a task carries customer_id, NOT a location (tasks.service_location_id was
-  -- dropped in #30). qbo_customer_id = the CANONICAL ion.recurring_tasks.qbo_customer_id
-  -- (keyed by the task's ion_task_id) -- AUTHORITATIVE over address-resolved links that
-  -- mis-map duplicate customers sharing an address (STEMPF<->HEATON, ...); fall back to the
-  -- task customer's qbo id. service_location = the customer's confirmed PRIMARY location
+  -- dropped in #30). qbo_customer_id = the task customer's own qbo id (ion.recurring_tasks,
+  -- the stale copy once preferred here, stopped syncing 2026-06-02 and is dropped 2026-10-12).
+  -- service_location = the customer's confirmed PRIMARY location
   -- (public.v_customer_primary_location), the routing/billing location per ADR 007 §9.
   SELECT t.id AS task_id,
          cpl.service_location_id,
-         COALESCE(
-           (SELECT rt.qbo_customer_id
-            FROM maintenance.task_schedules ts
-            JOIN ion.recurring_tasks rt ON rt.ion_task_id = ts.ion_task_id
-            WHERE ts.task_id = t.id AND rt.qbo_customer_id IS NOT NULL
-            ORDER BY ts.active DESC, ts.updated_at DESC LIMIT 1),
-           c.qbo_customer_id
-         ) AS qbo_customer_id
+         c.qbo_customer_id AS qbo_customer_id
   FROM maintenance.tasks t
   JOIN public."Customers" c ON c.id = t.customer_id
   LEFT JOIN public.v_customer_primary_location cpl ON cpl.customer_id = t.customer_id
@@ -289,3 +281,4 @@ def main(supabase_connection, dry_run=True, lock_through=None):
         raise
     finally:
         conn.close()
+
