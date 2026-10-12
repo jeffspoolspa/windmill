@@ -1,8 +1,0 @@
-summary: Close "dropped" tasks (active in DB but absent from ION's active
-  report) by their LIVE ION end date (get_task_detail), invariant-guarded.
-  Committing, batched, advisory-locked. dry_run default.
-description: ''
-lock: '!inline f/ION/close_dropped_tasks.script.lock'
-kind: script
-schema: null
-tag: chromium
