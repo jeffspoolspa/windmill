@@ -1,9 +1,0 @@
-summary: Login + return full session JSON for external session-lifetime probing
-description: One-shot login that returns the entire IonSession JSON (cookies +
-  cfClientId + ionOrigin + timestamps). Used to capture a session that an
-  external observer (curl from a different host, polling at intervals) can
-  re-use to measure how long ION accepts the cookies before forcing re-login.
-lock: '!inline f/ION/_discover/emit_session.script.lock'
-kind: script
-schema: null
-tag: chromium
