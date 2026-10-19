@@ -1,9 +1,24 @@
 summary: Charge worker; claim guard = billing.invoice_ready() (gate and guard
   are the same code)
-description: ''
+description: 'fix: a claimed unit stays claimed until it finishes or its
+  10-minute lease runs out, so overlapping runs cannot charge the same invoice
+  twice'
 lock: '!inline f/service_billing/process_invoice.script.lock'
 concurrency_key: qbo_writer
 concurrency_time_window_s: 5
 concurrent_limit: 1
 kind: script
-schema: null
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    qbo_invoice_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    qbo_invoice_ids:
+      type: ''
+      description: ''
+      default: null
+  required: []

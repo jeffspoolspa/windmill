@@ -17,14 +17,25 @@ from f.service_billing.process_one import process_one
 
 MAX_UNITS = 1000  # runaway backstop; a drain normally ends at queue-empty
 
+# A claimed unit is its run's until it finishes or its lease runs out. The row
+# lock ends when the claim commits, so FOR UPDATE alone never kept a second
+# run off a unit still in flight — only the qbo_writer limit did, and an empty
+# concurrency key is how the pre-process drains overlapped on 2026-10-07. Here
+# an overlap would be a second charge. The lease only re-opens a unit whose
+# run died without releasing it.
+LEASE_MINUTES = 10
+NOT_IN_FLIGHT = (f"(started_at IS NULL "
+                 f"OR started_at < now() - interval '{LEASE_MINUTES} minutes')")
+
 # THE GATE LIVES IN THE CLAIM: readiness is checked atomically with the row
 # lock, so a state change can never race a claim (the dequeue trigger clears
 # waiting rows; this closes the delete-vs-claim window for good).
-CLAIM = """
+CLAIM = f"""
 UPDATE billing.service_charge_queue
 SET started_at = now(), attempts = attempts + 1
 WHERE id = (SELECT id FROM billing.service_charge_queue
             WHERE finished_at IS NULL AND attempts < 3
+              AND {NOT_IN_FLIGHT}
               AND billing.invoice_ready(qbo_invoice_id)
             ORDER BY priority, received_at
             FOR UPDATE SKIP LOCKED LIMIT 1)
@@ -119,9 +130,10 @@ def main(qbo_invoice_id: str = None, qbo_invoice_ids: list = None):
         # is at-most-once. If work is still claimable when this run ends (hit
         # MAX_UNITS, or a unit was released for retry) it wakes the next run
         # itself. An empty queue wakes nothing, so an idle system stays idle.
-        remaining = query_one(conn, """
+        remaining = query_one(conn, f"""
             SELECT count(*) AS n FROM billing.service_charge_queue
              WHERE finished_at IS NULL AND attempts < 3
+               AND {NOT_IN_FLIGHT}
                AND billing.invoice_ready(qbo_invoice_id)""")
         if remaining and remaining["n"]:
             execute_sql(conn, "SELECT billing.wake_queue_worker(%s, %s::jsonb)",
@@ -149,3 +161,4 @@ def _selfcheck():
 
 if __name__ == "__main__":
     _selfcheck()
+
