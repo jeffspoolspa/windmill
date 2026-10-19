@@ -15,7 +15,9 @@
 # three ways: enqueue what's missing, retire what's moot, claim what's live.
 # One QboClient for the whole drain — one token refresh, not one per invoice.
 #
-# Concurrency: concurrent_limit 1.
+# Concurrency: concurrency_key qbo_writer, concurrent_limit 1 (it writes QBO).
+# The claim lease below is the guarantee; the limit is the backstop. An empty
+# key disables the limit — that is how three drains overlapped on 2026-10-07.
 
 import time
 
@@ -72,6 +74,16 @@ WHERE q.finished_at IS NULL AND NOT EXISTS (
   WHERE i.qbo_invoice_id = q.qbo_invoice_id AND {ELIGIBLE})
 """
 
+# A claimed row is someone's until it finishes or its lease runs out. The row
+# lock ends when the claim commits, so FOR UPDATE alone never kept a second
+# run off a unit still in flight: on 2026-10-07 three overlapping runs each
+# claimed Brimdal 8118943 (attempts 3, no error), applied her $150 deposit
+# twice, and the second apply cut it to $34.23 — the card was charged $150.
+# The lease only re-opens a unit whose run died without RELEASE.
+LEASE_MINUTES = 10
+NOT_IN_FLIGHT = (f"(q.started_at IS NULL "
+                 f"OR q.started_at < now() - interval '{LEASE_MINUTES} minutes')")
+
 # Eligibility is re-checked here, not just in RETIRE: a drain can run for a
 # while, and a work order skipped in the UI mid-drain must not still be
 # enriched. Claiming a row is the only moment that decision is safe to make.
@@ -82,6 +94,7 @@ WHERE id = (SELECT q.id FROM billing.service_preprocess_queue q
             JOIN billing.invoices i ON i.qbo_invoice_id = q.qbo_invoice_id
             JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
             WHERE q.finished_at IS NULL AND q.attempts < 3
+              AND {NOT_IN_FLIGHT}
               AND billing.credits_cache_fresh()
               AND {ELIGIBLE}
             ORDER BY q.priority, q.received_at
@@ -153,6 +166,7 @@ def main():
               JOIN billing.invoices i ON i.qbo_invoice_id = q.qbo_invoice_id
               JOIN public.work_orders w ON w.qbo_invoice_id = i.qbo_invoice_id
              WHERE q.finished_at IS NULL AND q.attempts < 3
+               AND {NOT_IN_FLIGHT}
                AND billing.credits_cache_fresh()
                AND {ELIGIBLE}""", ())
         if remaining and remaining["n"]:
@@ -165,3 +179,4 @@ def main():
                 "elapsed_s": round(time.time() - started, 1)}
     finally:
         conn.close()
+

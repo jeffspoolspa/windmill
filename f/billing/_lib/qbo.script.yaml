@@ -1,5 +1,9 @@
 summary: write primitives return their response bodies (free verified echoes)
-description: write primitives return their response bodies (free verified echoes)
+description: 'fix: apply_credit raises the line of an invoice the payment
+  already links instead of appending a duplicate (QBO replaced the link:
+  8118943)'
 lock: '!inline f/billing/_lib/qbo.script.lock'
 kind: script
-schema: {}
+schema:
+  properties: {}
+  required: []

@@ -515,6 +515,25 @@ def fetch_qbo_classes(access_token, realm_id):
     return result
 
 
+def link_invoice_line(lines, invoice_id, amount):
+    """A Payment's lines with `amount` more applied to `invoice_id`. Pure.
+
+    QBO keeps ONE link per invoice on a Payment: a second line naming the
+    same invoice replaces the first rather than adding to it. So an invoice
+    the payment already pays has its line raised; only a new invoice gets a
+    new line. (2026-10-07: a duplicate line cut Brimdal's $150 deposit on
+    8118943 to $34.23, and the card was charged the $150 it reopened.)"""
+    out = [dict(line) for line in lines]
+    for line in out:
+        if any(t.get("TxnType") == "Invoice" and str(t.get("TxnId")) == str(invoice_id)
+               for t in line.get("LinkedTxn") or []):
+            line["Amount"] = round(float(line.get("Amount") or 0) + amount, 2)
+            return out
+    out.append({"Amount": amount,
+                "LinkedTxn": [{"TxnId": invoice_id, "TxnType": "Invoice"}]})
+    return out
+
+
 def apply_credit(credit_id, credit_type, invoice_id, customer_ref, amount,
                  access_token, realm_id):
     """Apply ONE existing credit to ONE invoice. credit_type 'credit_memo'
@@ -540,10 +559,7 @@ def apply_credit(credit_id, credit_type, invoice_id, customer_ref, amount,
         if not pmt_resp.ok:
             return {"success": False, "error": f"fetch payment: {pmt_resp.status_code}"}
         payment = pmt_resp.json().get("Payment", {})
-        payment.setdefault("Line", []).append({
-            "Amount": amount,
-            "LinkedTxn": [{"TxnId": invoice_id, "TxnType": "Invoice"}],
-        })
+        payment["Line"] = link_invoice_line(payment.get("Line") or [], invoice_id, amount)
         payment["sparse"] = True
         resp = qbo_post("payment", access_token, realm_id, payment)
         if not resp.ok:
@@ -642,6 +658,17 @@ def _selfcheck():
     note = build_payment_note("June Pool Maintenance | Inv# 456",
                               {"charge_id": "ch1", "auth_code": "A1",
                                "card_type": "Visa", "card_last4": "4242"})
+    held = [{"Amount": 150.0, "LinkedTxn": [{"TxnId": "76448", "TxnType": "Invoice"}]}]
+    raised = link_invoice_line(held, "76448", 34.23)
+    ok("credit on an invoice already linked raises its line, never duplicates",
+       len(raised) == 1 and raised[0]["Amount"] == 184.23 and held[0]["Amount"] == 150.0)
+    added = link_invoice_line(held, "99", 10.0)
+    ok("credit on a new invoice adds a line",
+       len(added) == 2 and added[1]["Amount"] == 10.0
+       and added[1]["LinkedTxn"][0]["TxnId"] == "99")
+    ok("first credit on an empty payment adds one line",
+       link_invoice_line([], "76448", 150.0)[0]["Amount"] == 150.0)
+
     ok("payment note carries prefix + charge facts",
        note.startswith("June Pool Maintenance | Inv# 456 | Charge ID: ch1")
        and "Visa x4242" in note)
@@ -661,3 +688,4 @@ def main():
 
 if __name__ == "__main__":
     print(main())
+
