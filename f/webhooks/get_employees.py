@@ -10,6 +10,9 @@ MAINTENANCE_DEPARTMENT_ID = "757659e3-d73f-48c3-999f-6f071f1e3587"
 TECH_EMAIL_DOMAIN = "techs.jeffspoolspa.internal"
 DEFAULT_TECH_PASSWORD = "Swimming#1"
 NAME_SUFFIX_RE = re.compile(r"[\s,]+(jr|sr|ii|iii|iv|v)\.?$", re.IGNORECASE)
+# Gusto department names carry an office prefix ("SAV Maintenance"); the office lives in branch_id.
+MAINTENANCE_RE = re.compile(r"maintenance", re.IGNORECASE)
+BAN_FOREVER = "876000h"
 
 
 def gusto_get(url, headers, max_retries=5):
@@ -63,16 +66,38 @@ def unique_tech_username(supabase, base, employee_id):
         suffix += 1
 
 
-def ensure_tech_login(supabase, emp_row):
-    """Create a tech login for active maintenance employees without one.
-    Returns True if a new login was created, False otherwise."""
-    if emp_row.get("department_id") != MAINTENANCE_DEPARTMENT_ID:
-        return False
-    if emp_row.get("status") != "active":
-        return False
-    if emp_row.get("auth_user_id"):
-        return False
+def login_action(emp_row, banned_ids):
+    """What this employee's login needs: "create", "ban", "unban" or None.
+    Logins are banned, never deleted: audit rows and app_roles reference auth.users."""
+    auth_user_id = emp_row.get("auth_user_id")
+    status = emp_row.get("status")
+    if auth_user_id:
+        if status == "terminated" and auth_user_id not in banned_ids:
+            return "ban"
+        if status == "active" and auth_user_id in banned_ids:
+            return "unban"
+        return None
+    if status == "active" and emp_row.get("department_id") == MAINTENANCE_DEPARTMENT_ID:
+        return "create"
+    return None
 
+
+def sync_tech_login(supabase, emp_row, banned_ids):
+    """Apply login_action. Returns the action taken, or None."""
+    action = login_action(emp_row, banned_ids)
+    if action in ("ban", "unban"):
+        supabase.auth.admin.update_user_by_id(
+            emp_row["auth_user_id"], {"ban_duration": BAN_FOREVER if action == "ban" else "none"}
+        )
+        print(f"{action} login {emp_row.get('tech_username')} for {emp_row.get('first_name')} {emp_row.get('last_name')}")
+        return action
+    if action == "create" and create_tech_login(supabase, emp_row):
+        return action
+    return None
+
+
+def create_tech_login(supabase, emp_row):
+    """Create a tech login. Returns True if a new login was created, False otherwise."""
     base = derive_base_username(emp_row.get("first_name"), emp_row.get("last_name"))
     if not base or len(base) < 2:
         print(f"Skipping tech login: name doesn't sanitize to a valid username (emp {emp_row.get('id')})")
@@ -128,8 +153,11 @@ def main():
     emp_response.raise_for_status()
     employees = emp_response.json()
 
+    # ponytail: one page of 1000 auth users; paginate if the project ever outgrows it
+    banned_ids = {u.id for u in supabase.auth.admin.list_users(page=1, per_page=1000) if u.banned_until}
+
     results = []
-    new_logins = 0
+    logins = {"create": 0, "ban": 0, "unban": 0}
 
     for emp in employees:
         emp_uuid = emp['uuid']
@@ -140,7 +168,9 @@ def main():
 
         dept_id = None
         dept_name = emp_data.get('department')
-        if dept_name:
+        if dept_name and MAINTENANCE_RE.search(dept_name):
+            dept_id = MAINTENANCE_DEPARTMENT_ID
+        elif dept_name:
             dept = supabase.table('departments').select('id').eq('name', dept_name).execute()
             if dept.data:
                 dept_id = dept.data[0]['id']
@@ -206,11 +236,13 @@ def main():
         results.append(emp_row)
 
         try:
-            if ensure_tech_login(supabase, emp_row):
-                new_logins += 1
+            action = sync_tech_login(supabase, emp_row, banned_ids)
+            if action:
+                logins[action] += 1
         except Exception as e:
-            print(f"Error while ensuring tech login for {emp_uuid}: {e}")
+            print(f"Error while syncing tech login for {emp_uuid}: {e}")
 
         time.sleep(0.15)
 
-    return {"synced": len(results), "new_tech_logins": new_logins}
+    return {"synced": len(results), "new_tech_logins": logins["create"],
+            "banned_logins": logins["ban"], "unbanned_logins": logins["unban"]}
