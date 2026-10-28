@@ -1,0 +1,32 @@
+summary: 'Nightly email: everything techs signed out in the field app today (by
+  tech + item totals)'
+description: Reads public.inventory_sign_outs for one ET calendar day, joins
+  employees + items, and emails an HTML report (grouped by tech, then item
+  totals) via Gmail API as jpsbilling@jeffspoolspa.com using the
+  u/carter/gmail_gcp_service_account resource. No lead logging. dry_run=True
+  (default) returns the report without sending.
+lock: '!inline f/inventory/daily_signout_report.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    cc:
+      type: ''
+      description: ''
+      default: null
+    dry_run:
+      type: boolean
+      description: ''
+      default: true
+    report_date:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    to:
+      type: string
+      description: ''
+      default: mary@jeffspoolspa.com
+      originalType: string
+  required: []
