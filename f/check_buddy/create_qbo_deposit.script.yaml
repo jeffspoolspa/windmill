@@ -2,8 +2,32 @@ summary: create_qbo_deposit
 description: Creates QBO Deposit entities via API. Accepts a single deposit_id
   or an array of deposit_ids for batch processing. Each deposit gets its own QBO
   Deposit with payment lines, retail lines, and cash lines. Includes pre-flight
-  sync check and refuses deposits where a non-retail check has no/partial linked
-  payment. Uses psycopg2 for Supabase access.
+  sync check, refuses deposits where a non-retail check has no/partial linked
+  payment, and refuses deposits whose retail/cash lines post to an inactive or
+  missing QBO account. Uses psycopg2 for Supabase access.
 lock: '!inline f/check_buddy/create_qbo_deposit.script.lock'
 kind: script
-schema: null
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    bank_account_id:
+      type: string
+      description: ''
+      default: '74'
+      originalType: string
+    deposit_date:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    deposit_id:
+      type: string
+      description: ''
+      default: null
+      originalType: string
+    deposit_ids:
+      type: ''
+      description: ''
+      default: null
+  required: []

@@ -74,6 +74,36 @@ def read_qbo_payment(base_url: str, headers: dict, payment_id: str) -> dict:
         return {"exists": False, "deleted": True, "error": str(e)}
 
 
+def read_qbo_accounts(base_url: str, headers: dict, account_ids: list) -> list:
+    """Read accounts by Id, inactive ones included (QBO hides them by default). Raises on a failed read."""
+    ids = sorted({a for a in account_ids if str(a).isdigit()})
+    if not ids:
+        return []
+    id_list = ",".join(f"'{a}'" for a in ids)
+    response = requests.get(
+        f"{base_url}/query",
+        headers=headers,
+        params={"query": f"select * from Account where Active in (true, false) and Id in ({id_list})"},
+    )
+    if not response.ok:
+        raise Exception(f"QBO account read failed: {response.status_code} - {response.text}")
+    return response.json().get("QueryResponse", {}).get("Account", [])
+
+
+def account_issues(account_ids: list, accounts: list) -> list:
+    """Accounts from the QBO query that are inactive, or ids QBO did not return at all."""
+    by_id = {a.get("Id"): a for a in accounts}
+    issues = []
+    for aid in sorted(set(account_ids)):
+        a = by_id.get(aid)
+        if a is None:
+            issues.append({"account_id": aid, "message": f"QBO account {aid} not found"})
+        elif not a.get("Active", True):
+            issues.append({"account_id": aid, "account_name": a.get("Name"),
+                           "message": f"QBO account {aid} '{a.get('Name')}' is inactive"})
+    return issues
+
+
 def process_single_deposit(cur, base_url: str, headers: dict, deposit_id: str, bank_account_id: str, deposit_date: str) -> dict:
     """Process a single deposit: pre-flight check, create QBO deposit, update records."""
     now = datetime.now(timezone.utc).isoformat()
@@ -173,6 +203,20 @@ def process_single_deposit(cur, base_url: str, headers: dict, deposit_id: str, b
     for ce in cash_entries:
         if not ce.get("qbo_account_id"):
             return {"success": False, "deposit_id": deposit_id, "error": f"Cash entry {ce['id']} missing QBO income account"}
+    
+    # Pre-flight: every line account must still be active in QBO. The bookkeeper edits the
+    # chart of accounts; QBO's own refusal (code 2500) names the account by number, not Id.
+    line_account_ids = [str(rc["retail_qbo_account_id"]) for rc in retail_checks] + [str(ce["qbo_account_id"]) for ce in cash_entries]
+    if line_account_ids:
+        bad_accounts = account_issues(line_account_ids, read_qbo_accounts(base_url, headers, line_account_ids))
+        if bad_accounts:
+            return {
+                "success": False,
+                "deposit_id": deposit_id,
+                "error": "inactive_account",
+                "account_issues": bad_accounts,
+                "message": "; ".join(i["message"] for i in bad_accounts) + ". Pick an active income account on the affected checks/cash entries and retry.",
+            }
     
     # Pre-flight: verify each payment exists in QBO with correct amount
     sync_issues = []
