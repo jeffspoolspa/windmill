@@ -1,0 +1,22 @@
+summary: ''
+description: ''
+lock: '!inline f/ion_outage/sign_photos.script.lock'
+kind: script
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    expires_in:
+      type: integer
+      description: ''
+      default: null
+    paths:
+      type: array
+      description: ''
+      default: null
+      items:
+        type: string
+      originalType: string[]
+  required:
+    - paths
+    - expires_in
