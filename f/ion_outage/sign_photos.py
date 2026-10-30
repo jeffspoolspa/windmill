@@ -20,6 +20,6 @@ def sign(base: str, key: str, paths: list[str], expires_in: int) -> list[dict]:
     return [{"path": s["path"], "url": f"{base}/storage/v1{s['signedURL']}"} for s in signed]
 
 
-def main(paths: list[str], expires_in: int = 30 * 24 * 3600) -> str:
+def main(paths: list[str], expires_in: int = 7 * 24 * 3600) -> str:  # storage refuses 30 days; 7 holds
     base = wmill.get_variable("f/SUPABASE/URL").rstrip("/")
     return json.dumps(sign(base, wmill.get_variable("f/SUPABASE/SERVICE_ROLE_KEY"), paths, expires_in))
