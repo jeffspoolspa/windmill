@@ -1,5 +1,20 @@
 summary: Customer cache handler
-description: + fetched_at stamp (Customers joins the supersession family, 2026-07-20)
+description: + ShipAddr mirrored to Customers.ship_* for the card-collection
+  lookup (2026-11-05)
 lock: '!inline f/service_billing/refresh_customer.script.lock'
 kind: script
-schema: null
+schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  properties:
+    qbo_body:
+      type: object
+      description: ''
+      default: null
+      properties: {}
+    qbo_customer_id:
+      type: string
+      description: ''
+      originalType: string
+  required:
+    - qbo_customer_id

@@ -116,6 +116,13 @@ def upsert_customer(conn, qbo_cust):
     except (ValueError, TypeError):
         latitude = longitude = None
 
+    # ShipAddr is QBO's service address. Kept as its own columns so the public
+    # card-collection lookup can find a customer added in QBO before ION has a
+    # service location for them; service_locations stays ION's (ADR 007).
+    ship_addr = qbo_cust.get("ShipAddr") or {}
+    ship_parts = [ship_addr.get("Line1"), ship_addr.get("Line2"), ship_addr.get("Line3")]
+    ship_street = ", ".join(p for p in ship_parts if p)
+
     qbo_last_updated = parse_qbo_timestamp(
         (qbo_cust.get("MetaData") or {}).get("LastUpdatedTime")
     )
@@ -124,10 +131,12 @@ def upsert_customer(conn, qbo_cust):
     cur.execute('''
         INSERT INTO public."Customers"
           (qbo_customer_id, display_name, first_name, last_name, company,
-           street, city, state, zip, phone, email,
+           street, city, state, zip,
+           ship_street, ship_city, ship_state, ship_zip, phone, email,
            is_active, balance, latitude, longitude,
            qbo_last_updated, imported_at, fetched_at, deleted_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, now(), now(), NULL)
         ON CONFLICT (qbo_customer_id) DO UPDATE SET
           display_name     = EXCLUDED.display_name,
@@ -138,6 +147,10 @@ def upsert_customer(conn, qbo_cust):
           city             = EXCLUDED.city,
           state            = EXCLUDED.state,
           zip              = EXCLUDED.zip,
+          ship_street      = EXCLUDED.ship_street,
+          ship_city        = EXCLUDED.ship_city,
+          ship_state       = EXCLUDED.ship_state,
+          ship_zip         = EXCLUDED.ship_zip,
           phone            = EXCLUDED.phone,
           email            = EXCLUDED.email,
           is_active        = EXCLUDED.is_active,
@@ -156,7 +169,10 @@ def upsert_customer(conn, qbo_cust):
         RETURNING id, qbo_customer_id, display_name, is_active
     ''', (
         qbo_customer_id, display_name, given_name, family_name, company_name,
-        street or None, city, state, zip_code, primary_phone, primary_email,
+        street or None, city, state, zip_code,
+        ship_street or None, ship_addr.get("City"),
+        ship_addr.get("CountrySubDivisionCode"), ship_addr.get("PostalCode"),
+        primary_phone, primary_email,
         is_active, balance, latitude, longitude, qbo_last_updated,
     ))
     row = cur.fetchone()
